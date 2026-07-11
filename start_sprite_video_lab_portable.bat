@@ -1,9 +1,16 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+set "SCRIPT_DIR=%~dp0"
+if "%SPRITE_VIDEO_LAB_APP_ROOT%"=="" (
+  set "APP_ROOT=%SCRIPT_DIR%"
+  if not exist "%SCRIPT_DIR%server.py" set "APP_ROOT=%SCRIPT_DIR%.."
+) else (
+  set "APP_ROOT=%SPRITE_VIDEO_LAB_APP_ROOT%"
+)
+for %%i in ("%APP_ROOT%") do set "APP_ROOT=%%~fi"
+cd /d "%APP_ROOT%"
 
-set "APP_ROOT=%~dp0"
-set "RUNTIME_ROOT=%APP_ROOT%runtime"
+set "RUNTIME_ROOT=%APP_ROOT%\runtime"
 set "PYTHON_ROOT=%RUNTIME_ROOT%\python"
 set "PYTHON_EXE=%PYTHON_ROOT%\python.exe"
 set "FFMPEG_ROOT=%RUNTIME_ROOT%\ffmpeg"
@@ -37,10 +44,10 @@ if not exist "%SPRITE_VIDEO_LAB_FFMPEG_DIR%\ffmpeg.exe" (
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$serverPath = [System.IO.Path]::GetFullPath('%~dp0server.py');" ^
+  "$serverPath = [System.IO.Path]::GetFullPath('%APP_ROOT%\server.py');" ^
   "$escaped = [Regex]::Escape($serverPath);" ^
   "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match $escaped } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }"
 
-start "Sprite Video Lab Server" "%PYTHON_EXE%" "%~dp0server.py" --serve --host "%SPRITE_VIDEO_LAB_HOST%" --port "%SPRITE_VIDEO_LAB_PORT%"
+start "Sprite Video Lab Server" "%PYTHON_EXE%" "%APP_ROOT%\server.py" --serve --host "%SPRITE_VIDEO_LAB_HOST%" --port "%SPRITE_VIDEO_LAB_PORT%"
 timeout /t 2 >nul
 start "" http://%SPRITE_VIDEO_LAB_HOST%:%SPRITE_VIDEO_LAB_PORT%

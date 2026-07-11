@@ -92,6 +92,7 @@ Ensure-Directory -PathValue $OutputRoot
 $outputRootResolved = Resolve-ExistingPath -PathValue $OutputRoot
 
 $bundleRoot = Join-Path $outputRootResolved "SpriteForgeLab"
+$internalRoot = Join-Path $bundleRoot "_internal"
 $runtimeRoot = Join-Path $bundleRoot "runtime"
 $pythonRuntimeRoot = Join-Path $runtimeRoot "python"
 $ffmpegRuntimeRoot = Join-Path $runtimeRoot "ffmpeg"
@@ -103,18 +104,16 @@ if (Test-Path -LiteralPath $bundleRoot) {
 }
 
 Ensure-Directory -PathValue $bundleRoot
+Ensure-Directory -PathValue $internalRoot
 
 Write-Host "Copying project files..."
 $projectFiles = @(
+    "Start.exe",
     "app",
     "docs",
     "server.py",
     "requirements.txt",
     "requirements-ai.txt",
-    "setup_ai_runtime.bat",
-    "setup_and_start.bat",
-    "start_sprite_video_lab.bat",
-    "start_sprite_video_lab_portable.bat",
     "README.md",
     "AGENT_INSTALL.md",
     "AI_MATTING.md",
@@ -128,6 +127,17 @@ $projectFiles = @(
 )
 foreach ($item in $projectFiles) {
     Copy-RequiredItem -RepoRoot $repoRoot -RelativePath $item -BundleRoot $bundleRoot
+}
+
+Write-Host "Copying internal launch scripts..."
+$scriptFiles = @(
+    "setup_ai_runtime.bat",
+    "setup_and_start.bat",
+    "start_sprite_video_lab.bat",
+    "start_sprite_video_lab_portable.bat"
+)
+foreach ($item in $scriptFiles) {
+    Copy-RequiredItem -RepoRoot $repoRoot -RelativePath $item -BundleRoot $internalRoot
 }
 
 if ($IncludeRuntime) {
@@ -183,7 +193,7 @@ Sprite Forge Lab Portable ($packageType)
 
 Recommended coworker flow:
 1. Extract this folder.
-2. Double-click setup_and_start.bat on first use.
+2. Double-click Start.exe.
 3. Open Model Management in the app and download missing models or tools.
 
 Light package notes:
@@ -194,6 +204,7 @@ Light package notes:
   set SPRITE_VIDEO_LAB_PROXY=http://127.0.0.1:7897
 
 Full package notes:
+- Internal scripts are in the _internal folder for troubleshooting.
 - start_sprite_video_lab_portable.bat requires runtime\python and runtime\ffmpeg.
 - Optional model cache can be included with -IncludeModels, but it is usually better to distribute models separately.
 "@

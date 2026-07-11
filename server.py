@@ -1421,8 +1421,8 @@ def python_dependency_item(package_name: str, import_name: str | None, category:
         "ready": bool(status["installed"]),
         "path": sys.executable if status["installed"] else "",
         "size_bytes": 0,
-        "message": "" if status["installed"] else f"Python 依赖 {package_name} 未安装，请运行 setup_ai_runtime.bat 或安装 requirements-ai.txt。",
-        "downloadable": False,
+        "message": "" if status["installed"] else f"Python 依赖 {package_name} 未安装，可在本页点击下载安装 AI 运行依赖。",
+        "downloadable": not bool(status["installed"]),
         "uninstallable": False,
         "required": package_name in {"torch", "transformers", "huggingface-hub", "timm", "torchvision"},
         "affected": affected,
@@ -1562,6 +1562,24 @@ def download_realesrgan_anime(progress_id: str = "") -> dict:
     return {"model": realesrgan_model_item(), "message": "Real-ESRGAN anime 已下载。"}
 
 
+def download_python_ai_runtime(progress_id: str = "") -> dict:
+    if progress_id:
+        set_process_progress(progress_id, 0, 100, "preparing", detail="准备安装 Python AI 依赖")
+    python = sys.executable
+    requirements_path = ROOT_DIR / "requirements-ai.txt"
+    if not requirements_path.exists():
+        raise FileNotFoundError("requirements-ai.txt 不存在")
+    if progress_id:
+        set_process_progress(progress_id, 10, 100, "installing", detail="安装 requirements-ai.txt")
+    run_process([python, "-m", "pip", "install", "-r", str(requirements_path)])
+    if progress_id:
+        set_process_progress(progress_id, 75, 100, "installing", detail="安装 PyTorch / torchvision")
+    run_process([python, "-m", "pip", "install", "--force-reinstall", "--no-deps", "--index-url", "https://download.pytorch.org/whl/cu128", "torch", "torchvision"])
+    if progress_id:
+        set_process_progress(progress_id, 100, 100, "done", done=True, detail="Python AI 依赖已安装")
+    return {"models": model_management_payload(), "message": "Python AI 依赖已安装。"}
+
+
 def download_managed_model(model_key: str, progress_id: str = "") -> dict:
     normalized = normalize_ai_model_key(model_key)
     if model_key in AI_MATTE_MODEL_REPOS:
@@ -1570,12 +1588,14 @@ def download_managed_model(model_key: str, progress_id: str = "") -> dict:
         return download_corridorkey(progress_id=progress_id)
     if model_key == "realesrgan-anime":
         return download_realesrgan_anime(progress_id=progress_id)
+    if model_key.startswith("python-"):
+        return download_python_ai_runtime(progress_id=progress_id)
     raise ValueError(f"未知模型：{model_key}")
 
 
 def start_model_download_task(model_key: str) -> dict:
     normalized_key = str(model_key or "").strip()
-    if normalized_key not in AI_MATTE_MODEL_REPOS and normalized_key not in {"corridorkey", "realesrgan-anime"}:
+    if normalized_key not in AI_MATTE_MODEL_REPOS and normalized_key not in {"corridorkey", "realesrgan-anime"} and not normalized_key.startswith("python-"):
         raise ValueError(f"未知模型：{normalized_key}")
     progress_id = f"model-{timestamped_id()}"
     set_process_progress(progress_id, 0, 100, "queued", detail="等待下载任务启动")

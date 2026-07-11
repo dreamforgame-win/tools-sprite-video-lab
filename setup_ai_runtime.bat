@@ -1,13 +1,21 @@
 @echo off
 setlocal
-cd /d "%~dp0"
+set "SCRIPT_DIR=%~dp0"
+if "%SPRITE_VIDEO_LAB_APP_ROOT%"=="" (
+  set "APP_ROOT=%SCRIPT_DIR%"
+  if not exist "%SCRIPT_DIR%server.py" set "APP_ROOT=%SCRIPT_DIR%.."
+) else (
+  set "APP_ROOT=%SPRITE_VIDEO_LAB_APP_ROOT%"
+)
+for %%i in ("%APP_ROOT%") do set "APP_ROOT=%%~fi"
+cd /d "%APP_ROOT%"
 
 if not "%SPRITE_VIDEO_LAB_PROXY%"=="" (
   set "HTTP_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
   set "HTTPS_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
 )
 
-if "%SPRITE_VIDEO_LAB_DATA_ROOT%"=="" set "SPRITE_VIDEO_LAB_DATA_ROOT=%~dp0..\sprite-video-lab-models"
+if "%SPRITE_VIDEO_LAB_DATA_ROOT%"=="" set "SPRITE_VIDEO_LAB_DATA_ROOT=%APP_ROOT%\..\sprite-video-lab-models"
 set "AI_ROOT=%SPRITE_VIDEO_LAB_DATA_ROOT%"
 
 set "SPRITE_VIDEO_LAB_AI_MODEL_CACHE=%AI_ROOT%\huggingface"
