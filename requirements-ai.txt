@@ -1,5 +1,5 @@
-torch>=2.5.0
-torchvision
+torch==2.6.0
+torchvision==0.21.0
 transformers>=4.45.0
 huggingface-hub>=0.25
 accelerate
@@ -8,6 +8,7 @@ safetensors
 kornia
 einops
 opencv-python
-numpy<2
+numpy<2; python_version < "3.13"
+numpy>=2; python_version >= "3.13"
 scipy
 scikit-image

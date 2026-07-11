@@ -4,22 +4,36 @@ cd /d "%~dp0"
 
 if "%SPRITE_VIDEO_LAB_HOST%"=="" set "SPRITE_VIDEO_LAB_HOST=127.0.0.1"
 if "%SPRITE_VIDEO_LAB_PORT%"=="" set "SPRITE_VIDEO_LAB_PORT=8894"
-if "%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%"=="" if exist "E:\" set "SPRITE_VIDEO_LAB_AI_MODEL_CACHE=E:\sprite-video-lab-models\huggingface"
-if "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%"=="" if exist "E:\" set "SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT=E:\sprite-video-lab-models\CorridorKey"
+if not "%SPRITE_VIDEO_LAB_PROXY%"=="" (
+  set "HTTP_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
+  set "HTTPS_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
+)
+if "%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%"=="" set "SPRITE_VIDEO_LAB_AI_MODEL_CACHE=%~dp0..\sprite-video-lab-models\huggingface"
+if "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%"=="" set "SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT=%~dp0..\sprite-video-lab-models\CorridorKey"
 if "%HF_HOME%"=="" set "HF_HOME=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%"
 if "%HUGGINGFACE_HUB_CACHE%"=="" set "HUGGINGFACE_HUB_CACHE=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%\hub"
 if "%TRANSFORMERS_CACHE%"=="" set "TRANSFORMERS_CACHE=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%\transformers"
 if "%HF_MODULES_CACHE%"=="" set "HF_MODULES_CACHE=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%\modules"
 if "%HF_XET_CACHE%"=="" set "HF_XET_CACHE=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%\xet"
 if "%HF_HUB_DISABLE_SYMLINKS_WARNING%"=="" set "HF_HUB_DISABLE_SYMLINKS_WARNING=1"
+if "%SPRITE_VIDEO_LAB_REALESRGAN_BIN%"=="" set "SPRITE_VIDEO_LAB_REALESRGAN_BIN=%~dp0..\tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe"
+if "%SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR%"=="" set "SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR=%~dp0..\tools\realesrgan-ncnn-vulkan\models"
 
 set "PYTHON_EXE="
 if not "%SPRITE_VIDEO_LAB_PYTHON%"=="" if exist "%SPRITE_VIDEO_LAB_PYTHON%" (
   set "PYTHON_EXE=%SPRITE_VIDEO_LAB_PYTHON%"
   goto :python_ready
 )
-if exist "E:\sprite-video-lab-models\venv\Scripts\python.exe" (
-  set "PYTHON_EXE=E:\sprite-video-lab-models\venv\Scripts\python.exe"
+if exist "%~dp0.venv-ai\Scripts\python.exe" (
+  set "PYTHON_EXE=%~dp0.venv-ai\Scripts\python.exe"
+  goto :python_ready
+)
+if exist "%~dp0.venv\Scripts\python.exe" (
+  set "PYTHON_EXE=%~dp0.venv\Scripts\python.exe"
+  goto :python_ready
+)
+if exist "%~dp0..\sprite-video-lab-models\venv\Scripts\python.exe" (
+  set "PYTHON_EXE=%~dp0..\sprite-video-lab-models\venv\Scripts\python.exe"
   goto :python_ready
 )
 for /f "delims=" %%i in ('where python 2^>nul') do (
@@ -36,6 +50,14 @@ exit /b 1
 
 :python_ready
 set "SPRITE_VIDEO_LAB_PYTHON=%PYTHON_EXE%"
+"%PYTHON_EXE%" -c "import PIL" >nul 2>nul
+if errorlevel 1 (
+  echo Missing base Python dependency: Pillow
+  echo Run setup_and_start.bat for first-time setup, or install requirements.txt into:
+  echo   %PYTHON_EXE%
+  pause
+  exit /b 1
+)
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$serverPath = [System.IO.Path]::GetFullPath('%~dp0server.py');" ^
   "$escaped = [Regex]::Escape($serverPath);" ^

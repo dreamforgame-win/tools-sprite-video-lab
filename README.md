@@ -1,172 +1,166 @@
-# Sprite Video Lab
+# 灵帧工坊（Sprite Forge Lab）
 
-Sprite Video Lab 是一个本地网页工具，用来把视频片段、单张图片或已有序列帧整理成干净的 2D Sprite 资源。
+灵帧工坊是一个面向 2D 游戏、美术素材和动效资源整理的本地 Web 工具台。它可以把视频、GIF、图片或序列帧处理成透明 Sprite 资源，并提供图片拆图、双背景抠图、资源管理、AI 主体抠图、绿幕/蓝幕精修、MAGIC 线稿清理和 Real-ESRGAN 二次处理等能力。
 
-它适合这些工作流：
+项目采用“本地后端 + 浏览器前端”的模式：Python 在同事电脑上启动本地 HTTP 服务，前端是原生 HTML/CSS/JavaScript，运行数据默认写入本机 `work/` 目录。仓库不提交模型、虚拟环境、外部二进制工具或导出素材。
 
-- 导入本地视频、GIF 动图、单张图片或一次性多图序列帧。
-- 截取有用的帧范围。
-- 按固定间隔抽帧。
-- 去除纯色背景、绿幕/蓝幕背景或 AI 生成背景。
-- 用 Luma 保留发光、火焰、闪电、粒子等亮部特效。
-- 统一帧尺寸，支持自动宽度画布或方形落地/居中画布。
-- 对已处理帧执行 MAGIC 二次处理：Real-ESRGAN anime x4 超分后输出原尺寸 1/2、1/4、1/8 三档。
-- 导出 frames 文件夹和自动时间命名的透明 WebM。
+## 工具类型
 
-项目优先服务 Windows 本地工作流，但运行时很轻：Python、Pillow、ffmpeg，以及原生 HTML/CSS/JavaScript。
+- 本地素材处理工作台，不是在线 SaaS，也不是纯命令行工具。
+- 适合处理游戏 Sprite、UI 动效、特效序列帧、透明 WebM、拆图资源和美术临时素材。
+- 基础能力依赖 Python、Pillow、ffmpeg/ffprobe。
+- AI 能力按需启用，依赖 PyTorch、transformers、Hugging Face 模型缓存、CorridorKey、Real-ESRGAN 等本地组件。
+- 不建议只把前端部署到 Vercel：浏览器页面不能直接访问同事本机文件、ffmpeg、Python 模型和 GPU 运行时。更推荐 GitLab 分发源码或轻量 zip，每位同事在本机启动和下载依赖。
 
-## 界面全貌
+## 主要模块
 
-![Sprite Video Lab 全页滚动截图](./docs/svl-full-page.png)
+- `视频转序列帧`：导入视频/GIF/图片序列，截取区间，抽帧，抠图，导出透明帧和 WebM。
+- `视频处理`：视频压缩、基础剪辑、字幕、片段拼接、预览和导出。
+- `图片处理 / 全流程`：导入单张或多张图片，抠图、拆图、命名、压缩和导出。
+- `图片处理 / 双背景抠图`：选择同一素材的黑底图和白底图，计算透明结果，支持直接导出、导出到资源管理或跳转到拆图。
+- `资源管理`：创建项目，绑定本地文件夹，扫描和管理项目资源。
+- `模型管理`：列出模型、Python AI 依赖、ffmpeg/ffprobe、Real-ESRGAN、CorridorKey 等运行依赖状态，支持可下载项的下载、进度显示和卸载。
+- `MAGIC / Real-ESRGAN`：对处理后帧进行 anime x4 超分，再输出 1/2、1/4、1/8 等尺寸版本。
 
-## 功能
+## 项目结构
 
-- 本地路径导入和拖拽上传。
-- 视频区间预览，支持按帧设置起止位置。
-- 批处理前先单帧预览参数效果。
-- 自动宽度居中画布，适合横向连招、特效条、多姿态行。
-- 纯色/绿幕抠图，支持阈值、软边、去色溢出和 Halo 收缩。
-- BiRefNet AI 主体抠图。
-- Luma 亮度抠图，用来保留发光、火焰、闪电、粒子和亮部 VFX。
-- CorridorKey 绿幕/蓝幕边缘精修和前景颜色重建。
-- BiRefNet 与 Luma/CorridorKey 可选择“补亮部/精修边缘”或“收紧抠图”两类组合方式。
-- 主体保护预设，减少 BiRefNet/Luma 把主体内部抠成半透明的问题。
-- 单帧预览支持原始抽帧全分辨率查看，处理后预览可切换棋盘格或指定纯色背景。
-- 预览和批处理后处理：残绿涂黑、残绿去饱和、半透明像素涂黑、半透明像素转不透明。
-- BiRefNet 弱蒙版会自动回退到 general 模型，避免小尺寸插画/GIF 被抠成全透明。
-- 可直接导入已有动画序列帧，按文件名顺序预览和导出。
-- 实验性线稿清理页：支持 Lanczos 缩小和 Real-ESRGAN anime 整线后缩小。
-- 反向动画预览和反向导出。
-- MAGIC 帧预览：对选中帧使用 Real-ESRGAN anime 放大后缩小，支持硬边/软边缩放算法切换，并可上下对比原帧、1/2、1/4、1/8 三档结果。
-- 帧选择、动画预览、frames 文件夹导出和自动时间命名的透明 WebM 导出。
+```text
+app/                                  前端页面、样式和浏览器交互逻辑
+app/index.html                        主工作台入口
+app/app.js                            主前端逻辑
+app/styles.css                        主界面样式
+app/favicon.svg                       产品图标
+app/line-cleaner-experiment.*         实验性线稿清理页面
+docs/                                 项目生成规则和维护说明
+server.py                             本地 HTTP 服务、文件 API 和处理流水线
+requirements.txt                      基础运行依赖
+requirements-ai.txt                   可选 AI 运行依赖
+setup_and_start.bat                   同事首次使用的一键安装并启动入口
+setup_ai_runtime.bat                  Windows AI 环境和外部模型准备脚本
+start_sprite_video_lab.bat            Windows 快速启动脚本
+start_sprite_video_lab_portable.bat   带 runtime 的完整便携包启动脚本
+build_portable_bundle.ps1             轻量/完整便携包打包脚本
+AGENT_INSTALL.md                      给自动化 agent 使用的安装说明
+AI_MATTING.md                         AI 抠图模式说明
+USAGE.zh-CN.md                        中文使用说明
+USAGE.md                              英文使用说明
+work/                                 运行时上传、缓存、导出目录，不提交 Git
+```
 
-## MAGIC 二次处理
+## 给同事使用
 
-在“检查导出”区域点击 `MAGIC` 后，工具会对当前选中的处理后帧执行一次 Real-ESRGAN anime x4 超分，再派生出三套透明 PNG：
+推荐两种分发方式：
 
-- `MAGIC 1/2`：输出画布为原尺寸的 1/2。
-- `MAGIC 1/4`：输出画布为原尺寸的 1/4。
-- `MAGIC 1/8`：输出画布为原尺寸的 1/8。
+- `GitLab clone`：适合会用 Git 的同事，便于更新。
+- `轻量 zip`：适合直接发包，包内不含模型和运行缓存，首次启动时在本机准备依赖。
 
-MAGIC 按钮旁的 `硬` / `软` 选项决定超分后缩小的算法：
+GitLab 地址：
 
-- `硬`：nearest-neighbor 缩小，保留像素硬边缘，适合 Sprite 动画。
-- `软`：BOX 缩小，会平滑边缘，适合需要更柔和抗锯齿的素材。
+```bat
+git clone https://gitlab-gz.dianchu.cc/skill-hub/art-skill/sprite-forge-lab.git
+cd sprite-forge-lab
+```
 
-每个 MAGIC 预览框都有自己的“导出处理后帧”按钮。导出结果会写入 `work/exports/`，并在页面底部生成“打开 frames 文件夹”和透明 WebM 链接。
+如果公司网络需要本地代理，可以临时对这次 Git 命令指定代理，不要写入仓库：
 
-## 抠图模式
+```bat
+git -c http.proxy=http://127.0.0.1:7897 clone https://gitlab-gz.dianchu.cc/skill-hub/art-skill/sprite-forge-lab.git
+```
 
-Sprite Video Lab 目前提供这些背景处理模式：
+首次使用：
 
-- `chroma key`：快速处理受控纯色背景，适合绿幕、蓝幕、白底、灰底等素材。
-- `只用 BiRefNet`：AI 主体抠图，适合非纯色背景或生成图背景。
-- `只用 CorridorKey`：先用绿幕算法生成粗 alpha，再用 CorridorKey 重建边缘和前景颜色。
-- `只用 Luma`：基于亮度生成 alpha，适合亮部特效、火焰、闪电、粒子等素材。
-- `BiRefNet 粗蒙版 / CorridorKey 精修边缘`：BiRefNet 先给主体 alpha，再用 CorridorKey 做绿幕/蓝幕边缘重建。
-- `BiRefNet 后再用 CorridorKey 收紧抠图`：先做 CorridorKey 精修，再与 BiRefNet alpha 相交，只进一步删除背景。
-- `BiRefNet 保主体 / Luma 补亮部`：主体 alpha 加亮度 alpha，适合 VFX 比较重的 Sprite。
-- `BiRefNet 后再用 Luma 收紧抠图`：BiRefNet alpha 与亮度 alpha 相交，让 Luma 进一步删掉不够亮的背景。
-- `BiRefNet + Luma 合并后 / CorridorKey 精修`：先合成主体 alpha 和亮度 alpha，再用 CorridorKey 做边缘/颜色重建。
-- `不抠图`：素材已经带透明通道时，只做缩放、对齐和导出。
+```bat
+setup_and_start.bat
+```
 
-灰底、白底、黑底素材通常不需要去色溢出；绿幕/蓝幕素材再开启 despill 和 CorridorKey 会更稳。
+后续已经准备好运行环境时：
 
-## 环境要求
+```bat
+start_sprite_video_lab.bat
+```
 
-- Python 3.10+
-- Pillow
-- ffmpeg / ffprobe
-- 可选 AI 环境：
-  - PyTorch
-  - torchvision
-  - transformers
-  - huggingface-hub
-  - timm 和相关图片依赖
-  - CorridorKey 依赖，例如 `safetensors`、OpenCV、NumPy
-
-基础功能只需要 `requirements.txt`。BiRefNet、Luma 组合和 CorridorKey 相关能力需要 `requirements-ai.txt` 里的可选依赖。
-
-## 安装
-
-安装交给 agent 执行，避免手动配置 Python、ffmpeg、AI 依赖和模型缓存时出错。
-
-- Agent 安装说明：[AGENT_INSTALL.md](./AGENT_INSTALL.md)
-- AI 抠图细节：[AI_MATTING.md](./AI_MATTING.md)
-
-安装完成后，agent 应启动本地服务并给出访问地址。默认地址：
+默认访问地址：
 
 ```text
 http://127.0.0.1:8894
 ```
 
-实验性线稿清理页：
+如果下载依赖或模型也需要代理，可以在本机命令行临时设置：
 
-```text
-http://127.0.0.1:8894/app/line-cleaner-experiment.html
+```bat
+set SPRITE_VIDEO_LAB_PROXY=http://127.0.0.1:7897
+setup_and_start.bat
 ```
 
-## 使用说明
+## 模型与运行环境
 
-完整的导入、截取、抠图模式、Luma 主体保护、CorridorKey 精修、后处理、动画预览、反向导出和排错说明见：
+仓库不会提交这些大文件：
 
-- [中文使用说明](./USAGE.zh-CN.md)
-- [English usage guide](./USAGE.md)
+- `.venv/`、`.venv-ai/`、共享 AI venv。
+- Hugging Face 模型缓存。
+- CorridorKey checkout 和 checkpoint。
+- Real-ESRGAN、ffmpeg 等外部二进制工具。
+- `work/` 里的上传、缓存、导出结果。
+
+应用启动后进入 `模型管理` 页面即可看到当前电脑缺什么。页面会按类别列出依赖状态，并在可下载项上提供下载、进度显示和卸载操作。当前检查覆盖 AI 主体抠图、绿幕/蓝幕精修、MAGIC/线稿清理、基础视频工具和 Python AI 依赖等项目。
+
+当某个功能缺模型或工具时，相关算法选项会变灰，并在名称旁显示 `缺模型`、`缺工具` 或 `缺依赖` 胶囊提示。点击提示后会说明需要哪些依赖，并可跳转到 `模型管理` 页面对应位置。
+
+默认模型和运行缓存位置在项目同级目录：
+
+```text
+..\sprite-video-lab-models\
+```
+
+## 打轻量包
+
+默认打包只复制源码、脚本和说明，不包含模型、venv、ffmpeg、Real-ESRGAN 或 `work/`：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_portable_bundle.ps1 -Clean
+```
+
+输出：
+
+```text
+dist\SpriteForgeLab-light.zip
+```
+
+如果确实要做完整离线包，可按团队内部分发规范显式带上 runtime、工具或模型：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build_portable_bundle.ps1 `
+  -OutputRoot F:\release\sprite-forge-lab `
+  -IncludeRuntime `
+  -PythonHome "C:\Program Files\Python312" `
+  -VenvRoot "F:\Codex-Program\sprite-video-lab-models\venv" `
+  -IncludeTools `
+  -FfmpegBinRoot "F:\Codex-Program\tools\ffmpeg\bin"
+```
+
+模型通常建议单独内部分发，而不是塞进 GitLab 或默认 zip。
 
 ## 环境变量
 
-- `SPRITE_VIDEO_LAB_HOST`
-  - 默认：`127.0.0.1`
-- `SPRITE_VIDEO_LAB_PORT`
-  - 默认：`8894`
-- `SPRITE_VIDEO_LAB_FFMPEG_DIR`
-  - 可选，包含 `ffmpeg(.exe)` 和 `ffprobe(.exe)` 的目录
-- `SPRITE_VIDEO_LAB_FFMPEG_ACCEL`
-  - 可选，支持 `auto`、`cpu`、`cuda`、`qsv`、`d3d11va`、`dxva2`
-- `SPRITE_VIDEO_LAB_AI_MODEL_CACHE`
-  - 可选，Hugging Face / AI 模型缓存目录
-- `SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT`
-  - 可选，CorridorKey checkout 和 checkpoint 目录
-- `SPRITE_VIDEO_LAB_PYTHON`
-  - 可选，启动器使用的 Python 可执行文件
-- `SPRITE_VIDEO_LAB_REALESRGAN_BIN`
-  - 可选，MAGIC 二次处理和 Real-ESRGAN anime 线稿清理使用的 `realesrgan-ncnn-vulkan` 可执行文件
-- `SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR`
-  - 可选，包含 `realesrgan-x4plus-anime.param` 和 `.bin` 的模型目录
+- `SPRITE_VIDEO_LAB_HOST`：服务监听地址，默认 `127.0.0.1`。
+- `SPRITE_VIDEO_LAB_PORT`：服务端口，默认 `8894`。
+- `SPRITE_VIDEO_LAB_DATA_ROOT`：共享运行环境和模型根目录，默认 `..\sprite-video-lab-models`。
+- `SPRITE_VIDEO_LAB_PROXY`：可选代理地址，脚本会同步到 `HTTP_PROXY` 和 `HTTPS_PROXY`。
+- `SPRITE_VIDEO_LAB_FFMPEG_DIR`：包含 `ffmpeg(.exe)` 和 `ffprobe(.exe)` 的目录。
+- `SPRITE_VIDEO_LAB_FFMPEG_ACCEL`：ffmpeg 硬件加速偏好，支持 `auto`、`cpu`、`cuda`、`qsv`、`d3d11va`、`dxva2`。
+- `SPRITE_VIDEO_LAB_AI_MODEL_CACHE`：Hugging Face / AI 模型缓存目录。
+- `SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT`：CorridorKey checkout 目录。
+- `SPRITE_VIDEO_LAB_REALESRGAN_BIN`：`realesrgan-ncnn-vulkan` 可执行文件路径。
+- `SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR`：包含 `realesrgan-x4plus-anime.param` 和 `.bin` 的模型目录。
+- `SPRITE_VIDEO_LAB_PYTHON`：启动脚本使用的 Python 可执行文件。
 
-也可以从命令行覆盖 host 和 port：
+## 维护建议
 
-```bash
-python server.py --host 127.0.0.1 --port 8894
-```
+- 提交源码、脚本、README 和说明文档。
+- 不要提交 `work/`、虚拟环境、模型缓存、测试视频、导出帧和临时素材。
+- 如果公司网络无法访问 Hugging Face，建议由一台机器提前下载模型，再把模型缓存目录通过内部分发方式同步给同事。
+- 如果要严格控制供应链，请固定外部模型 revision，并分别审查 CorridorKey、BiRefNet、Real-ESRGAN、ffmpeg 等依赖的许可证。
 
-## 项目结构
+## 许可证
 
-```text
-app/                              前端 UI 和浏览器逻辑
-app/line-cleaner-experiment.*     实验性线稿缩小清理页面
-server.py                         本地 HTTP 服务和处理流水线
-AGENT_INSTALL.md                  给 agent 执行的安装和启动说明
-requirements.txt                  基础运行依赖
-requirements-ai.txt               可选 AI 抠图依赖
-setup_ai_runtime.bat              Windows AI 环境安装脚本
-start_sprite_video_lab.bat        Windows 启动器
-start_sprite_video_lab_portable.bat 便携版启动器
-build_portable_bundle.ps1         便携版打包脚本
-work/                             运行时输出目录，已被 git 忽略
-```
-
-## 注意事项
-
-- 不要把 `work/`、生成帧、测试视频、模型缓存和虚拟环境提交到 git。
-- AI 模型会在第一次选择相关模式时由本地运行时下载。
-- BiRefNet 通过 Hugging Face 的 `trust_remote_code=True` 加载远程模型代码；如果需要更严格的供应链控制，请审查并固定模型 revision。
-- CorridorKey 是独立项目，重新分发或用于商业推理服务前请确认它的许可证。
-
-## English
-
-This README is Chinese-first. For English instructions, see [USAGE.md](./USAGE.md).
-
-## License
-
-[MIT](./LICENSE)
+项目代码使用 [MIT](./LICENSE)。外部依赖、模型和二进制工具有各自许可证，团队内分发或商业使用前请分别确认。

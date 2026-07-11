@@ -1,10 +1,13 @@
 [CmdletBinding()]
 param(
-    [string]$OutputRoot = "I:\sprite-video-lab-portable",
-    [string]$PythonHome = "C:\Program Files\Python312",
-    [string]$VenvRoot = "E:\sprite-video-lab-models\venv",
-    [string]$ModelRoot = "E:\sprite-video-lab-models",
-    [string]$FfmpegBinRoot = "I:\FF\bin",
+    [string]$OutputRoot = "",
+    [string]$PythonHome = "",
+    [string]$VenvRoot = "",
+    [string]$ModelRoot = "",
+    [string]$FfmpegBinRoot = "",
+    [switch]$IncludeRuntime,
+    [switch]$IncludeModels,
+    [switch]$IncludeTools,
     [switch]$Clean
 )
 
@@ -38,7 +41,7 @@ function Ensure-Directory {
     }
 }
 
-function Copy-Tree {
+function Copy-TreeContents {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Source,
@@ -46,33 +49,53 @@ function Copy-Tree {
         [string]$Destination
     )
 
+    $sourceResolved = Resolve-ExistingPath -PathValue $Source
     Ensure-Directory -PathValue $Destination
-    Copy-Item -LiteralPath $Source -Destination $Destination -Recurse -Force
+    Get-ChildItem -LiteralPath $sourceResolved -Force | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $Destination -Recurse -Force
+    }
+}
+
+function Copy-RequiredItem {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$RepoRoot,
+        [Parameter(Mandatory = $true)]
+        [string]$RelativePath,
+        [Parameter(Mandatory = $true)]
+        [string]$BundleRoot
+    )
+
+    $sourcePath = Join-Path $RepoRoot $RelativePath
+    if (-not (Test-Path -LiteralPath $sourcePath)) {
+        throw "Required project path not found: $sourcePath"
+    }
+    Copy-Item -LiteralPath $sourcePath -Destination $BundleRoot -Recurse -Force
 }
 
 $repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Resolve-ExistingPath -PathValue $repoRoot
-$outputRootResolved = $OutputRoot
-
-if ($Clean -and (Test-Path -LiteralPath $outputRootResolved)) {
-    Write-Host "Removing existing bundle at $outputRootResolved"
-    Remove-Item -LiteralPath $outputRootResolved -Recurse -Force
+if ([string]::IsNullOrWhiteSpace($OutputRoot)) {
+    $OutputRoot = Join-Path $repoRoot "dist"
 }
 
-Ensure-Directory -PathValue $outputRootResolved
-$outputRootResolved = Resolve-ExistingPath -PathValue $outputRootResolved
+if ($IncludeModels -and -not $IncludeRuntime) {
+    Write-Warning "IncludeModels is intended for full portable packages. The light launcher will still use the sibling model cache by default."
+}
 
-$pythonHomeResolved = Resolve-ExistingPath -PathValue $PythonHome
-$venvRootResolved = Resolve-ExistingPath -PathValue $VenvRoot
-$modelRootResolved = Resolve-ExistingPath -PathValue $ModelRoot
-$ffmpegRootResolved = Resolve-ExistingPath -PathValue $FfmpegBinRoot
+if ($Clean -and (Test-Path -LiteralPath $OutputRoot)) {
+    Write-Host "Removing existing bundle output at $OutputRoot"
+    Remove-Item -LiteralPath $OutputRoot -Recurse -Force
+}
 
-$bundleRoot = Join-Path $outputRootResolved "SpriteVideoLab"
+Ensure-Directory -PathValue $OutputRoot
+$outputRootResolved = Resolve-ExistingPath -PathValue $OutputRoot
+
+$bundleRoot = Join-Path $outputRootResolved "SpriteForgeLab"
 $runtimeRoot = Join-Path $bundleRoot "runtime"
 $pythonRuntimeRoot = Join-Path $runtimeRoot "python"
 $ffmpegRuntimeRoot = Join-Path $runtimeRoot "ffmpeg"
-$modelsRuntimeRoot = Join-Path $runtimeRoot "models"
-$workRoot = Join-Path $bundleRoot "work"
+$modelsRuntimeRoot = Join-Path $runtimeRoot "models\portable-models"
 
 if (Test-Path -LiteralPath $bundleRoot) {
     Write-Host "Refreshing bundle directory $bundleRoot"
@@ -80,76 +103,104 @@ if (Test-Path -LiteralPath $bundleRoot) {
 }
 
 Ensure-Directory -PathValue $bundleRoot
-Ensure-Directory -PathValue $runtimeRoot
-Ensure-Directory -PathValue $workRoot
 
 Write-Host "Copying project files..."
 $projectFiles = @(
     "app",
+    "docs",
     "server.py",
+    "requirements.txt",
+    "requirements-ai.txt",
+    "setup_ai_runtime.bat",
+    "setup_and_start.bat",
+    "start_sprite_video_lab.bat",
     "start_sprite_video_lab_portable.bat",
     "README.md",
+    "AGENT_INSTALL.md",
+    "AI_MATTING.md",
     "USAGE.md",
     "USAGE.zh-CN.md",
-    "AI_MATTING.md",
+    "CHANGELOG.md",
     "LICENSE",
-    "VERSION"
+    "VERSION",
+    "sprite_video_lab_icon.ico",
+    "sprite_video_lab_icon.png"
 )
 foreach ($item in $projectFiles) {
-    $sourcePath = Join-Path $repoRoot $item
-    if (-not (Test-Path -LiteralPath $sourcePath)) {
-        throw "Required project path not found: $sourcePath"
+    Copy-RequiredItem -RepoRoot $repoRoot -RelativePath $item -BundleRoot $bundleRoot
+}
+
+if ($IncludeRuntime) {
+    if ([string]::IsNullOrWhiteSpace($PythonHome)) {
+        throw "PythonHome is required when -IncludeRuntime is used."
     }
-    Copy-Item -LiteralPath $sourcePath -Destination $bundleRoot -Recurse -Force
+    if ([string]::IsNullOrWhiteSpace($VenvRoot)) {
+        throw "VenvRoot is required when -IncludeRuntime is used."
+    }
+
+    Write-Host "Copying Python runtime..."
+    Copy-TreeContents -Source $PythonHome -Destination $pythonRuntimeRoot
+
+    $sitePackagesSource = Join-Path (Resolve-ExistingPath -PathValue $VenvRoot) "Lib\site-packages"
+    $sitePackagesDest = Join-Path $pythonRuntimeRoot "Lib\site-packages"
+    Write-Host "Copying Python packages from venv..."
+    Copy-TreeContents -Source $sitePackagesSource -Destination $sitePackagesDest
 }
 
-Write-Host "Copying Python runtime..."
-Copy-Tree -Source $pythonHomeResolved -Destination $runtimeRoot
-
-$sitePackagesSource = Join-Path $venvRootResolved "Lib\site-packages"
-$sitePackagesDest = Join-Path $pythonRuntimeRoot "Lib\site-packages"
-Ensure-Directory -PathValue $sitePackagesDest
-
-Write-Host "Copying Python packages from venv..."
-Get-ChildItem -LiteralPath $sitePackagesSource -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $sitePackagesDest -Recurse -Force
+if ($IncludeTools) {
+    if ([string]::IsNullOrWhiteSpace($FfmpegBinRoot)) {
+        throw "FfmpegBinRoot is required when -IncludeTools is used."
+    }
+    $ffmpegRootResolved = Resolve-ExistingPath -PathValue $FfmpegBinRoot
+    Write-Host "Copying ffmpeg tools..."
+    Ensure-Directory -PathValue $ffmpegRuntimeRoot
+    Get-ChildItem -LiteralPath $ffmpegRootResolved -Filter *.exe | ForEach-Object {
+        Copy-Item -LiteralPath $_.FullName -Destination $ffmpegRuntimeRoot -Force
+    }
 }
 
-Write-Host "Copying ffmpeg..."
-Ensure-Directory -PathValue $ffmpegRuntimeRoot
-Get-ChildItem -LiteralPath $ffmpegRootResolved -Filter *.exe | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $ffmpegRuntimeRoot -Force
+if ($IncludeModels) {
+    if ([string]::IsNullOrWhiteSpace($ModelRoot)) {
+        throw "ModelRoot is required when -IncludeModels is used."
+    }
+    $modelRootResolved = Resolve-ExistingPath -PathValue $ModelRoot
+    Write-Host "Copying optional model cache..."
+    Ensure-Directory -PathValue $modelsRuntimeRoot
+    $huggingFaceRoot = Join-Path $modelRootResolved "huggingface"
+    $corridorKeyRoot = Join-Path $modelRootResolved "CorridorKey"
+    if (Test-Path -LiteralPath $huggingFaceRoot) {
+        Copy-Item -LiteralPath $huggingFaceRoot -Destination $modelsRuntimeRoot -Recurse -Force
+    }
+    if (Test-Path -LiteralPath $corridorKeyRoot) {
+        Copy-Item -LiteralPath $corridorKeyRoot -Destination $modelsRuntimeRoot -Recurse -Force
+    }
 }
-
-Write-Host "Copying AI models..."
-$portableModelRoot = Join-Path $modelsRuntimeRoot "portable-models"
-Ensure-Directory -PathValue $portableModelRoot
-Copy-Tree -Source (Join-Path $modelRootResolved "huggingface") -Destination $portableModelRoot
-Copy-Tree -Source (Join-Path $modelRootResolved "CorridorKey") -Destination $portableModelRoot
 
 $readmePath = Join-Path $bundleRoot "PORTABLE_README.txt"
+$packageType = if ($IncludeRuntime) { "full runtime package" } else { "light package" }
 $readmeText = @"
-Sprite Video Lab Portable
+Sprite Forge Lab Portable ($packageType)
 
-Usage:
-1. Extract the folder anywhere.
-2. Double-click start_sprite_video_lab_portable.bat
-3. The browser will open automatically.
+Recommended coworker flow:
+1. Extract this folder.
+2. Double-click setup_and_start.bat on first use.
+3. Open Model Management in the app and download missing models or tools.
 
-This bundle includes:
-- Python runtime
-- ffmpeg / ffprobe
-- AI dependencies
-- BiRefNet model cache
-- CorridorKey code and checkpoints
+Light package notes:
+- This package does not include Python runtime, AI models, model cache, ffmpeg, Real-ESRGAN, or generated work files.
+- Runtime and model cache are created next to the project by default:
+  ..\sprite-video-lab-models\
+- If your network needs a proxy, set it only in your local shell before starting:
+  set SPRITE_VIDEO_LAB_PROXY=http://127.0.0.1:7897
 
-Notes:
-- Runtime outputs are written to the local work folder next to the launcher.
-- If Windows Defender prompts on first run, allow the local Python process.
+Full package notes:
+- start_sprite_video_lab_portable.bat requires runtime\python and runtime\ffmpeg.
+- Optional model cache can be included with -IncludeModels, but it is usually better to distribute models separately.
 "@
 [System.IO.File]::WriteAllText($readmePath, $readmeText, (New-Utf8NoBomEncoding))
 
-$zipPath = Join-Path $outputRootResolved "SpriteVideoLab-portable.zip"
+$zipName = if ($IncludeRuntime) { "SpriteForgeLab-full-portable.zip" } else { "SpriteForgeLab-light.zip" }
+$zipPath = Join-Path $outputRootResolved $zipName
 if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
 }
@@ -160,9 +211,10 @@ Compress-Archive -LiteralPath $bundleRoot -DestinationPath $zipPath -Compression
 $summary = [pscustomobject]@{
     BundleRoot = $bundleRoot
     ZipPath = $zipPath
-    PythonRuntime = $pythonRuntimeRoot
-    FfmpegRuntime = $ffmpegRuntimeRoot
-    ModelRoot = $portableModelRoot
+    PackageType = $packageType
+    IncludesRuntime = [bool]$IncludeRuntime
+    IncludesTools = [bool]$IncludeTools
+    IncludesModels = [bool]$IncludeModels
 }
 
 Write-Host ""

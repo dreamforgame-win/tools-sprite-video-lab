@@ -9,6 +9,8 @@ This guide is for coding agents setting up Sprite Video Lab for a user. Do not a
 - Runtime: local Python HTTP server, ffmpeg/ffprobe, optional AI matting runtime, optional Real-ESRGAN line-cleaner runtime.
 - User-facing URL after setup: `http://127.0.0.1:8894`.
 
+For coworker machines, prefer `setup_and_start.bat` for first-time setup. It creates the shared runtime under `..\sprite-video-lab-models`, then starts the app. Use the manual steps below only when automation needs finer control.
+
 ## 1. Inspect The Workspace
 
 ```powershell
@@ -47,7 +49,7 @@ ffprobe -version
 If not on `PATH`, set `SPRITE_VIDEO_LAB_FFMPEG_DIR` to a directory that contains both `ffmpeg.exe` and `ffprobe.exe` before starting the server:
 
 ```powershell
-$env:SPRITE_VIDEO_LAB_FFMPEG_DIR = "D:\ffmpeg\bin"
+$env:SPRITE_VIDEO_LAB_FFMPEG_DIR = "F:\Codex-Program\tools\ffmpeg\bin"
 ```
 
 The app also checks its built-in fallback path used by the maintainer machine, but agents should not rely on that path on other computers.
@@ -63,17 +65,18 @@ Install this only when the user needs BiRefNet, Luma combinations, or CorridorKe
 Recommended external cache layout:
 
 ```powershell
-$env:SPRITE_VIDEO_LAB_AI_MODEL_CACHE = "E:\sprite-video-lab-models\huggingface"
-$env:SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT = "E:\sprite-video-lab-models\CorridorKey"
+$env:SPRITE_VIDEO_LAB_DATA_ROOT = "F:\Codex-Program\sprite-video-lab-models"
+$env:SPRITE_VIDEO_LAB_AI_MODEL_CACHE = "$env:SPRITE_VIDEO_LAB_DATA_ROOT\huggingface"
+$env:SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT = "$env:SPRITE_VIDEO_LAB_DATA_ROOT\CorridorKey"
 ```
 
 If `setup_ai_runtime.bat` creates or expects a separate Python runtime, start the app with that runtime instead of `.venv`:
 
 ```powershell
-$env:SPRITE_VIDEO_LAB_PYTHON = "E:\sprite-video-lab-models\venv\Scripts\python.exe"
+$env:SPRITE_VIDEO_LAB_PYTHON = "F:\Codex-Program\sprite-video-lab-models\venv\Scripts\python.exe"
 ```
 
-BiRefNet downloads model files on first use. Treat the first AI preview as an installation verification step.
+BiRefNet and other managed assets should be checked from the in-app Model Management page. Treat a successful model download plus first AI preview as the installation verification step.
 
 ## 5. Optional Real-ESRGAN Line Cleaner Runtime
 
@@ -86,8 +89,8 @@ The experimental line cleaner can call `realesrgan-ncnn-vulkan` with the `reales
 The model files must be under a `models` directory next to the binary, or in a directory named by `SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR`:
 
 ```powershell
-$env:SPRITE_VIDEO_LAB_REALESRGAN_BIN = "D:\tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe"
-$env:SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR = "D:\tools\realesrgan-ncnn-vulkan\models"
+$env:SPRITE_VIDEO_LAB_REALESRGAN_BIN = "F:\Codex-Program\tools\realesrgan-ncnn-vulkan\realesrgan-ncnn-vulkan.exe"
+$env:SPRITE_VIDEO_LAB_REALESRGAN_MODEL_DIR = "F:\Codex-Program\tools\realesrgan-ncnn-vulkan\models"
 ```
 
 Required files:

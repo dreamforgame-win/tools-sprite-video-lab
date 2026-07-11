@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sprite Video Lab</title>
+  <title>灵帧工坊</title>
+  <link rel="icon" href="/app/favicon.svg?v=20260711" type="image/svg+xml">
   <link rel="stylesheet" href="/app/styles.css">
 </head>
 <body>
@@ -12,52 +13,83 @@
       <div class="brand-block">
         <span class="brand-mark" aria-hidden="true"></span>
         <div>
-          <p class="eyebrow">Sprite Video Lab</p>
-          <h1>Sprite 资产处理台</h1>
+          <p id="appEyebrow" class="eyebrow">Sprite Forge Lab</p>
+          <h1 id="appTitle">灵帧工坊</h1>
         </div>
       </div>
-      <div class="source-strip" aria-label="当前素材状态">
+      <nav class="module-switch" aria-label="工具模块">
+        <button id="moduleVideoButton" class="module-switch-button active" type="button" data-module="video">视频转序列帧</button>
+        <button id="moduleVideoProcessButton" class="module-switch-button" type="button" data-module="videoProcess">视频处理</button>
+        <button id="moduleImageButton" class="module-switch-button" type="button" data-module="image">图片处理</button>
+        <button id="moduleResourceButton" class="module-switch-button" type="button" data-module="resource">资源管理</button>
+        <button id="moduleModelButton" class="module-switch-button" type="button" data-module="model">模型管理</button>
+      </nav>
+      <div class="account-panel" id="accountPanel" aria-label="账户入口">
         <div>
-          <span>素材</span>
-          <strong id="videoName">未导入</strong>
+          <span>账户</span>
+          <strong id="accountName">未登录</strong>
         </div>
-        <div>
-          <span>尺寸</span>
-          <strong id="videoSize">-</strong>
-        </div>
-        <div>
-          <span>帧率</span>
-          <strong id="videoFps">-</strong>
-        </div>
-        <div>
-          <span>时长</span>
-          <strong id="videoDuration">-</strong>
-        </div>
+        <button id="loginButton" class="primary-button account-button" type="button">一键登录</button>
+        <button id="logoutButton" class="ghost-button account-button" type="button" hidden>退出</button>
       </div>
     </header>
 
-    <div class="workspace">
+    <div id="videoModule" class="workspace module-view" data-module-view="video">
       <aside class="workflow-rail" aria-label="工作流">
-        <a href="#importSection" class="rail-item active">
+        <div id="sourceStrip" class="source-strip source-strip-sidebar" aria-label="当前素材状态">
+          <div>
+            <span>素材</span>
+            <strong id="videoName">未导入</strong>
+          </div>
+          <div>
+            <span>尺寸</span>
+            <strong id="videoSize">-</strong>
+          </div>
+          <div>
+            <span>帧率</span>
+            <strong id="videoFps">-</strong>
+          </div>
+          <div>
+            <span>时长</span>
+            <strong id="videoDuration">-</strong>
+          </div>
+        </div>
+        <a href="#importSection" class="rail-item active" data-workflow-target="importSection">
           <span class="rail-index">01</span>
           <span>导入</span>
         </a>
-        <a href="#previewPanel" class="rail-item">
+        <a href="#previewPanel" class="rail-item" data-workflow-target="previewPanel">
           <span class="rail-index">02</span>
           <span>截取</span>
         </a>
-        <a href="#processPanel" class="rail-item">
+        <a href="#extractPanel" class="rail-item" data-workflow-target="extractPanel">
           <span class="rail-index">03</span>
-          <span>抠图算法</span>
+          <span>提取帧</span>
         </a>
-        <a href="#resultPanel" class="rail-item">
+        <a href="#extractResultPanel" class="rail-item" data-workflow-target="extractResultPanel">
           <span class="rail-index">04</span>
-          <span>检查导出</span>
+          <span>首次选帧</span>
+        </a>
+        <a href="#processPanel" class="rail-item" data-workflow-target="processPanel">
+          <span class="rail-index">05</span>
+          <span>抠图</span>
+        </a>
+        <a href="#resultPanel" class="rail-item" data-workflow-target="resultPanel">
+          <span class="rail-index">06</span>
+          <span>抠图结果</span>
+        </a>
+        <a href="#aiPolishModule" class="rail-item" data-workflow-target="aiPolishModule">
+          <span class="rail-index">07</span>
+          <span>AI 精修</span>
+        </a>
+        <a href="#exportModule" class="rail-item" data-workflow-target="exportModule">
+          <span class="rail-index">08</span>
+          <span>导出</span>
         </a>
       </aside>
 
       <main class="main-grid">
-        <section id="importSection" class="panel import-panel">
+        <section id="importSection" class="panel import-panel workflow-target">
           <div class="section-head">
             <div>
               <p class="section-kicker">Input</p>
@@ -75,7 +107,7 @@
               <button id="importPathButton" class="primary-button" type="button">导入路径</button>
               <label class="field">
                 <span>输出路径</span>
-                <input id="outputPathInput" type="text" placeholder="D:\sprite-video-lab-exports" readonly>
+                <input id="outputPathInput" type="text" placeholder="F:\Codex-Program\sprite-video-lab\work\exports" readonly>
               </label>
               <button id="saveOutputPathButton" class="ghost-button" type="button">设置输出路径</button>
             </div>
@@ -99,7 +131,7 @@
           </div>
         </section>
 
-        <section class="panel media-panel" id="previewPanel" hidden>
+        <section class="panel media-panel workflow-target" id="previewPanel" hidden>
           <div class="section-head">
             <div>
               <p class="section-kicker">Timeline</p>
@@ -107,7 +139,7 @@
             </div>
             <div class="preview-head-actions">
               <span id="currentTimeLabel" class="time-chip">当前 0.00s</span>
-              <a class="primary-button small-link" href="#processPanel">选择抠图算法</a>
+              <a class="primary-button small-link" href="#extractPanel">提取帧</a>
             </div>
           </div>
 
@@ -115,6 +147,33 @@
             <div class="video-wrap">
               <video id="videoPreview" playsinline muted></video>
               <img id="mediaPreviewImage" alt="源图预览" hidden>
+              <div id="sourcePlayerControls" class="source-player-controls" hidden>
+                <button id="sourcePreviewPlayButton" class="source-player-button" type="button" aria-label="播放">播放</button>
+                <div class="source-player-timeline">
+                  <input id="sourcePreviewSeekRange" type="range" min="0" max="1000" step="1" value="0" aria-label="源画面播放进度">
+                  <div class="source-player-time">
+                    <span id="sourcePreviewCurrentTime">0.00s</span>
+                    <span id="sourcePreviewDurationLabel">0.00s</span>
+                  </div>
+                </div>
+                <select id="sourcePreviewSpeedSelect" class="source-player-speed" aria-label="播放速度">
+                  <option value="0.25">0.25x</option>
+                  <option value="0.5">0.5x</option>
+                  <option value="1" selected>1x</option>
+                  <option value="1.5">1.5x</option>
+                  <option value="2">2x</option>
+                </select>
+                <button id="sourcePreviewRestartButton" class="source-player-button secondary" type="button" aria-label="重播">重播</button>
+                <div id="sourceFrameControls" class="source-frame-controls" hidden>
+                  <button id="sourceGoFirstFrameButton" class="source-frame-button" type="button">回到起始帧</button>
+                  <button id="sourceSetStartFrameButton" class="source-frame-button" type="button">选为起始帧</button>
+                  <button id="sourcePreviousFrameButton" class="source-frame-button icon" type="button" aria-label="上一帧">‹</button>
+                  <span id="sourceCurrentFrameLabel" class="source-current-frame" aria-live="polite">当前帧 #001</span>
+                  <button id="sourceNextFrameButton" class="source-frame-button icon" type="button" aria-label="下一帧">›</button>
+                  <button id="sourceSetEndFrameButton" class="source-frame-button" type="button">选为结束帧</button>
+                  <button id="sourceGoLastFrameButton" class="source-frame-button" type="button">回到结束帧</button>
+                </div>
+              </div>
             </div>
 
             <div class="segment-panel">
@@ -159,65 +218,92 @@
               <div id="videoProgress" class="video-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
                 <div id="videoProgressFill" class="video-progress-fill"></div>
                 <div id="videoToolbar" class="video-toolbar">
-                  <span>选区循环 / 自动静音</span>
-                  <strong id="videoProgressLabel">0%</strong>
+                  <div>
+                    <span>源画面预览</span>
+                    <small>选区循环 / 自动静音</small>
+                  </div>
+                  <div class="video-toolbar-meter">
+                    <strong id="videoProgressLabel">0%</strong>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </section>
 
-        <section class="panel process-panel" id="processPanel" hidden>
+        <section class="panel process-panel workflow-target" id="extractPanel" hidden>
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Extract</p>
+              <h2>提取帧</h2>
+            </div>
+            <div class="step-lock-note" id="extractLockNote">导入素材后，先按这里的基础输出设置提取帧。</div>
+          </div>
+
+          <div class="process-step-shell" id="extractStepShell">
+            <div class="extract-layout">
+              <div class="control-group">
+                <div class="group-title">
+                  <span>基础输出</span>
+                </div>
+                <div class="form-grid">
+                  <label class="field">
+                    <span>保留每 N 帧</span>
+                    <input id="keepEveryInput" type="number" min="1" step="1" value="2">
+                    <small>1 为全保留，2 为隔一帧。</small>
+                  </label>
+
+                  <label class="field">
+                    <span>输出尺寸</span>
+                    <input id="outputScaleInput" type="number" min="5" max="200" step="5" value="100" list="outputScalePresets">
+                    <datalist id="outputScalePresets">
+                      <option value="100"></option>
+                      <option value="75"></option>
+                      <option value="50"></option>
+                      <option value="25"></option>
+                    </datalist>
+                    <small>百分比，按源素材高度缩放。</small>
+                  </label>
+
+                  <label class="field">
+                    <span>画布布局</span>
+                    <select id="canvasModeInput">
+                      <option value="auto">自动宽度，居中</option>
+                      <option value="square_bottom">方形画布，底部对齐</option>
+                      <option value="square_center">方形画布，居中</option>
+                    </select>
+                  </label>
+
+                  <label class="field">
+                    <span>画布边距</span>
+                    <input id="reducePxInput" type="number" min="0" step="1" value="0">
+                  </label>
+                </div>
+              </div>
+
+              <div class="action-bar extract-action-bar">
+                <div id="extractProgress" class="process-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+                  <div id="extractProgressFill" class="process-progress-fill"></div>
+                  <span id="extractProgressLabel">开始处理：0/0</span>
+                </div>
+                <button id="extractButton" class="primary-button large" type="button">提取帧</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel process-panel workflow-target" id="processPanel" hidden>
           <div class="section-head">
             <div>
               <p class="section-kicker">Matte</p>
-              <h2>选择抠图算法与输出设置</h2>
+              <h2>抠图</h2>
             </div>
-            <div class="step-lock-note" id="processLockNote">导入素材后即可预览当前帧并开始处理。</div>
+            <div class="step-lock-note" id="processLockNote">先在提取结果里选择需要处理的帧，再对选中帧抠图。</div>
           </div>
 
           <div class="process-step-shell" id="processStepShell">
             <div class="parameter-layout">
               <div class="parameter-column">
-                <div class="control-group">
-                  <div class="group-title">
-                    <span>基础输出</span>
-                  </div>
-                  <div class="form-grid">
-                    <label class="field">
-                      <span>保留每 N 帧</span>
-                      <input id="keepEveryInput" type="number" min="1" step="1" value="2">
-                      <small>1 为全保留，2 为隔一帧。</small>
-                    </label>
-
-                    <label class="field">
-                      <span>输出尺寸</span>
-                      <input id="outputScaleInput" type="number" min="5" max="200" step="5" value="100" list="outputScalePresets">
-                      <datalist id="outputScalePresets">
-                        <option value="100"></option>
-                        <option value="75"></option>
-                        <option value="50"></option>
-                        <option value="25"></option>
-                      </datalist>
-                      <small>百分比，按源素材高度缩放。</small>
-                    </label>
-
-                    <label class="field">
-                      <span>画布布局</span>
-                      <select id="canvasModeInput">
-                        <option value="auto">自动宽度，居中</option>
-                        <option value="square_bottom">方形画布，底部对齐</option>
-                        <option value="square_center">方形画布，居中</option>
-                      </select>
-                    </label>
-
-                    <label class="field">
-                      <span>画布边距</span>
-                      <input id="reducePxInput" type="number" min="0" step="1" value="0">
-                    </label>
-                  </div>
-                </div>
-
                 <div class="control-group matte-algorithm-group">
                   <div class="group-title">
                     <span>选择抠图算法</span>
@@ -245,6 +331,7 @@
                         <option value="birefnet_luma_corridorkey">BiRefNet + Luma 合并后 / CorridorKey 精修</option>
                         <option value="none">不抠图，只缩放对齐</option>
                       </select>
+                      <button id="matteDependencyHint" class="matte-dependency-hint" type="button" hidden></button>
                       <small>“精修”会重建边缘和颜色；“收紧”只会进一步删掉背景。</small>
                     </label>
 
@@ -484,20 +571,6 @@
                   </article>
                 </div>
 
-                <div class="preview-options">
-                  <label class="field">
-                    <span>结果背景</span>
-                    <select id="processPreviewBackgroundModeInput">
-                      <option value="checkerboard">棋盘格</option>
-                      <option value="color">纯色</option>
-                    </select>
-                  </label>
-                  <label id="processPreviewBackgroundColorRow" class="field color-row" hidden>
-                    <span>背景色 <strong id="processPreviewBackgroundLabel">#F6FBF6</strong></span>
-                    <input id="processPreviewBackgroundInput" type="color" value="#f6fbf6">
-                  </label>
-                </div>
-
                 <div class="postprocess-actions">
                   <button id="greenToBlackButton" class="ghost-button" type="button" hidden>绿边转黑</button>
                   <button id="greenDesaturateButton" class="ghost-button" type="button" hidden>绿边去饱和</button>
@@ -507,18 +580,104 @@
                 </div>
 
                 <div class="action-bar">
-                  <button id="processButton" class="primary-button large" type="button">开始处理区间</button>
+                  <div id="processProgress" class="process-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" hidden>
+                    <div id="processProgressFill" class="process-progress-fill"></div>
+                    <span id="processProgressLabel">开始处理：0/0</span>
+                  </div>
+                  <button id="processButton" class="primary-button large" type="button">抠图选中帧</button>
                 </div>
               </div>
             </div>
           </div>
         </section>
 
-        <section class="panel result-panel" id="resultPanel" hidden>
+        <section class="panel result-panel workflow-target" id="extractResultPanel" hidden>
           <div class="section-head">
             <div>
-              <p class="section-kicker">Review</p>
-              <h2>帧检查与导出</h2>
+              <p class="section-kicker">Pick Frames</p>
+              <h2>首次选帧与预览</h2>
+            </div>
+            <div class="step-lock-note">这里显示提取出来的原始帧，勾选后进入下一步抠图。</div>
+          </div>
+
+          <div class="job-summary" id="extractJobSummary"></div>
+
+          <div class="review-layout">
+            <aside class="animation-panel">
+              <div class="animation-stage">
+                <canvas id="extractPreviewCanvas" width="512" height="512"></canvas>
+                <div id="extractPreviewEmptyState" class="empty-state">还没有提取帧</div>
+              </div>
+              <div class="preview-status">
+                <strong id="extractPreviewFrameLabel">预览帧</strong>
+                <span id="extractPreviewSelectedCount">已加载 0 帧</span>
+              </div>
+              <div id="extractPreviewProgressBar" class="preview-progress">
+                <div id="extractPreviewProgressFill"></div>
+              </div>
+              <span id="extractPreviewProgressLabel" class="progress-label">0 / 0</span>
+              <div class="playback-controls">
+                <button id="extractPreviewPlayPauseButton" class="ghost-button" type="button">播放预览</button>
+                <button id="extractPreviewRestartButton" class="ghost-button" type="button">重播</button>
+                <label class="checkbox-row compact">
+                  <input id="extractPreviewReverseInput" type="checkbox">
+                  <span>反向</span>
+                </label>
+              </div>
+              <div class="form-grid compact-form">
+                <label class="field">
+                  <span>背景 <strong id="extractPreviewBackgroundLabel">#F6FBF6</strong></span>
+                  <input id="extractPreviewBackgroundInput" type="color" value="#f6fbf6">
+                </label>
+                <label class="field">
+                  <span>间隔 ms</span>
+                  <input id="extractPreviewIntervalInput" type="number" min="20" max="5000" step="10" value="100">
+                </label>
+              </div>
+            </aside>
+
+            <div class="frames-panel">
+              <div class="frames-toolbar">
+                <strong id="extractSelectionCount">已选 0 / 0 帧</strong>
+                <div class="button-row">
+                  <button id="extractSelectAllButton" class="ghost-button tiny" type="button">全选</button>
+                  <button id="extractSelectNoneButton" class="ghost-button tiny" type="button">全不选</button>
+                  <button id="extractSelectOddButton" class="ghost-button tiny" type="button">奇数帧</button>
+                  <button id="extractSelectEvenButton" class="ghost-button tiny" type="button">偶数帧</button>
+                  <button id="extractInvertSelectionButton" class="ghost-button tiny" type="button">反选</button>
+                  <label class="checkbox-row compact ordered-selection-toggle">
+                    <input id="extractOrderedSelectionInput" type="checkbox">
+                    <span>按选序</span>
+                  </label>
+                  <button id="clearExtractFramesButton" class="ghost-button tiny" type="button">清空</button>
+                </div>
+              </div>
+              <div class="similarity-toolbar">
+                <div class="similarity-controls">
+                  <button id="extractAnalyzeSimilarityButton" class="ghost-button tiny" type="button">识别相似帧</button>
+                  <label class="checkbox-row compact similarity-toggle">
+                    <input id="extractSimilarityIgnoreNearInput" type="checkbox" checked>
+                    <span>忽略临近4帧</span>
+                  </label>
+                  <label class="field inline-field similarity-threshold">
+                    <span>分组阈值</span>
+                    <input id="extractSimilarityThresholdInput" type="number" min="50" max="100" step="5" value="80">
+                  </label>
+                  <button id="extractSimilarityDropSimilarButton" class="ghost-button tiny" type="button">取消相似帧</button>
+                  <button id="extractSimilarityKeepFirstButton" class="ghost-button tiny" type="button">每组保留首帧</button>
+                </div>
+                <span id="extractSimilarityStatus" class="similarity-status">尚未识别相似帧</span>
+              </div>
+              <div id="extractFrameGrid" class="frame-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel result-panel workflow-target" id="resultPanel" hidden>
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Final</p>
+              <h2>抠图结果预览</h2>
             </div>
             <div class="result-actions">
               <input id="customAnimationInput" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,image/*" multiple hidden>
@@ -563,6 +722,7 @@
                   <input id="previewIntervalInput" type="number" min="20" max="5000" step="10" value="100">
                 </label>
               </div>
+              <div id="aiPolishModule" class="module-anchor" aria-hidden="true"></div>
               <div id="magicPreviewPanel" class="magic-preview-panel" hidden>
                 <div class="animation-stage magic-stage">
                   <canvas id="magicPreviewCanvas" width="512" height="512"></canvas>
@@ -639,7 +799,7 @@
             </div>
           </div>
 
-          <div class="export-bar">
+          <div id="exportModule" class="export-bar module-anchor-card">
             <button id="exportButton" class="primary-button large" type="button">导出选中帧</button>
             <div class="magic-resize-mode" role="group" aria-label="MAGIC 缩放算法">
               <label class="magic-resize-option">
@@ -658,10 +818,964 @@
       </main>
     </div>
 
+    <section id="imageModule" class="image-module module-view" data-module-view="image" hidden>
+      <aside class="image-subpage-tabs" aria-label="图片处理子页签">
+        <button id="imageFullFlowTabButton" class="image-subpage-tab active" type="button" data-image-page="full" aria-pressed="true">
+          <span>全流程</span>
+        </button>
+        <button id="imageDualMatteTabButton" class="image-subpage-tab" type="button" data-image-page="dual" aria-pressed="false">
+          <span>双背景抠图</span>
+        </button>
+      </aside>
+
+      <div id="imageFullFlowPage" class="image-page image-full-flow-page" data-image-page-panel="full">
+      <aside class="image-module-rail" aria-label="图片处理流程">
+        <button class="image-tool-link active" type="button" data-image-tool="import" data-image-target="imageImportPanel">
+          <span class="rail-index">01</span>
+          <span>导入图片</span>
+        </button>
+        <button class="image-tool-link" type="button" data-image-tool="matte" data-image-target="imageMattePanel">
+          <span class="rail-index">02</span>
+          <span>抠图</span>
+        </button>
+        <button class="image-tool-link" type="button" data-image-tool="result" data-image-target="imageResultPanel">
+          <span class="rail-index">03</span>
+          <span>抠图结果预览</span>
+        </button>
+        <button class="image-tool-link" type="button" data-image-tool="split" data-image-target="imageSplitPanel">
+          <span class="rail-index">04</span>
+          <span>&#25286;&#22270;</span>
+        </button>
+        <button class="image-tool-link" type="button" data-image-tool="splitPreview" data-image-target="imageSplitPreviewPanel">
+          <span class="rail-index">05</span>
+          <span>拆图结果预览</span>
+        </button>
+        <button class="image-tool-link" type="button" data-image-tool="naming" data-image-target="imageNamingPanel">
+          <span class="rail-index">06</span>
+          <span>导出</span>
+        </button>
+      </aside>
+
+      <main class="image-module-main">
+        <section id="imageImportPanel" class="panel image-workflow-panel" data-image-step-panel="import">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Image Input</p>
+              <h2>导入图片</h2>
+            </div>
+            <span class="section-note">支持单张图片，也支持一次选择多张图片作为一批处理。</span>
+          </div>
+
+          <div class="image-step-layout">
+            <div id="imageDropzone" class="upload-dropzone image-dropzone" role="button" tabindex="0">
+              <div id="imageImportGallery" class="image-import-gallery" hidden></div>
+              <div class="upload-dropzone-copy">
+                <div class="upload-dropzone-title">拖入图片、粘贴截图或点击选择</div>
+                <div class="upload-dropzone-hint">多图会按文件名顺序组成一批图片，剪贴板图片可直接 Ctrl+V</div>
+                <div class="upload-dropzone-types">PNG / JPG / JPEG / WebP / BMP</div>
+              </div>
+            </div>
+            <div class="image-side-card">
+              <div class="job-summary" id="imageImportSummary"></div>
+              <div class="button-row">
+                <label id="imageImportButton" class="primary-button large image-import-button" for="imageUploadInput" role="button" tabindex="0">选择图片</label>
+                <button id="imagePasteButton" class="ghost-button large image-paste-button" type="button" title="从剪贴板粘贴图片">粘贴导入</button>
+                <button id="imageClearButton" class="ghost-button" type="button" disabled>清空</button>
+              </div>
+            </div>
+          </div>
+          <input id="imageUploadInput" class="image-file-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,image/png,image/jpeg,image/webp,image/bmp" multiple>
+        </section>
+
+        <section id="imagePreviewPanel" class="panel image-workflow-panel" data-image-step-panel="preview" hidden>
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Image Preview</p>
+              <h2>预览图片</h2>
+            </div>
+            <span id="imagePreviewNote" class="section-note">先导入图片，这里会显示当前待处理素材。</span>
+          </div>
+          <div class="image-step-layout image-preview-layout">
+            <div class="image-preview-stage image-source-stage">
+              <span id="imagePreviewEmpty" class="empty-state">等待导入图片</span>
+              <img id="imagePreviewImage" alt="图片预览" hidden>
+            </div>
+            <div class="image-side-card">
+              <div class="job-summary" id="imagePreviewSummary"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="imageMattePanel" class="image-workflow-panel image-matte-panel" data-image-step-panel="matte">
+          <div id="imageMatteModuleHost"></div>
+        </section>
+
+        <section id="imageResultPanel" class="panel image-workflow-panel image-result-preview-panel" data-image-step-panel="result">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Image Result</p>
+              <h2>抠图结果预览</h2>
+            </div>
+            <span class="section-note">抠图完成后，这里对比原图与透明结果。</span>
+          </div>
+          <div id="imageResultPreviewHost" class="image-result-preview-host"></div>
+          <div class="frames-panel image-result-panel">
+            <div class="frames-toolbar">
+              <div>
+                <strong>抠图结果</strong>
+                <span id="imageResultCount">0 张</span>
+              </div>
+              <div class="button-row">
+                <button id="imageExportResultButton" class="primary-button" type="button" disabled>导出抠图结果</button>
+                <button id="imageExportToResourceButton" class="ghost-button" type="button" disabled>导出到资源管理</button>
+                <button id="imageStartSplitButton" class="ghost-button" type="button" disabled>拆图</button>
+              </div>
+            </div>
+            <div id="imageResultGrid" class="frame-grid"></div>
+          </div>
+        </section>
+
+        <section id="imageSplitPanel" class="panel image-workflow-panel image-split-panel" data-image-step-panel="split">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Sprite Split</p>
+              <h2>&#25286;&#22270;</h2>
+            </div>
+            <span class="section-note">&#35782;&#21035;&#36879;&#26126;&#32467;&#26524;&#20013;&#30340;&#20027;&#20307;&#20998;&#21306;&#24182;&#26631;&#27880;&#65292;&#21487;&#28155;&#21152;&#12289;&#21024;&#38500;&#12289;&#21512;&#24182;&#25110;&#35843;&#25972;&#26694;&#36873;&#12290;</span>
+          </div>
+          <div class="image-split-layout">
+            <div class="image-split-stage-card">
+              <div id="imageSplitTabs" class="image-split-tabs" aria-label="拆图预览图片"></div>
+              <div id="imageSplitStage" class="image-split-stage">
+                <span id="imageSplitEmpty" class="empty-state">&#25248;&#22270;&#23436;&#25104;&#21518;&#20250;&#22312;&#36825;&#37324;&#36827;&#34892;&#25286;&#22270;&#26631;&#27880;</span>
+                <img id="imageSplitImage" alt="split preview" hidden>
+                <div id="imageSplitOverlay" class="image-split-overlay"></div>
+                <div class="image-split-stage-actions">
+                  <div class="image-split-view-controls" role="group" aria-label="拆图预览视图">
+                    <label class="image-split-zoom-field">
+                      <span id="imageSplitZoomLabel">100%</span>
+                      <input id="imageSplitZoomInput" type="range" min="25" max="400" step="5" value="100" aria-label="拆图预览缩放">
+                    </label>
+                    <button id="imageSplitFitButton" class="ghost-button tiny image-split-icon-button" type="button" title="自适应显示" aria-label="自适应显示">
+                      <span class="image-split-icon image-split-fit-icon" aria-hidden="true"></span>
+                    </button>
+                    <button id="imageSplitCenterButton" class="ghost-button tiny image-split-icon-button" type="button" title="居中画布" aria-label="居中画布">
+                      <span class="image-split-icon image-split-center-icon" aria-hidden="true"></span>
+                    </button>
+                    <div class="image-split-bg-controls" role="group" aria-label="拆图预览底色">
+                      <button id="imageSplitTransparentBgButton" class="ghost-button tiny image-split-icon-button" type="button" title="透明底" aria-label="透明底" aria-pressed="true">
+                        <span class="image-split-icon image-split-checker-icon" aria-hidden="true"></span>
+                      </button>
+                      <button id="imageSplitSolidBgButton" class="ghost-button tiny image-split-icon-button" type="button" title="纯色底" aria-label="纯色底" aria-pressed="false">
+                        <span class="image-split-icon image-split-solid-icon" aria-hidden="true"></span>
+                      </button>
+                      <label id="imageSplitBackgroundColorField" class="image-split-bg-button is-disabled" title="更换纯色底色" aria-label="更换纯色底色">
+                        <input id="imageSplitBackgroundInput" type="color" value="#fffef9" aria-label="拆图预览纯色底色" disabled>
+                        <span aria-hidden="true"></span>
+                      </label>
+                    </div>
+                  </div>
+                  <div class="image-split-box-actions" role="group" aria-label="拆图框操作">
+                    <button id="imageSplitAddBoxButton" class="ghost-button image-split-icon-button" type="button" title="添加分区" aria-label="添加分区">
+                      <span class="image-split-icon image-split-add-icon" aria-hidden="true"></span>
+                    </button>
+                    <button id="imageSplitDeleteBoxButton" class="ghost-button image-split-icon-button" type="button" title="删除分区" aria-label="删除分区">
+                      <span class="image-split-icon image-split-delete-icon" aria-hidden="true"></span>
+                    </button>
+                    <button id="imageSplitMergeBoxButton" class="ghost-button image-split-icon-button" type="button" title="合并分区" aria-label="合并分区">
+                      <span class="image-split-icon image-split-merge-icon" aria-hidden="true"></span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <aside class="image-split-sidebar">
+              <div class="image-split-toolbar">
+                <div class="image-split-top-actions">
+                  <button id="imageSplitAnalyzeButton" class="primary-button" type="button">&#35782;&#21035;&#20998;&#21306;</button>
+                  <button id="imageSplitSkipButton" class="ghost-button" type="button">&#36339;&#36807;</button>
+                </div>
+                <label class="image-split-strength">
+                  <span>&#35782;&#21035;&#24378;&#24230; <strong id="imageSplitStrengthLabel">&#20013;&#31561;</strong></span>
+                  <input id="imageSplitStrengthInput" type="range" min="1" max="5" step="1" value="3" aria-label="拆图识别强度">
+                </label>
+              </div>
+              <div id="imageSplitSummary" class="job-summary"></div>
+              <div class="image-box-editor">
+                <label class="field compact-field">
+                  <span>X</span>
+                  <input id="imageSplitBoxXInput" type="number" min="0" step="1">
+                </label>
+                <label class="field compact-field">
+                  <span>Y</span>
+                  <input id="imageSplitBoxYInput" type="number" min="0" step="1">
+                </label>
+                <label class="field compact-field">
+                  <span>W</span>
+                  <input id="imageSplitBoxWInput" type="number" min="1" step="1">
+                </label>
+                <label class="field compact-field">
+                  <span>H</span>
+                  <input id="imageSplitBoxHInput" type="number" min="1" step="1">
+                </label>
+              </div>
+              <div id="imageSplitBoxList" class="image-split-box-list" hidden></div>
+              <div class="image-split-confirm-actions">
+                <button id="imageSplitConfirmButton" class="primary-button" type="button">&#30830;&#35748;&#25286;&#22270;</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="imageSplitPreviewPanel" class="panel image-workflow-panel image-split-preview-panel" data-image-step-panel="splitPreview">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Split Preview</p>
+              <h2>拆图结果预览</h2>
+            </div>
+            <span class="section-note">查看每组拆图结果，确认预览无误后进入导出设置。</span>
+          </div>
+          <div class="image-naming-layout image-split-preview-layout">
+            <div id="imageNamingList" class="image-naming-list image-split-preview-list"></div>
+            <aside class="image-naming-bottom-bar image-split-preview-bottom-bar">
+              <div id="imageSplitPreviewSummary" class="job-summary"></div>
+              <div class="button-row">
+                <button id="imageSplitPreviewBackButton" class="ghost-button" type="button">返回拆图</button>
+                <button id="imageSplitPreviewExportButton" class="primary-button large" type="button">进入导出</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="imageNamingPanel" class="panel image-workflow-panel image-naming-panel" data-image-step-panel="naming">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Export</p>
+              <h2>导出</h2>
+            </div>
+            <span class="section-note">确认拆图结果的输出尺寸与文件名；如跳过拆图，则直接导出抠图结果。</span>
+          </div>
+          <div class="image-export-layout">
+            <aside class="image-naming-bottom-bar image-export-actions-panel">
+              <div id="imageNamingSummary" class="job-summary"></div>
+              <div class="image-export-mode-row" role="radiogroup" aria-label="导出方式">
+                <span>导出方式</span>
+                <div class="image-export-mode-switch" data-mode="folder">
+                  <span class="image-export-mode-thumb" aria-hidden="true"></span>
+                  <label>
+                    <input type="radio" name="imageSplitExportMode" value="folder" checked>
+                    <strong>以文件夹形式导出</strong>
+                  </label>
+                  <label>
+                    <input type="radio" name="imageSplitExportMode" value="direct">
+                    <strong>直接导出</strong>
+                  </label>
+                </div>
+              </div>
+              <div class="button-row">
+                <button id="imageNamingBackButton" class="ghost-button" type="button">返回预览</button>
+                <button id="imageNamingExportToResourceButton" class="ghost-button" type="button" disabled>导出到资源管理</button>
+                <button id="imageNamingConfirmButton" class="primary-button large" type="button">导出到文件夹</button>
+              </div>
+            </aside>
+          </div>
+        </section>
+      </main>
+      </div>
+
+      <div id="imageDualMattePage" class="image-page image-dual-page" data-image-page-panel="dual" hidden>
+        <aside class="image-module-rail image-dual-rail" aria-label="双背景抠图流程">
+          <button class="image-tool-link active" type="button" data-image-dual-target="dualMatteInputPanel">
+            <span class="rail-index">01</span>
+            <span>抠图</span>
+          </button>
+          <button class="image-tool-link" type="button" data-image-dual-target="dualMatteResultPanel">
+            <span class="rail-index">02</span>
+            <span>预览与导出</span>
+          </button>
+        </aside>
+
+        <main class="image-module-main image-dual-main">
+          <section id="dualMatteInputPanel" class="panel image-workflow-panel dual-matte-panel">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">Dual Background Matte</p>
+                <h2>双背景抠图</h2>
+              </div>
+              <span class="section-note">选择同一物体在纯黑与纯白背景下的两张图片，反解透明通道并生成 PNG。</span>
+            </div>
+
+            <div class="dual-matte-layout">
+              <div class="dual-source-grid">
+                <article class="dual-source-card" data-dual-source-card="black">
+                  <div class="dual-source-head">
+                    <strong>黑底图片</strong>
+                    <span>纯黑背景拍摄</span>
+                  </div>
+                  <div id="dualBlackPreview" class="dual-source-preview">
+                    <span class="empty-state">未选择黑底图片</span>
+                  </div>
+                  <label class="field">
+                    <span>从已导入图片选择</span>
+                    <select id="dualBlackImportSelect"></select>
+                  </label>
+                  <div class="button-row dual-source-actions">
+                    <label class="ghost-button dual-file-button" for="dualBlackFileInput" role="button" tabindex="0">选择本地图片</label>
+                    <button id="dualPasteBlackButton" class="ghost-button" type="button">粘贴图片</button>
+                    <button id="dualClearBlackButton" class="ghost-button" type="button">清除</button>
+                  </div>
+                  <input id="dualBlackFileInput" class="image-file-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,image/png,image/jpeg,image/webp,image/bmp">
+                </article>
+
+                <article class="dual-source-card" data-dual-source-card="white">
+                  <div class="dual-source-head">
+                    <strong>白底图片</strong>
+                    <span>纯白背景拍摄</span>
+                  </div>
+                  <div id="dualWhitePreview" class="dual-source-preview">
+                    <span class="empty-state">未选择白底图片</span>
+                  </div>
+                  <label class="field">
+                    <span>从已导入图片选择</span>
+                    <select id="dualWhiteImportSelect"></select>
+                  </label>
+                  <div class="button-row dual-source-actions">
+                    <label class="ghost-button dual-file-button" for="dualWhiteFileInput" role="button" tabindex="0">选择本地图片</label>
+                    <button id="dualPasteWhiteButton" class="ghost-button" type="button">粘贴图片</button>
+                    <button id="dualClearWhiteButton" class="ghost-button" type="button">清除</button>
+                  </div>
+                  <input id="dualWhiteFileInput" class="image-file-input" type="file" accept=".png,.jpg,.jpeg,.webp,.bmp,image/png,image/jpeg,image/webp,image/bmp">
+                </article>
+              </div>
+
+              <aside class="image-side-card dual-matte-settings">
+                <div id="dualMatteSummary" class="job-summary"></div>
+                <div class="dual-matte-params">
+                  <label class="field">
+                    <span>差分补偿</span>
+                    <input id="dualMatteBiasInput" type="number" min="-64" max="64" step="1" value="0">
+                  </label>
+                  <label class="field">
+                    <span>边缘柔化</span>
+                    <input id="dualMatteFeatherInput" type="number" min="0" max="8" step="1" value="1">
+                  </label>
+                  <label class="checkbox-row compact">
+                    <input id="dualMatteTrimInput" type="checkbox" checked>
+                    <span>裁去纯透明外边缘</span>
+                  </label>
+                </div>
+                <button id="dualMatteRunButton" class="primary-button large" type="button" disabled>生成透明结果</button>
+              </aside>
+            </div>
+          </section>
+
+          <section id="dualMatteResultPanel" class="panel image-workflow-panel dual-matte-result-panel">
+            <div class="section-head">
+              <div>
+                <p class="section-kicker">Preview & Export</p>
+                <h2>预览与导出</h2>
+              </div>
+              <span class="section-note">预览双背景抠图结果，可直接导出、送入资源管理，或前往全流程拆图。</span>
+            </div>
+            <div class="dual-result-layout">
+              <div id="dualResultPreview" class="dual-result-preview">
+                <span class="empty-state">生成结果后在这里预览透明 PNG</span>
+              </div>
+              <aside class="image-side-card dual-result-actions">
+                <div id="dualResultSummary" class="job-summary"></div>
+                <div class="button-row">
+                  <button id="dualExportButton" class="primary-button" type="button" disabled>直接导出</button>
+                  <button id="dualExportResourceButton" class="ghost-button" type="button" disabled>导出到资源管理</button>
+                  <button id="dualGoSplitButton" class="ghost-button" type="button" disabled>前往拆图</button>
+                </div>
+              </aside>
+            </div>
+          </section>
+        </main>
+      </div>
+    </section>
+
+    <section id="videoProcessModule" class="video-process-module module-view" data-module-view="videoProcess" hidden>
+      <aside class="video-process-rail" aria-label="视频处理流程">
+        <button id="videoProcessImportToolButton" class="image-tool-link active" type="button" data-video-process-tool="import">
+          <span class="rail-index">01</span>
+          <span>导入模块</span>
+        </button>
+        <button id="videoProcessPreviewToolButton" class="image-tool-link" type="button" data-video-process-tool="preview">
+          <span class="rail-index">02</span>
+          <span>预览视频</span>
+        </button>
+        <button id="videoProcessEditToolButton" class="image-tool-link" type="button" data-video-process-tool="edit">
+          <span class="rail-index">03</span>
+          <span>剪辑视频</span>
+        </button>
+        <button id="videoProcessCompressToolButton" class="image-tool-link" type="button" data-video-process-tool="compress">
+          <span class="rail-index">04</span>
+          <span>压缩视频</span>
+        </button>
+      </aside>
+
+      <main class="video-process-main">
+        <section id="videoProcessImportPanel" class="panel video-process-panel" data-video-process-panel="import">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Input</p>
+              <h2>导入视频</h2>
+            </div>
+            <span class="section-note">视频处理模块使用独立素材池，可一次导入多段视频并组合成剪辑时间线。</span>
+          </div>
+          <div class="import-grid">
+            <div class="path-card">
+              <label class="field">
+                <span>本地路径</span>
+                <input id="videoProcessPathInput" type="text" placeholder="D:\media\clip.mp4">
+              </label>
+              <button id="videoProcessImportPathButton" class="primary-button" type="button">导入路径</button>
+              <div id="videoProcessImportSummary" class="job-summary"></div>
+              <div id="videoProcessAssetList" class="video-asset-list"></div>
+            </div>
+            <div class="upload-form">
+              <label id="videoProcessDropzone" class="upload-dropzone" for="videoProcessUploadInput" tabindex="0" role="button" aria-controls="videoProcessUploadInput">
+                <span class="upload-dropzone-title">拖入视频或点击选择</span>
+                <span class="upload-dropzone-hint">支持一次选择多段视频，导入后可加入拼接时间线</span>
+                <span class="upload-dropzone-types">MP4 / MOV / MKV / WebM / GIF</span>
+              </label>
+              <input id="videoProcessUploadInput" type="file" accept=".mp4,.mov,.mkv,.webm,.gif,video/*" multiple>
+            </div>
+          </div>
+        </section>
+
+        <section id="videoProcessPreviewPanel" class="panel video-process-panel" data-video-process-panel="preview">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Preview</p>
+              <h2>预览视频</h2>
+            </div>
+            <span class="section-note">查看当前素材池、当前预览素材的画面、尺寸、帧率、时长和文件大小。</span>
+          </div>
+          <div class="video-preview-stack">
+            <div class="video-process-preview video-process-preview-wide">
+              <video id="videoProcessPreview" playsinline muted controls></video>
+              <div id="videoProcessEmpty" class="empty-state">请先导入一个视频。</div>
+            </div>
+            <div class="video-preview-meta-row">
+              <div id="videoProcessSummary" class="job-summary"></div>
+              <div class="button-row video-preview-actions">
+                <button class="primary-button" type="button" data-video-process-jump="edit">剪辑视频</button>
+                <button class="ghost-button" type="button" data-video-process-jump="compress">压缩视频</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="videoProcessCompressPanel" class="panel video-process-panel" data-video-process-panel="compress">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Compress</p>
+              <h2>压缩视频</h2>
+            </div>
+            <span class="section-note">配置导出格式、压缩质量、尺寸和帧率，先生成压缩预览，再确认导出。</span>
+          </div>
+          <div class="video-process-layout">
+            <div class="video-process-preview video-process-preview-wide">
+              <video id="videoProcessCompressPreview" playsinline muted controls></video>
+              <div id="videoProcessCompressEmpty" class="empty-state">压缩后会在这里预览结果。</div>
+            </div>
+            <aside class="video-process-controls">
+              <div id="videoProcessCompressSummary" class="job-summary video-compress-summary"></div>
+              <div class="form-grid video-process-form">
+                <label class="field">
+                  <span>导出格式</span>
+                  <select id="videoProcessFormatInput">
+                    <option value="mp4" selected>MP4 / H.264</option>
+                    <option value="webm">WebM / VP9</option>
+                    <option value="mov">MOV / ProRes 4444</option>
+                    <option value="gif">GIF</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>压缩质量</span>
+                  <select id="videoProcessQualityInput">
+                    <option value="high">高质量</option>
+                    <option value="balanced" selected>均衡</option>
+                    <option value="small">小体积</option>
+                  </select>
+                </label>
+                <label class="field compact-field">
+                  <span>宽</span>
+                  <input id="videoProcessWidthInput" type="number" min="1" step="1" placeholder="原始">
+                </label>
+                <label class="field compact-field">
+                  <span>高</span>
+                  <input id="videoProcessHeightInput" type="number" min="1" step="1" placeholder="原始">
+                </label>
+                <label class="field compact-field">
+                  <span>帧率</span>
+                  <input id="videoProcessFpsInput" type="number" min="1" max="240" step="1" placeholder="原始">
+                </label>
+                <label class="field">
+                  <span>导出名称</span>
+                  <input id="videoProcessNameInput" type="text" placeholder="processed_video">
+                </label>
+              </div>
+              <label class="checkbox-row">
+                <input id="videoProcessMuteInput" type="checkbox">
+                <span>移除音频</span>
+              </label>
+              <div class="button-row video-process-actions">
+                <button id="videoProcessCompressButton" class="primary-button large" type="button" disabled>压缩视频</button>
+                <button id="videoProcessExportButton" class="ghost-button large" type="button" disabled>导出视频</button>
+              </div>
+              <div id="videoProcessResult" class="export-result" hidden></div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="videoProcessEditPanel" class="panel video-process-panel" data-video-process-panel="edit">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Edit</p>
+              <h2>剪辑视频</h2>
+            </div>
+            <span class="section-note">用素材池、预览区和轨道区管理分割、拼接、字幕和最终成片。</span>
+          </div>
+          <div class="video-editor-shell">
+            <aside class="video-editor-bin" aria-label="剪辑素材池">
+              <div class="video-editor-bin-head">
+                <div>
+                  <strong>素材池</strong>
+                  <span>选择素材预览，加入时间线</span>
+                </div>
+                <label id="videoProcessEditImportButton" class="ghost-button tiny" for="videoProcessUploadInput" role="button" tabindex="0">导入</label>
+              </div>
+              <div id="videoProcessEditAssetList" class="video-asset-list video-asset-list-compact"></div>
+            </aside>
+            <div class="video-editor-preview">
+              <video id="videoProcessEditPreview" playsinline muted controls></video>
+              <div id="videoProcessEditControls" class="video-edit-control-panel" hidden>
+                <div class="video-edit-timebar">
+                  <strong id="videoProcessEditCurrentTime">0.00s</strong>
+                  <input id="videoProcessEditSeekInput" type="range" min="0" max="1000" step="1" value="0" aria-label="剪辑预览进度">
+                  <span id="videoProcessEditDuration">0.00s</span>
+                </div>
+                <div class="video-edit-mark-grid" aria-label="从当前播放位置设置时间点">
+                  <button id="videoProcessUseCurrentTrimStartButton" class="ghost-button tiny" type="button">裁剪入点</button>
+                  <button id="videoProcessUseCurrentTrimEndButton" class="ghost-button tiny" type="button">裁剪出点</button>
+                  <button id="videoProcessUseCurrentSegmentStartButton" class="ghost-button tiny" type="button">片段入点</button>
+                  <button id="videoProcessUseCurrentSegmentEndButton" class="ghost-button tiny" type="button">片段出点</button>
+                  <button id="videoProcessUseCurrentSubtitleStartButton" class="ghost-button tiny" type="button">字幕入点</button>
+                  <button id="videoProcessUseCurrentSubtitleEndButton" class="ghost-button tiny" type="button">字幕出点</button>
+                </div>
+              </div>
+              <div id="videoProcessEditEmpty" class="empty-state">请先导入一个视频。</div>
+            </div>
+            <aside class="video-editor-inspector">
+              <div class="video-inspector-group">
+                <div class="video-inspector-title">片段</div>
+              <label class="field">
+                <span>当前素材</span>
+                <select id="videoProcessSourceSelect"></select>
+              </label>
+              <div class="video-edit-grid">
+                <label class="field compact-field">
+                  <span>裁剪开始</span>
+                  <input id="videoProcessTrimStartInput" type="number" min="0" step="0.01" placeholder="0.00">
+                </label>
+                <label class="field compact-field">
+                  <span>裁剪结束</span>
+                  <input id="videoProcessTrimEndInput" type="number" min="0" step="0.01" placeholder="原始">
+                </label>
+              </div>
+              <div class="video-segment-row">
+                <label class="field compact-field">
+                  <span>片段开始</span>
+                  <input id="videoProcessSegmentStartInput" type="number" min="0" step="0.01" placeholder="0.00">
+                </label>
+                <label class="field compact-field">
+                  <span>片段结束</span>
+                  <input id="videoProcessSegmentEndInput" type="number" min="0" step="0.01" placeholder="1.00">
+                </label>
+                <button id="videoProcessAddSegmentButton" class="ghost-button" type="button">添加到时间线</button>
+              </div>
+              <div class="button-row video-edit-utility-row">
+                <button id="videoProcessAddFullClipButton" class="ghost-button tiny" type="button">整段加入</button>
+                <button id="videoProcessSplitAtPlayheadButton" class="ghost-button tiny" type="button">按播放头分割</button>
+                <button id="videoProcessClearSegmentsButton" class="ghost-button tiny" type="button">清空片段</button>
+              </div>
+              </div>
+              <div class="video-inspector-group">
+                <div class="video-inspector-title">字幕</div>
+              <label class="field">
+                <span>字幕内容</span>
+                <textarea id="videoProcessSubtitleTextInput" rows="3" placeholder="输入字幕文本"></textarea>
+              </label>
+              <div class="video-edit-grid">
+                <label class="field compact-field">
+                  <span>字幕开始</span>
+                  <input id="videoProcessSubtitleStartInput" type="number" min="0" step="0.01" placeholder="0.00">
+                </label>
+                <label class="field compact-field">
+                  <span>字幕结束</span>
+                  <input id="videoProcessSubtitleEndInput" type="number" min="0" step="0.01" placeholder="原始">
+                </label>
+                <label class="field compact-field">
+                  <span>字号</span>
+                  <input id="videoProcessSubtitleSizeInput" type="number" min="12" max="128" step="1" value="32">
+                </label>
+              </div>
+              <div class="video-edit-grid">
+                <label class="field compact-field">
+                  <span>位置</span>
+                  <select id="videoProcessSubtitlePositionInput">
+                    <option value="bottom" selected>底部</option>
+                    <option value="middle">居中</option>
+                    <option value="top">顶部</option>
+                  </select>
+                </label>
+                <label class="field compact-field">
+                  <span>文字颜色</span>
+                  <input id="videoProcessSubtitleColorInput" type="color" value="#ffffff">
+                </label>
+                <label class="field compact-field">
+                  <span>背景</span>
+                  <select id="videoProcessSubtitleBoxInput">
+                    <option value="boxed" selected>半透明底</option>
+                    <option value="outline">描边</option>
+                    <option value="none">无背景</option>
+                  </select>
+                </label>
+              </div>
+              <div class="button-row video-edit-utility-row">
+                <button id="videoProcessAddSubtitleButton" class="ghost-button tiny" type="button">添加字幕</button>
+                <button id="videoProcessClearSubtitlesButton" class="ghost-button tiny" type="button">清空字幕</button>
+              </div>
+              </div>
+            </aside>
+            <div class="video-timeline">
+              <div class="video-timeline-ruler">
+                <span>00:00</span>
+                <span id="videoProcessTimelineDuration">00:00</span>
+              </div>
+              <div class="video-track-row">
+                <span>裁剪</span>
+                <div id="videoProcessTrimTrack" class="video-track"></div>
+              </div>
+              <div class="video-track-row">
+                <span>片段</span>
+                <div id="videoProcessSegmentTrack" class="video-track"></div>
+              </div>
+              <div class="video-track-row">
+                <span>字幕</span>
+                <div id="videoProcessSubtitleTrack" class="video-track"></div>
+              </div>
+              <div class="video-timeline-lists">
+                <div>
+                  <div class="video-list-heading">拼接时间线</div>
+                  <div id="videoProcessSegmentList" class="video-segment-list"></div>
+                </div>
+                <div>
+                  <div class="video-list-heading">字幕轨</div>
+                  <div id="videoProcessSubtitleList" class="video-segment-list"></div>
+                </div>
+              </div>
+              <div class="button-row video-editor-render-actions">
+                <button id="videoProcessRenderEditButton" class="primary-button large" type="button" disabled>生成剪辑预览</button>
+                <button id="videoProcessExportEditButton" class="ghost-button large" type="button" disabled>导出成片</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </section>
+
+    <section id="resourceModule" class="resource-module module-view" data-module-view="resource" hidden>
+      <section id="resourceOverviewPage" class="resource-overview-page">
+        <div class="panel resource-overview-head">
+          <div class="section-head">
+            <div>
+              <p class="section-kicker">Projects</p>
+              <h2>项目总览</h2>
+            </div>
+            <button id="resourceCreateProjectButton" class="primary-button icon-button" type="button" title="新建项目" aria-label="新建项目">+</button>
+          </div>
+        </div>
+        <div id="resourceProjectList" class="resource-project-grid"></div>
+      </section>
+
+      <section id="resourceDetailPage" class="resource-detail-page" hidden>
+        <aside class="resource-detail-sidebar">
+          <button id="resourceBackToProjectsButton" class="ghost-button resource-back-button" type="button">← 项目总览</button>
+
+          <section class="panel resource-project-panel">
+            <div class="resource-sidebar-head">
+              <div>
+                <p class="section-kicker">Library</p>
+                <h2 id="resourceProjectTitle">未选择项目</h2>
+              </div>
+              <div class="resource-project-icon-actions">
+                <button id="resourceRenameProjectButton" class="ghost-button icon-button" type="button" title="项目设置" aria-label="项目设置">✎</button>
+              </div>
+            </div>
+
+            <div class="resource-info-row">
+              <div id="resourceProjectSummary" class="resource-inline-summary"></div>
+              <label class="resource-folder-path">
+                <span>绑定文件夹</span>
+                <input id="resourceFolderInput" type="text" placeholder="未绑定文件夹" readonly>
+              </label>
+              <div id="resourceFolderList" class="resource-bound-folder-list" aria-label="已绑定文件夹"></div>
+              <div class="resource-folder-action-row">
+                <button id="resourceBindFolderButton" class="primary-button resource-folder-bind-button" type="button">绑定文件夹</button>
+                <button id="resourceRefreshFolderButton" class="ghost-button resource-folder-refresh-button" type="button">刷新文件夹资源</button>
+              </div>
+            </div>
+          </section>
+
+          <section class="panel resource-folder-panel">
+            <div class="resource-sidebar-head">
+              <div>
+                <p class="section-kicker">Folders</p>
+                <h2>资源范围</h2>
+              </div>
+            </div>
+            <div id="resourceFolderTabs" class="resource-folder-tabs" aria-label="资源文件夹"></div>
+          </section>
+        </aside>
+
+        <main class="resource-assets-workspace">
+          <section class="panel resource-assets-panel">
+            <div id="resourceAssetGrid" class="resource-asset-grid"></div>
+            <div id="resourceSelectionBar" class="resource-selection-bar" hidden>
+              <span id="resourceSelectionCount">已选 0 项</span>
+              <div class="resource-selection-actions">
+                <button id="resourceDeleteSelectedButton" class="ghost-button danger-button" type="button">删除资源</button>
+                <button id="resourceMoveSelectedButton" class="primary-button" type="button">移动资源</button>
+              </div>
+            </div>
+          </section>
+        </main>
+      </section>
+    </section>
+
+    <section id="modelModule" class="model-module module-view" data-module-view="model" hidden>
+      <section class="panel model-management-panel">
+        <div class="section-head model-management-head">
+          <div>
+            <p class="section-kicker">Model Depot</p>
+            <h2>模型管理</h2>
+          </div>
+          <div class="model-management-actions">
+            <button id="modelRefreshButton" class="ghost-button" type="button">刷新状态</button>
+          </div>
+        </div>
+        <div id="modelSummary" class="model-summary-strip" aria-label="模型状态摘要"></div>
+        <div id="modelList" class="model-list" aria-label="模型列表"></div>
+      </section>
+    </section>
+
+    <div id="resourceProjectEditDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="resourceProjectEditTitle" hidden>
+      <div class="resource-project-dialog-panel">
+        <div class="resource-project-dialog-head">
+          <div>
+            <p class="section-kicker">Project Settings</p>
+            <h2 id="resourceProjectEditTitle">修改项目</h2>
+          </div>
+          <button id="resourceProjectEditCloseButton" class="ghost-button icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <label class="field resource-project-edit-name">
+          <span>项目名称</span>
+          <input id="resourceProjectEditNameInput" type="text" autocomplete="off" placeholder="输入项目名称">
+        </label>
+        <div class="resource-project-dialog-actions">
+          <button id="resourceProjectEditDeleteButton" class="ghost-button danger-button" type="button">删除项目</button>
+          <button id="resourceProjectEditSaveButton" class="primary-button" type="button">保存修改</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="resourceExportProjectDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="resourceExportProjectTitle" hidden>
+      <div class="resource-project-dialog-panel resource-export-dialog-panel">
+        <div class="resource-project-dialog-head">
+          <div>
+            <p class="section-kicker">Export Target</p>
+            <h2 id="resourceExportProjectTitle">选择资源项目</h2>
+          </div>
+          <button id="resourceExportProjectCloseButton" class="ghost-button icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div class="resource-export-dialog-body">
+          <section class="resource-export-preview-panel" aria-label="待导出资源">
+            <div class="resource-export-preview-head">
+              <strong id="resourceExportSelectionSummary">已选择 0 项</strong>
+            </div>
+            <div id="resourceExportPreviewList" class="resource-export-preview-list"></div>
+            <div id="resourceExportGroupTabs" class="resource-export-group-tabs"></div>
+          </section>
+          <section class="resource-export-target-panel" aria-label="资源项目">
+            <div class="resource-export-target-actions">
+              <button id="resourceExportSelectAllButton" class="ghost-button" type="button">全选</button>
+              <button id="resourceExportClearAllButton" class="ghost-button" type="button">全部取消</button>
+              <button id="resourceExportSelectCurrentPageButton" class="ghost-button" type="button">选择当前页</button>
+            </div>
+            <div id="resourceExportProjectList" class="resource-export-project-list"></div>
+            <div class="resource-export-submit-row">
+              <button id="resourceExportConfirmButton" class="primary-button" type="button">导出选中资源</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div id="resourceMoveDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="resourceMoveTitle" hidden>
+      <div class="resource-project-dialog-panel resource-export-dialog-panel">
+        <div class="resource-project-dialog-head">
+          <div>
+            <p class="section-kicker">Move Target</p>
+            <h2 id="resourceMoveTitle">选择移动位置</h2>
+          </div>
+          <button id="resourceMoveCloseButton" class="ghost-button icon-button" type="button" title="关闭" aria-label="关闭">×</button>
+        </div>
+        <div id="resourceMoveTargetList" class="resource-export-project-list"></div>
+      </div>
+    </div>
+
     <footer class="statusbar" role="status" aria-live="polite">
       <span class="status-dot" aria-hidden="true"></span>
       <span id="appStatus">等待导入素材。</span>
     </footer>
+  </div>
+
+  <div id="imageLightbox" class="image-lightbox" hidden>
+    <div class="image-lightbox-toolbar" role="group" aria-label="大图底板">
+      <button id="imageLightboxTransparentButton" class="image-lightbox-mode-button checker" type="button" data-lightbox-bg-mode="transparent" title="透明底板" aria-label="透明底板"></button>
+      <button id="imageLightboxOpaqueButton" class="image-lightbox-mode-button solid active" type="button" data-lightbox-bg-mode="opaque" title="不透明底板" aria-label="不透明底板"></button>
+      <label id="imageLightboxColorField" class="image-lightbox-color-field" title="底板颜色">
+        <input id="imageLightboxColorInput" type="color" value="#ffffff" aria-label="底板颜色">
+      </label>
+    </div>
+    <button id="imageLightboxCloseButton" class="image-lightbox-close" type="button" aria-label="关闭大图">×</button>
+    <figure class="image-lightbox-frame">
+      <img id="imageLightboxImage" alt="查看大图">
+      <figcaption id="imageLightboxCaption"></figcaption>
+    </figure>
+    <form id="imageLightboxNamingEditor" class="image-lightbox-naming-editor" hidden>
+      <label class="field image-lightbox-name-field">
+        <span>命名</span>
+        <input id="imageLightboxNameInput" type="text" autocomplete="off">
+      </label>
+      <div class="image-lightbox-size-grid">
+        <label class="field compact-field">
+          <span>宽</span>
+          <input id="imageLightboxWidthInput" type="number" min="1" step="1">
+        </label>
+        <label class="image-lightbox-lock-toggle" title="锁定比例" aria-label="锁定比例">
+          <input id="imageLightboxAspectLockInput" type="checkbox" checked>
+          <span class="chain-link-icon" aria-hidden="true"></span>
+        </label>
+        <label class="field compact-field">
+          <span>高</span>
+          <input id="imageLightboxHeightInput" type="number" min="1" step="1">
+        </label>
+      </div>
+      <details class="image-lightbox-mode-menu">
+        <summary>
+          <span>适配方式</span>
+          <strong id="imageLightboxModeLabel">自适应</strong>
+        </summary>
+        <div class="image-lightbox-mode-menu-list" role="radiogroup" aria-label="缩放模式">
+          <label>
+            <input id="imageLightboxFitModeInput" type="radio" name="imageLightboxNamingMode" value="fit" checked>
+            <span>自适应</span>
+          </label>
+          <label>
+            <input id="imageLightboxNoneModeInput" type="radio" name="imageLightboxNamingMode" value="none">
+            <span>不缩放</span>
+          </label>
+        </div>
+      </details>
+      <button id="imageLightboxNineSliceButton" class="image-lightbox-nine-slice-button" type="button" hidden>九宫格</button>
+    </form>
+    <section id="imageNineSliceEditor" class="image-nine-slice-editor" hidden>
+      <div class="image-nine-slice-pane image-nine-slice-source">
+        <div class="image-nine-slice-head">
+          <div>
+            <p class="section-kicker">Nine Slice</p>
+            <h2>九宫格处理</h2>
+          </div>
+          <div class="image-nine-slice-tool-row">
+            <button id="imageNineSliceZoomOutButton" class="ghost-button icon-button" type="button" title="缩小" aria-label="缩小">-</button>
+            <button id="imageNineSliceZoomInButton" class="ghost-button icon-button" type="button" title="放大" aria-label="放大">+</button>
+            <button id="imageNineSliceFitButton" class="ghost-button" type="button">自适应</button>
+            <button id="imageNineSliceCenterButton" class="ghost-button" type="button">居中</button>
+          </div>
+        </div>
+        <div class="image-nine-slice-stage">
+          <canvas id="imageNineSliceCanvas" width="640" height="480" aria-label="九宫格线编辑区"></canvas>
+        </div>
+        <div class="image-nine-slice-line-grid">
+          <label class="field compact-field">
+            <span>左</span>
+            <input id="imageNineSliceLeftInput" type="number" min="0" step="1">
+          </label>
+          <label class="field compact-field">
+            <span>右</span>
+            <input id="imageNineSliceRightInput" type="number" min="1" step="1">
+          </label>
+          <label class="field compact-field">
+            <span>上</span>
+            <input id="imageNineSliceTopInput" type="number" min="0" step="1">
+          </label>
+          <label class="field compact-field">
+            <span>下</span>
+            <input id="imageNineSliceBottomInput" type="number" min="1" step="1">
+          </label>
+        </div>
+      </div>
+      <div class="image-nine-slice-pane image-nine-slice-result">
+        <div class="image-nine-slice-head">
+          <div>
+            <p class="section-kicker">Result</p>
+            <h2>结果预览</h2>
+          </div>
+          <div class="image-nine-slice-mode-row" role="radiogroup" aria-label="九宫格输出方式">
+            <label>
+              <input id="imageNineSliceStretchModeInput" type="radio" name="imageNineSliceMode" value="stretch" checked>
+              <span>扩图</span>
+            </label>
+            <label>
+              <input id="imageNineSliceShrinkModeInput" type="radio" name="imageNineSliceMode" value="shrink">
+              <span>缩图</span>
+            </label>
+          </div>
+        </div>
+        <div class="image-nine-slice-target-grid">
+          <label class="field compact-field">
+            <span>目标 W</span>
+            <input id="imageNineSliceTargetWidthInput" type="number" min="1" step="1">
+          </label>
+          <label class="field compact-field">
+            <span>目标 H</span>
+            <input id="imageNineSliceTargetHeightInput" type="number" min="1" step="1">
+          </label>
+        </div>
+        <div class="image-nine-slice-preview-stage">
+          <canvas id="imageNineSlicePreviewCanvas" width="480" height="480" aria-label="九宫格结果预览"></canvas>
+          <button class="image-nine-slice-resize-handle n" type="button" data-nine-slice-resize="n" aria-label="向上拉伸"></button>
+          <button class="image-nine-slice-resize-handle ne" type="button" data-nine-slice-resize="ne" aria-label="右上拉伸"></button>
+          <button class="image-nine-slice-resize-handle e" type="button" data-nine-slice-resize="e" aria-label="向右拉伸"></button>
+          <button class="image-nine-slice-resize-handle se" type="button" data-nine-slice-resize="se" aria-label="右下拉伸"></button>
+          <button class="image-nine-slice-resize-handle s" type="button" data-nine-slice-resize="s" aria-label="向下拉伸"></button>
+          <button class="image-nine-slice-resize-handle sw" type="button" data-nine-slice-resize="sw" aria-label="左下拉伸"></button>
+          <button class="image-nine-slice-resize-handle w" type="button" data-nine-slice-resize="w" aria-label="向左拉伸"></button>
+          <button class="image-nine-slice-resize-handle nw" type="button" data-nine-slice-resize="nw" aria-label="左上拉伸"></button>
+        </div>
+        <div id="imageNineSliceStatus" class="image-nine-slice-status">等待编辑九宫格线。</div>
+        <div class="image-nine-slice-actions">
+          <button id="imageNineSliceCancelButton" class="ghost-button" type="button">退出九宫格</button>
+          <button id="imageNineSliceExportResourceButton" class="ghost-button" type="button">导出资源</button>
+          <button id="imageNineSliceSaveButton" class="primary-button" type="button">保存到预览</button>
+        </div>
+      </div>
+    </section>
   </div>
 
   <script src="/app/app.js"></script>

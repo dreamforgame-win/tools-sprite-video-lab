@@ -2,8 +2,13 @@
 setlocal
 cd /d "%~dp0"
 
-set "AI_ROOT=E:\sprite-video-lab-models"
-if not exist "E:\" set "AI_ROOT=%~dp0work\models"
+if not "%SPRITE_VIDEO_LAB_PROXY%"=="" (
+  set "HTTP_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
+  set "HTTPS_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
+)
+
+if "%SPRITE_VIDEO_LAB_DATA_ROOT%"=="" set "SPRITE_VIDEO_LAB_DATA_ROOT=%~dp0..\sprite-video-lab-models"
+set "AI_ROOT=%SPRITE_VIDEO_LAB_DATA_ROOT%"
 
 set "SPRITE_VIDEO_LAB_AI_MODEL_CACHE=%AI_ROOT%\huggingface"
 set "HF_HOME=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%"
@@ -71,4 +76,5 @@ echo   %SPRITE_VIDEO_LAB_AI_MODEL_CACHE%
 echo CorridorKey root:
 echo   %SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%
 echo.
+if "%SPRITE_VIDEO_LAB_NO_PAUSE%"=="1" exit /b 0
 pause

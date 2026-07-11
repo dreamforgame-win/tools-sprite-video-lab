@@ -3,10 +3,18 @@ __pycache__/
 *.pyo
 
 .venv/
+.venv-ai/
 venv/
 env/
 
 work/
+.playwright-cli/
+dist/
+SpriteForgeLab/
+SpriteVideoLab/
+*-portable.zip
+.server.*.log
+.server*.log
 
 .DS_Store
 Thumbs.db

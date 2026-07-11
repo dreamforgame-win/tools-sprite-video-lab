@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import cgi
+import gc
+import importlib.util
 import json
 import math
 import mimetypes
@@ -13,12 +15,15 @@ import sys
 import threading
 import time
 import uuid
+import zipfile
+from io import BytesIO
 from datetime import datetime
 from fractions import Fraction
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
+from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
 
@@ -30,14 +35,21 @@ UPLOADS_DIR = WORK_DIR / "uploads"
 JOBS_DIR = WORK_DIR / "jobs"
 EXPORTS_DIR = WORK_DIR / "exports"
 PREVIEWS_DIR = WORK_DIR / "previews"
+COMPRESSED_DIR = WORK_DIR / "compressed"
+VIDEO_PROCESS_DIR = WORK_DIR / "video-process"
 LINE_CLEANER_DIR = WORK_DIR / "line-cleaner"
 MAGIC_DIR = WORK_DIR / "magic"
 SETTINGS_PATH = WORK_DIR / "settings.json"
 MAGIC_PREVIEW_LOCK = threading.Lock()
+PROCESS_PROGRESS_LOCK = threading.Lock()
+PROCESS_PROGRESS: dict[str, dict] = {}
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8894
-DEFAULT_FFMPEG_FALLBACK_ROOT = Path(r"I:\FF\Flowframes\FlowframesData\pkgs\av")
+PRODUCT_NAME = "Sprite Forge Lab"
+PRODUCT_NAME_ZH = "灵帧工坊"
+DEFAULT_FFMPEG_FALLBACK_ROOT = Path(r"F:\Codex-Program\tools\ffmpeg\bin")
+DEFAULT_REALESRGAN_ROOT = Path(r"F:\Codex-Program\tools\realesrgan-ncnn-vulkan")
 HOST_ENV = "SPRITE_VIDEO_LAB_HOST"
 PORT_ENV = "SPRITE_VIDEO_LAB_PORT"
 FFMPEG_DIR_ENV = "SPRITE_VIDEO_LAB_FFMPEG_DIR"
@@ -96,6 +108,7 @@ AI_MATTE_MODEL_LABELS = {
 AI_MATTE_MODES = {
     "none",
     "chroma",
+    "edge_connected_chroma",
     "birefnet",
     "corridorkey",
     "luma",
@@ -104,6 +117,7 @@ AI_MATTE_MODES = {
     "birefnet_luma",
     "birefnet_luma_key",
     "birefnet_luma_corridorkey",
+    "subject_protect_chroma",
 }
 AI_MATTE_DEVICE_ALIASES = {
     "": "auto",
@@ -122,6 +136,7 @@ AI_MATTE_RESOLUTION_MULTIPLE = 32
 OUTPUT_SCALE_MIN = 0.05
 OUTPUT_SCALE_MAX = 2.0
 CORRIDORKEY_REPO_URL = "https://github.com/nikopueringer/CorridorKey"
+REALESRGAN_RELEASE_API_URL = "https://api.github.com/repos/xinntao/Real-ESRGAN/releases/latest"
 CORRIDORKEY_IMG_SIZE = 2048
 CORRIDORKEY_GPU_DESPECKLE_PIXEL_LIMIT = 2**24
 CORRIDORKEY_SCREEN_COLORS = {"auto", "green", "blue"}
@@ -146,7 +161,7 @@ _CORRIDORKEY_ENGINE_CACHE: dict[tuple[str, str], object] = {}
 
 
 def ensure_runtime_dirs() -> None:
-    for directory in (APP_DIR, WORK_DIR, UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, LINE_CLEANER_DIR, MAGIC_DIR):
+    for directory in (APP_DIR, WORK_DIR, UPLOADS_DIR, JOBS_DIR, EXPORTS_DIR, PREVIEWS_DIR, COMPRESSED_DIR, VIDEO_PROCESS_DIR, LINE_CLEANER_DIR, MAGIC_DIR):
         directory.mkdir(parents=True, exist_ok=True)
 
 
@@ -162,6 +177,45 @@ def load_app_settings() -> dict:
 def save_app_settings(settings: dict) -> None:
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def set_process_progress(
+    progress_id: str,
+    current: int,
+    total: int,
+    phase: str = "processing",
+    *,
+    done: bool = False,
+    error: str = "",
+    detail: str = "",
+) -> None:
+    progress_id = str(progress_id or "").strip()
+    if not progress_id:
+        return
+    total = max(1, int(total or 1))
+    current = max(0, min(int(current or 0), total))
+    with PROCESS_PROGRESS_LOCK:
+        PROCESS_PROGRESS[progress_id] = {
+            "id": progress_id,
+            "current": current,
+            "total": total,
+            "phase": phase,
+            "done": bool(done),
+            "error": str(error or ""),
+            "detail": str(detail or ""),
+            "updated_at": iso_now(),
+        }
+
+
+def get_process_progress(progress_id: str) -> dict:
+    progress_id = str(progress_id or "").strip()
+    if not progress_id:
+        return {"id": "", "current": 0, "total": 1, "phase": "idle", "done": True, "error": "", "detail": ""}
+    with PROCESS_PROGRESS_LOCK:
+        progress = dict(PROCESS_PROGRESS.get(progress_id) or {})
+    if progress:
+        return progress
+    return {"id": progress_id, "current": 0, "total": 1, "phase": "waiting", "done": False, "error": "", "detail": ""}
 
 
 def configured_exports_dir() -> Path:
@@ -189,6 +243,27 @@ def output_path_payload() -> dict:
         "is_default": not raw or path == default_path,
         "default_path": str(default_path),
     }
+
+
+def one_click_login_payload() -> dict:
+    settings = load_app_settings()
+    auth = settings.get("local_auth")
+    if not isinstance(auth, dict):
+        auth = {}
+
+    now = datetime.now().astimezone().isoformat(timespec="seconds")
+    user_id = str(auth.get("user_id") or f"svl-{uuid.uuid4().hex[:8]}")
+    login_count = safe_int(auth.get("login_count"), 0) + 1
+    payload = {
+        "user_id": user_id,
+        "display_name": "本地创作者",
+        "provider": "local-one-click",
+        "login_count": login_count,
+        "last_login_at": now,
+    }
+    settings["local_auth"] = payload
+    save_app_settings(settings)
+    return payload
 
 
 def set_output_path(raw_path: str) -> dict:
@@ -234,7 +309,7 @@ def choose_output_path() -> dict:
     try:
         selected = filedialog.askdirectory(
             parent=root,
-            title="选择 Sprite Video Lab 输出路径",
+            title=f"选择 {PRODUCT_NAME_ZH} 输出路径",
             initialdir=str(initial_dir),
             mustexist=False,
         )
@@ -249,6 +324,274 @@ def choose_output_path() -> dict:
     payload = set_output_path(selected)
     payload["cancelled"] = False
     return payload
+
+
+def choose_resource_folder() -> dict:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        raise RuntimeError("folder picker is unavailable on this Python runtime") from exc
+
+    initial_dir = configured_exports_dir() if configured_exports_dir().exists() else ROOT_DIR
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    try:
+        selected = filedialog.askdirectory(
+            parent=root,
+            title="选择资源项目文件夹",
+            initialdir=str(initial_dir),
+            mustexist=True,
+        )
+    finally:
+        root.destroy()
+
+    if not selected:
+        return {"path": "", "cancelled": True}
+    path = Path(selected).expanduser().resolve()
+    if not path.is_dir():
+        raise ValueError(f"resource folder is not a folder: {path}")
+    return {"path": str(path), "cancelled": False}
+
+
+def resource_file_url(path: Path) -> str:
+    return f"/api/resource-file?path={quote(str(path.resolve()), safe='')}"
+
+
+def scan_resource_folder(raw_path: str, limit: int = 500) -> dict:
+    root = Path(str(raw_path or "").strip()).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"resource folder not found: {root}")
+
+    assets: list[dict] = []
+    limit = max(1, min(2000, int(limit or 500)))
+    supported_extensions = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
+    first_level_dirs = [
+        item.name
+        for item in sorted(root.iterdir(), key=lambda path: natural_sort_key(path.name))
+        if item.is_dir() and not item.name.startswith(".") and item.name not in {"__pycache__", "node_modules"}
+    ]
+    for current_root, dirs, files in os.walk(root):
+        dirs[:] = sorted(
+            [name for name in dirs if not name.startswith(".") and name not in {"__pycache__", "node_modules"}],
+            key=natural_sort_key,
+        )
+        for filename in sorted(files, key=natural_sort_key):
+            if len(assets) >= limit:
+                break
+            if filename.startswith("."):
+                continue
+            path = Path(current_root) / filename
+            suffix = path.suffix.lower()
+            if suffix not in supported_extensions:
+                continue
+            kind = "video" if suffix in VIDEO_EXTENSIONS else "image"
+            stat = path.stat()
+            asset = {
+                "name": path.name,
+                "path": str(path),
+                "relative_path": str(path.relative_to(root)),
+                "kind": kind,
+                "bytes": stat.st_size,
+                "updated_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
+                "url": resource_file_url(path),
+                "thumbUrl": resource_file_url(path) if kind == "image" else "",
+            }
+            if kind == "image":
+                try:
+                    with Image.open(path) as image:
+                        asset["width"] = image.width
+                        asset["height"] = image.height
+                except Exception:
+                    asset["width"] = 0
+                    asset["height"] = 0
+            assets.append(asset)
+        if len(assets) >= limit:
+            break
+    return {"path": str(root), "assets": assets, "folders": first_level_dirs, "truncated": len(assets) >= limit}
+
+
+def resource_root_path(raw_root: str) -> Path:
+    root = Path(str(raw_root or "").strip()).expanduser().resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(f"resource folder not found: {root}")
+    return root
+
+
+def resource_target_dir(raw_root: str, raw_relative: str = "") -> Path:
+    root = resource_root_path(raw_root)
+    relative_text = str(raw_relative or "").strip().replace("\\", "/")
+    if relative_text.startswith("/") or relative_text.startswith("~"):
+        raise ValueError("target folder must be inside the bound resource folder")
+    target = (root / relative_text).resolve()
+    if not is_within_root(target, root):
+        raise ValueError("target folder must be inside the bound resource folder")
+    if not target.is_dir():
+        raise FileNotFoundError(f"target folder not found: {target}")
+    return target
+
+
+def resource_asset_path_from_url(raw_url: str, root: Path) -> Path | None:
+    raw_url = str(raw_url or "").strip()
+    if not raw_url:
+        return None
+    parsed = urlparse(raw_url)
+    if parsed.path == "/api/resource-file":
+        raw_path = (parse_qs(parsed.query).get("path") or [""])[0]
+        return Path(unquote(raw_path)).expanduser().resolve() if raw_path else None
+    if parsed.path.startswith("/work/"):
+        return (WORK_DIR / unquote(parsed.path.removeprefix("/work/"))).resolve()
+    if parsed.path.startswith("/exports/"):
+        return (configured_exports_dir() / unquote(parsed.path.removeprefix("/exports/"))).resolve()
+    if raw_url and not parsed.scheme and not parsed.netloc:
+        candidate = Path(unquote(raw_url)).expanduser()
+        if candidate.is_absolute():
+            return candidate.resolve()
+    return None
+
+
+def resource_asset_source_path(asset: dict, root: Path) -> Path:
+    raw_path = str(asset.get("path") or "").strip()
+    path = Path(raw_path).expanduser().resolve() if raw_path else None
+    if not path:
+        path = resource_asset_path_from_url(str(asset.get("url") or asset.get("thumbUrl") or ""), root)
+    if not path or not path.is_file():
+        raise FileNotFoundError(f"resource file not found: {raw_path or asset.get('url') or asset.get('name') or ''}")
+
+    source_type = str(asset.get("source") or "").strip()
+    source_root = Path(str(asset.get("root") or "")).expanduser().resolve() if str(asset.get("root") or "").strip() else root
+    allowed_roots = [source_root] if source_type == "folder" else [root, WORK_DIR, configured_exports_dir()]
+    if not any(is_within_root(path, allowed_root) for allowed_root in allowed_roots):
+        raise ValueError(f"resource file is outside allowed folders: {path}")
+    return path
+
+
+def unique_resource_destination(target_dir: Path, filename: str, source_path: Path) -> Path:
+    safe_name = Path(str(filename or "")).name or source_path.name
+    if not Path(safe_name).suffix and source_path.suffix:
+        safe_name = f"{safe_name}{source_path.suffix}"
+    stem = Path(safe_name).stem or source_path.stem or "resource"
+    suffix = Path(safe_name).suffix or source_path.suffix
+    candidate = (target_dir / f"{stem}{suffix}").resolve()
+    if source_path.resolve() == candidate:
+        return candidate
+    index = 2
+    while candidate.exists():
+        candidate = (target_dir / f"{stem}_{index}{suffix}").resolve()
+        index += 1
+    return candidate
+
+
+def render_resource_asset_canvas(source_path: Path, asset: dict) -> tuple[Image.Image, int, int, str] | None:
+    crop = asset.get("crop") if isinstance(asset.get("crop"), dict) else {}
+    if not crop:
+        return None
+
+    with open_rgba_image(source_path) as source:
+        frame_width = max(1, safe_int(crop.get("frameWidth"), source.width))
+        frame_height = max(1, safe_int(crop.get("frameHeight"), source.height))
+        crop_x = clamp_float(safe_float(crop.get("x"), 0.0), 0.0, float(max(0, frame_width - 1)))
+        crop_y = clamp_float(safe_float(crop.get("y"), 0.0), 0.0, float(max(0, frame_height - 1)))
+        crop_w = max(1.0, safe_float(crop.get("w"), float(frame_width)))
+        crop_h = max(1.0, safe_float(crop.get("h"), float(frame_height)))
+        crop_right = clamp_float(crop_x + crop_w, crop_x + 1.0, float(frame_width))
+        crop_bottom = clamp_float(crop_y + crop_h, crop_y + 1.0, float(frame_height))
+        source_logical_width = max(1, int(round(crop_right - crop_x)))
+        source_logical_height = max(1, int(round(crop_bottom - crop_y)))
+
+        scale_x = source.width / frame_width
+        scale_y = source.height / frame_height
+        left = max(0, min(source.width - 1, int(round(crop_x * scale_x))))
+        top = max(0, min(source.height - 1, int(round(crop_y * scale_y))))
+        right = max(left + 1, min(source.width, int(round(crop_right * scale_x))))
+        bottom = max(top + 1, min(source.height, int(round(crop_bottom * scale_y))))
+        cropped = source.crop((left, top, right, bottom))
+
+        mode = str(crop.get("outputMode") or "source")
+        output_width = max(1, safe_int(crop.get("outputWidth"), safe_int(asset.get("width"), source_logical_width)))
+        output_height = max(1, safe_int(crop.get("outputHeight"), safe_int(asset.get("height"), source_logical_height)))
+
+        if mode == "fit":
+            fit_scale = min(output_width / source_logical_width, output_height / source_logical_height)
+            draw_width = max(1, int(round(source_logical_width * fit_scale)))
+            draw_height = max(1, int(round(source_logical_height * fit_scale)))
+            resized = cropped if cropped.size == (draw_width, draw_height) else resize_rgba_with_premultiplied_alpha(cropped, (draw_width, draw_height))
+            canvas = Image.new("RGBA", (output_width, output_height), (0, 0, 0, 0))
+            canvas.alpha_composite(resized, ((output_width - draw_width) // 2, (output_height - draw_height) // 2))
+        else:
+            output_width = source_logical_width
+            output_height = source_logical_height
+            canvas = cropped if cropped.size == (output_width, output_height) else resize_rgba_with_premultiplied_alpha(cropped, (output_width, output_height))
+
+        canvas = anti_alias_alpha_edges(canvas, radius=0.85, band_radius=1, rgb_radius=0.35)
+        return canvas, output_width, output_height, mode
+
+
+def delete_resource_assets(raw_root: str, assets: list[dict]) -> dict:
+    root = resource_root_path(raw_root)
+    deleted: list[dict] = []
+    errors: list[dict] = []
+    for asset in assets:
+        client_key = str(asset.get("client_key") or "")
+        try:
+            source_path = resource_asset_source_path({**asset, "source": "folder"}, root)
+            if not is_within_root(source_path, root):
+                raise ValueError(f"resource file is outside bound folder: {source_path}")
+            source_path.unlink()
+            deleted.append({"client_key": client_key, "path": str(source_path)})
+        except Exception as exc:
+            errors.append({"client_key": client_key, "error": str(exc)})
+    return {"deleted": deleted, "errors": errors}
+
+
+def move_resource_assets(raw_root: str, raw_target_relative: str, assets: list[dict]) -> dict:
+    root = resource_root_path(raw_root)
+    target_dir = resource_target_dir(str(root), raw_target_relative)
+    moved: list[dict] = []
+    errors: list[dict] = []
+    for asset in assets:
+        client_key = str(asset.get("client_key") or "")
+        try:
+            source_path = resource_asset_source_path(asset, root)
+            rendered = render_resource_asset_canvas(source_path, asset) if str(asset.get("source") or "") == "project" else None
+            destination_name = str(asset.get("name") or source_path.name)
+            if rendered:
+                destination_name = f"{Path(destination_name).stem or source_path.stem}.png"
+            destination = unique_resource_destination(target_dir, destination_name, source_path)
+            if not is_within_root(destination, root):
+                raise ValueError("target file must be inside the bound resource folder")
+            if rendered:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                canvas, width, height, mode = rendered
+                canvas.save(destination)
+            elif source_path.resolve() != destination.resolve():
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(source_path), str(destination))
+                width = safe_int(asset.get("width"), 0)
+                height = safe_int(asset.get("height"), 0)
+                mode = ""
+            else:
+                width = safe_int(asset.get("width"), 0)
+                height = safe_int(asset.get("height"), 0)
+                mode = ""
+            moved.append(
+                {
+                    "client_key": client_key,
+                    "source_path": str(source_path),
+                    "path": str(destination),
+                    "relative_path": str(destination.relative_to(root)),
+                    "width": width,
+                    "height": height,
+                    "mode": mode,
+                }
+            )
+        except Exception as exc:
+            errors.append({"client_key": client_key, "error": str(exc)})
+    return {"moved": moved, "errors": errors}
 
 
 def configured_host(cli_host: str | None = None) -> str:
@@ -280,20 +623,14 @@ def default_ai_model_cache_dir() -> Path:
     configured = str(os.environ.get(AI_MODEL_CACHE_ENV, "")).strip()
     if configured:
         return Path(configured).expanduser()
-    e_drive = Path("E:/")
-    if e_drive.exists():
-        return e_drive / "sprite-video-lab-models" / "huggingface"
-    return WORK_DIR / "models" / "huggingface"
+    return ROOT_DIR.parent / "sprite-video-lab-models" / "huggingface"
 
 
 def default_corridorkey_root() -> Path:
     configured = str(os.environ.get(CORRIDORKEY_ROOT_ENV, "")).strip()
     if configured:
         return Path(configured).expanduser()
-    e_drive = Path("E:/")
-    if e_drive.exists():
-        return e_drive / "sprite-video-lab-models" / "CorridorKey"
-    return WORK_DIR / "models" / "CorridorKey"
+    return ROOT_DIR.parent / "sprite-video-lab-models" / "CorridorKey"
 
 
 def configure_ai_model_cache() -> Path:
@@ -463,6 +800,14 @@ def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
         "greenscreen": "chroma",
         "green_key": "chroma",
         "chroma_key": "chroma",
+        "edge": "edge_connected_chroma",
+        "edge_chroma": "edge_connected_chroma",
+        "edge_connected": "edge_connected_chroma",
+        "edge_connected_chroma": "edge_connected_chroma",
+        "boundary": "edge_connected_chroma",
+        "boundary_chroma": "edge_connected_chroma",
+        "border": "edge_connected_chroma",
+        "border_chroma": "edge_connected_chroma",
         "ai": "birefnet",
         "birefnet": "birefnet",
         "corridor": "corridorkey",
@@ -494,6 +839,10 @@ def normalize_matte_mode(raw: str, chroma_enabled: bool) -> str:
         "birefnet+corridorkey+luma": "birefnet_luma_corridorkey",
         "ai_luma": "birefnet_luma",
         "ai_glow": "birefnet_luma",
+        "subject_protect": "subject_protect_chroma",
+        "subject_protect_chroma": "subject_protect_chroma",
+        "protect_subject": "subject_protect_chroma",
+        "image_subject_protect": "subject_protect_chroma",
     }
     mode = aliases.get(value, value)
     return mode if mode in AI_MATTE_MODES else ("chroma" if chroma_enabled else "none")
@@ -725,6 +1074,84 @@ def current_app_version() -> str:
     return max(mtimes)
 
 
+def python_package_status(package_name: str, import_name: str | None = None) -> dict:
+    name = import_name or package_name
+    installed = importlib.util.find_spec(name) is not None
+    return {"name": package_name, "import": name, "installed": installed}
+
+
+def command_readiness(name: str, resolver) -> dict:
+    try:
+        path = resolver(name)
+        return {"name": name, "ready": True, "path": str(path), "message": ""}
+    except Exception as exc:
+        return {"name": name, "ready": False, "path": "", "message": str(exc)}
+
+
+def hf_cache_model_dir(cache_dir: Path, repo_id: str) -> Path:
+    return cache_dir / "hub" / ("models--" + repo_id.replace("/", "--"))
+
+
+def hf_cache_model_dirs(cache_dir: Path, repo_id: str) -> list[Path]:
+    folder_name = "models--" + repo_id.replace("/", "--")
+    candidates = [cache_dir / folder_name, cache_dir / "hub" / folder_name]
+    result: list[Path] = []
+    for path in candidates:
+        if path not in result:
+            result.append(path)
+    return result
+
+
+def hf_cache_has_snapshot_files(model_dir: Path) -> bool:
+    snapshots_dir = model_dir / "snapshots"
+    snapshot_dirs = [path for path in snapshots_dir.iterdir() if path.is_dir()] if snapshots_dir.exists() else []
+    return any(any(child.is_file() for child in path.rglob("*")) for path in snapshot_dirs)
+
+
+def hf_model_cache_status(model_key: str, repo_id: str, cache_dir: Path) -> dict:
+    model_dirs = hf_cache_model_dirs(cache_dir, repo_id)
+    ready_dirs = [path for path in model_dirs if hf_cache_has_snapshot_files(path)]
+    display_dir = ready_dirs[0] if ready_dirs else model_dirs[0]
+    has_files = bool(ready_dirs)
+    return {
+        "key": model_key,
+        "label": AI_MATTE_MODEL_LABELS.get(model_key, model_key),
+        "repo_id": repo_id,
+        "ready": has_files,
+        "path": str(display_dir),
+        "paths": [str(path) for path in model_dirs],
+        "message": "" if has_files else "模型缓存未找到，首次使用或点击下载时会从 Hugging Face 获取。",
+    }
+
+
+def corridorkey_status() -> dict:
+    root = default_corridorkey_root()
+    module_dir = root / "CorridorKeyModule"
+    checkpoint_dir = module_dir / "checkpoints"
+    checkpoints = list(checkpoint_dir.glob("*")) if checkpoint_dir.exists() else []
+    ready = module_dir.exists()
+    return {
+        "ready": ready,
+        "root": str(root),
+        "module_dir": str(module_dir),
+        "checkpoint_count": len([path for path in checkpoints if path.is_file()]),
+        "message": "" if ready else f"未找到 CorridorKeyModule。请运行 setup_ai_runtime.bat 或克隆 {CORRIDORKEY_REPO_URL}。",
+    }
+
+
+def realesrgan_status() -> dict:
+    binary = resolve_realesrgan_binary()
+    model_dir = resolve_realesrgan_model_dir(binary) if binary else None
+    ready = bool(binary and model_dir)
+    return {
+        "ready": ready,
+        "binary": binary or "",
+        "model_dir": str(model_dir) if model_dir else "",
+        "model": REAL_ESRGAN_ANIME_MODEL,
+        "message": "" if ready else realesrgan_missing_message(),
+    }
+
+
 def runtime_info() -> dict:
     torch_info = {"installed": False, "version": "", "cuda_available": False, "error": ""}
     try:
@@ -739,13 +1166,465 @@ def runtime_info() -> dict:
     except Exception as exc:
         torch_info["error"] = str(exc)
 
+    cache_dir = default_ai_model_cache_dir()
+    default_model = hf_model_cache_status(
+        DEFAULT_AI_MATTE_MODEL,
+        AI_MATTE_MODEL_REPOS[DEFAULT_AI_MATTE_MODEL],
+        cache_dir,
+    )
+    ai_packages = [
+        python_package_status("transformers"),
+        python_package_status("huggingface-hub", "huggingface_hub"),
+        python_package_status("timm"),
+        python_package_status("torchvision"),
+        python_package_status("numpy"),
+        python_package_status("cv2"),
+    ]
+    ffmpeg_status = command_readiness("ffmpeg", resolve_ffmpeg_binary)
+    ffprobe_status = command_readiness("ffprobe", resolve_ffmpeg_binary)
+    basic_ready = ffmpeg_status["ready"] and ffprobe_status["ready"]
+    ai_dependency_ready = torch_info["installed"] and all(
+        package["installed"] for package in ai_packages[:4]
+    )
+    checks = {
+        "basic": {
+            "ready": basic_ready,
+            "message": "" if basic_ready else "基础视频处理需要 ffmpeg 和 ffprobe。",
+        },
+        "ai_dependencies": {
+            "ready": ai_dependency_ready,
+            "packages": ai_packages,
+            "message": "" if ai_dependency_ready else "AI 抠图依赖不完整，请运行 setup_ai_runtime.bat 或安装 requirements-ai.txt。",
+        },
+        "default_birefnet_model": default_model,
+        "corridorkey": corridorkey_status(),
+        "realesrgan": realesrgan_status(),
+    }
+    checks["ai_matte"] = {
+        "ready": ai_dependency_ready and default_model["ready"],
+        "message": "" if ai_dependency_ready and default_model["ready"] else "默认 BiRefNet 模型或 AI 依赖尚未准备。",
+    }
+
     return {
+        "product": {"name": PRODUCT_NAME, "name_zh": PRODUCT_NAME_ZH},
         "python_executable": sys.executable,
         "python_prefix": sys.prefix,
         "torch": torch_info,
-        "ai_model_cache": str(default_ai_model_cache_dir()),
+        "ffmpeg": ffmpeg_status,
+        "ffprobe": ffprobe_status,
+        "ai_model_cache": str(cache_dir),
         "corridorkey_root": str(default_corridorkey_root()),
+        "checks": checks,
+        "actions": {
+            "download_default_birefnet": bool(ai_dependency_ready and not default_model["ready"] and python_package_status("huggingface-hub", "huggingface_hub")["installed"]),
+            "setup_script": str(ROOT_DIR / "setup_ai_runtime.bat"),
+        },
     }
+
+
+def download_default_birefnet_model(progress_id: str = "") -> dict:
+    cache_dir = configure_ai_model_cache()
+    repo_id = AI_MATTE_MODEL_REPOS[DEFAULT_AI_MATTE_MODEL]
+    return download_huggingface_model(DEFAULT_AI_MATTE_MODEL, repo_id, cache_dir, progress_id=progress_id)
+
+
+def huggingface_progress_tqdm_class(progress_id: str, label: str):
+    from tqdm.auto import tqdm
+
+    class ProgressTqdm(tqdm):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._progress_label = str(self.desc or label or "下载中")
+            if progress_id:
+                set_process_progress(
+                    progress_id,
+                    int(self.n or 0),
+                    int(self.total or 1),
+                    "downloading",
+                    detail=self._progress_label,
+                )
+
+        def update(self, n=1):
+            result = super().update(n)
+            if progress_id:
+                set_process_progress(
+                    progress_id,
+                    int(self.n or 0),
+                    int(self.total or max(self.n, 1) or 1),
+                    "downloading",
+                    detail=self._progress_label,
+                )
+            return result
+
+    return ProgressTqdm
+
+
+def download_huggingface_model(
+    model_key: str,
+    repo_id: str,
+    cache_dir: Path | None = None,
+    *,
+    progress_id: str = "",
+) -> dict:
+    resolved_cache_dir = cache_dir or configure_ai_model_cache()
+    try:
+        from huggingface_hub import snapshot_download
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("huggingface-hub 未安装，请先运行 setup_ai_runtime.bat 或安装 requirements-ai.txt。") from exc
+
+    if progress_id:
+        set_process_progress(progress_id, 0, 100, "preparing", detail=f"准备下载 {repo_id}")
+    local_path = snapshot_download(
+        repo_id=repo_id,
+        cache_dir=str(resolved_cache_dir),
+        local_files_only=False,
+        max_workers=1,
+        tqdm_class=huggingface_progress_tqdm_class(progress_id, AI_MATTE_MODEL_LABELS.get(model_key, model_key)) if progress_id else None,
+    )
+    if progress_id:
+        set_process_progress(progress_id, 100, 100, "finalizing", detail="整理模型缓存")
+    return {
+        "model": hf_model_cache_status(model_key, repo_id, resolved_cache_dir),
+        "local_path": str(local_path),
+    }
+
+
+def directory_size_bytes(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for child in path.rglob("*"):
+        try:
+            if child.is_file():
+                total += child.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def safe_remove_tree(path: Path, allowed_roots: list[Path]) -> None:
+    resolved = path.expanduser().resolve()
+    if not resolved.exists():
+        return
+    if not resolved.is_dir():
+        raise ValueError(f"只能卸载目录：{resolved}")
+    allowed = any(is_within_root(resolved, root) or resolved == root.resolve() for root in allowed_roots)
+    if not allowed:
+        raise ValueError(f"拒绝删除受控目录之外的路径：{resolved}")
+    shutil.rmtree(resolved)
+
+
+def model_cache_root() -> Path:
+    return default_ai_model_cache_dir().resolve()
+
+
+def managed_tools_root() -> Path:
+    return DEFAULT_REALESRGAN_ROOT.parent.resolve()
+
+
+def huggingface_model_item(model_key: str, repo_id: str) -> dict:
+    cache_dir = default_ai_model_cache_dir()
+    status = hf_model_cache_status(model_key, repo_id, cache_dir)
+    paths = [Path(raw_path) for raw_path in status.get("paths", [])]
+    existing_paths = [path for path in paths if path.exists()]
+    return {
+        "key": model_key,
+        "label": AI_MATTE_MODEL_LABELS.get(model_key, model_key),
+        "kind": "huggingface",
+        "category": "AI 主体抠图",
+        "source": repo_id,
+        "description": "BiRefNet 主体/角色抠图模型，首次使用会加载远程模型代码。",
+        "ready": bool(status["ready"]),
+        "path": status["path"],
+        "size_bytes": sum(directory_size_bytes(path) for path in existing_paths),
+        "message": status["message"],
+        "downloadable": python_package_status("huggingface-hub", "huggingface_hub")["installed"],
+        "uninstallable": bool(existing_paths),
+        "required": model_key == DEFAULT_AI_MATTE_MODEL,
+    }
+
+
+def corridorkey_model_item() -> dict:
+    status = corridorkey_status()
+    root = Path(status["root"])
+    return {
+        "key": "corridorkey",
+        "label": "CorridorKey",
+        "kind": "git",
+        "category": "绿幕/蓝幕精修",
+        "source": CORRIDORKEY_REPO_URL,
+        "description": "绿幕/蓝幕边缘重建和前景颜色恢复组件。",
+        "ready": bool(status["ready"]),
+        "path": status["root"],
+        "size_bytes": directory_size_bytes(root),
+        "message": status["message"],
+        "downloadable": shutil.which("git") is not None,
+        "uninstallable": root.exists() and (is_within_root(root, ROOT_DIR.parent / "sprite-video-lab-models") or root.resolve() == default_corridorkey_root().resolve()),
+        "required": False,
+        "meta": {"checkpoint_count": status.get("checkpoint_count", 0)},
+    }
+
+
+def realesrgan_model_item() -> dict:
+    status = realesrgan_status()
+    binary_path = Path(status["binary"]).resolve() if status["binary"] else DEFAULT_REALESRGAN_ROOT
+    root = DEFAULT_REALESRGAN_ROOT if not status["binary"] else binary_path.parent
+    if root.name.lower() != "realesrgan-ncnn-vulkan":
+        root = root.parent if root.parent.name.lower() == "realesrgan-ncnn-vulkan" else root
+    return {
+        "key": "realesrgan-anime",
+        "label": "Real-ESRGAN anime x4",
+        "kind": "release",
+        "category": "MAGIC / 线稿清理",
+        "source": "xinntao/Real-ESRGAN latest release",
+        "description": "realesrgan-ncnn-vulkan 二进制工具及 realesrgan-x4plus-anime 模型文件。",
+        "ready": bool(status["ready"]),
+        "path": str(root),
+        "size_bytes": directory_size_bytes(root),
+        "message": status["message"],
+        "downloadable": True,
+        "uninstallable": root.exists() and (is_within_root(root, managed_tools_root()) or root.resolve() == DEFAULT_REALESRGAN_ROOT.resolve()),
+        "required": False,
+        "meta": {"binary": status["binary"], "model_dir": status["model_dir"], "model": status["model"]},
+    }
+
+
+def external_tool_item(key: str, label: str, binary_name: str, category: str, description: str) -> dict:
+    status = command_readiness(binary_name, resolve_ffmpeg_binary)
+    return {
+        "key": key,
+        "label": label,
+        "kind": "tool",
+        "category": category,
+        "source": f"{binary_name} executable",
+        "description": description,
+        "ready": bool(status["ready"]),
+        "path": status.get("path") or "",
+        "size_bytes": 0,
+        "message": status.get("message") or ("" if status["ready"] else f"未找到 {binary_name}，请安装 ffmpeg 或配置 {FFMPEG_DIR_ENV}。"),
+        "downloadable": False,
+        "uninstallable": False,
+        "required": True,
+        "affected": ["视频导入", "抽帧", "视频处理", "透明 WebM 导出"] if binary_name == "ffmpeg" else ["视频信息读取", "截取预览", "帧率/时长识别"],
+    }
+
+
+def python_dependency_item(package_name: str, import_name: str | None, category: str, description: str, affected: list[str]) -> dict:
+    status = python_package_status(package_name, import_name)
+    return {
+        "key": f"python-{status['import']}",
+        "label": package_name,
+        "kind": "python",
+        "category": category,
+        "source": "requirements-ai.txt",
+        "description": description,
+        "ready": bool(status["installed"]),
+        "path": sys.executable if status["installed"] else "",
+        "size_bytes": 0,
+        "message": "" if status["installed"] else f"Python 依赖 {package_name} 未安装，请运行 setup_ai_runtime.bat 或安装 requirements-ai.txt。",
+        "downloadable": False,
+        "uninstallable": False,
+        "required": package_name in {"torch", "transformers", "huggingface-hub", "timm", "torchvision"},
+        "affected": affected,
+    }
+
+
+def model_management_payload() -> dict:
+    items = [huggingface_model_item(model_key, repo_id) for model_key, repo_id in AI_MATTE_MODEL_REPOS.items()]
+    items.append(corridorkey_model_item())
+    items.append(realesrgan_model_item())
+    items.append(
+        external_tool_item(
+            "tool-ffmpeg",
+            "ffmpeg",
+            "ffmpeg",
+            "基础视频工具",
+            "视频解码、抽帧、导出 WebM 和视频处理所需的命令行工具。",
+        )
+    )
+    items.append(
+        external_tool_item(
+            "tool-ffprobe",
+            "ffprobe",
+            "ffprobe",
+            "基础视频工具",
+            "读取视频时长、帧率、尺寸和编码信息所需的命令行工具。",
+        )
+    )
+    items.extend(
+        [
+            python_dependency_item("torch", "torch", "Python AI 依赖", "BiRefNet / CorridorKey 推理所需的深度学习运行库。", ["BiRefNet", "CorridorKey"]),
+            python_dependency_item("torchvision", "torchvision", "Python AI 依赖", "AI 图像预处理和模型推理辅助库。", ["BiRefNet"]),
+            python_dependency_item("transformers", "transformers", "Python AI 依赖", "从 Hugging Face 加载 BiRefNet 模型所需。", ["BiRefNet"]),
+            python_dependency_item("huggingface-hub", "huggingface_hub", "Python AI 依赖", "下载和缓存 Hugging Face 模型所需。", ["BiRefNet 下载", "模型管理"]),
+            python_dependency_item("timm", "timm", "Python AI 依赖", "BiRefNet 远程模型代码常用依赖。", ["BiRefNet"]),
+            python_dependency_item("numpy", "numpy", "Python AI 依赖", "图像矩阵计算和 CorridorKey 所需。", ["CorridorKey", "图像处理"]),
+            python_dependency_item("opencv-python / cv2", "cv2", "Python AI 依赖", "CorridorKey 和部分图像处理流程所需。", ["CorridorKey"]),
+        ]
+    )
+    ready_count = sum(1 for item in items if item["ready"])
+    return {
+        "models": items,
+        "summary": {
+            "total": len(items),
+            "ready": ready_count,
+            "missing": len(items) - ready_count,
+            "cache_root": str(default_ai_model_cache_dir()),
+            "tools_root": str(managed_tools_root()),
+        },
+    }
+
+
+def download_corridorkey(progress_id: str = "") -> dict:
+    root = default_corridorkey_root()
+    module_dir = root / "CorridorKeyModule"
+    if module_dir.exists():
+        if progress_id:
+            set_process_progress(progress_id, 100, 100, "done", done=True, detail="CorridorKey 已存在")
+        return {"model": corridorkey_model_item(), "message": "CorridorKey 已存在。"}
+    if root.exists() and any(root.iterdir()):
+        raise RuntimeError(f"{root} 已存在但不是完整 CorridorKey 目录，请手动检查后再处理。")
+    git = shutil.which("git")
+    if not git:
+        raise RuntimeError("未找到 git，无法自动下载 CorridorKey。请先安装 git 或运行 setup_ai_runtime.bat。")
+    root.parent.mkdir(parents=True, exist_ok=True)
+    if root.exists():
+        root.rmdir()
+    if progress_id:
+        set_process_progress(progress_id, 10, 100, "downloading", detail="正在克隆 CorridorKey 仓库")
+    run_process([git, "clone", "--depth", "1", CORRIDORKEY_REPO_URL, str(root)])
+    if progress_id:
+        set_process_progress(progress_id, 100, 100, "done", done=True, detail="CorridorKey 已下载")
+    return {"model": corridorkey_model_item(), "message": "CorridorKey 已下载。"}
+
+
+def latest_realesrgan_windows_asset_url() -> str:
+    request = Request(REALESRGAN_RELEASE_API_URL, headers={"User-Agent": PRODUCT_NAME})
+    with urlopen(request, timeout=60) as response:
+        release = json.loads(response.read().decode("utf-8"))
+    assets = release.get("assets") if isinstance(release, dict) else []
+    for asset in assets:
+        name = str(asset.get("name") or "").lower()
+        url = str(asset.get("browser_download_url") or "")
+        if "realesrgan-ncnn-vulkan" in name and "windows" in name and name.endswith(".zip") and url:
+            return url
+    raise RuntimeError("没有在 Real-ESRGAN 最新 release 中找到 Windows realesrgan-ncnn-vulkan 压缩包。")
+
+
+def stream_download_to_file(url: str, target: Path, progress_id: str, label: str) -> None:
+    request = Request(url, headers={"User-Agent": PRODUCT_NAME})
+    with urlopen(request, timeout=300) as response:
+        total = int(response.headers.get("Content-Length") or 0)
+        current = 0
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                current += len(chunk)
+                if progress_id:
+                    set_process_progress(progress_id, current, total or max(current, 1), "downloading", detail=label)
+
+
+def download_realesrgan_anime(progress_id: str = "") -> dict:
+    target_root = DEFAULT_REALESRGAN_ROOT
+    if realesrgan_status()["ready"]:
+        if progress_id:
+            set_process_progress(progress_id, 100, 100, "done", done=True, detail="Real-ESRGAN anime 已存在")
+        return {"model": realesrgan_model_item(), "message": "Real-ESRGAN anime 已存在。"}
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    download_dir = WORK_DIR / "downloads"
+    download_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = download_dir / "realesrgan-ncnn-vulkan-windows.zip"
+    if progress_id:
+        set_process_progress(progress_id, 0, 100, "preparing", detail="查询 Real-ESRGAN release")
+    asset_url = latest_realesrgan_windows_asset_url()
+    extract_root = download_dir / "realesrgan-extract"
+    if extract_root.exists():
+        shutil.rmtree(extract_root)
+    extract_root.mkdir(parents=True, exist_ok=True)
+    stream_download_to_file(asset_url, archive_path, progress_id, "下载 Real-ESRGAN 压缩包")
+    if progress_id:
+        set_process_progress(progress_id, 90, 100, "extracting", detail="正在解压 Real-ESRGAN")
+    with zipfile.ZipFile(archive_path) as archive:
+        archive.extractall(extract_root)
+    candidates = [path for path in extract_root.rglob("*") if path.is_dir() and (path / "realesrgan-ncnn-vulkan.exe").exists()]
+    if not candidates:
+        raise RuntimeError("Real-ESRGAN 压缩包中没有找到 realesrgan-ncnn-vulkan.exe。")
+    source_dir = candidates[0]
+    if target_root.exists():
+        safe_remove_tree(target_root, [managed_tools_root()])
+    shutil.copytree(source_dir, target_root)
+    if progress_id:
+        set_process_progress(progress_id, 100, 100, "done", done=True, detail="Real-ESRGAN anime 已下载")
+    return {"model": realesrgan_model_item(), "message": "Real-ESRGAN anime 已下载。"}
+
+
+def download_managed_model(model_key: str, progress_id: str = "") -> dict:
+    normalized = normalize_ai_model_key(model_key)
+    if model_key in AI_MATTE_MODEL_REPOS:
+        return download_huggingface_model(normalized, AI_MATTE_MODEL_REPOS[normalized], progress_id=progress_id)
+    if model_key == "corridorkey":
+        return download_corridorkey(progress_id=progress_id)
+    if model_key == "realesrgan-anime":
+        return download_realesrgan_anime(progress_id=progress_id)
+    raise ValueError(f"未知模型：{model_key}")
+
+
+def start_model_download_task(model_key: str) -> dict:
+    normalized_key = str(model_key or "").strip()
+    if normalized_key not in AI_MATTE_MODEL_REPOS and normalized_key not in {"corridorkey", "realesrgan-anime"}:
+        raise ValueError(f"未知模型：{normalized_key}")
+    progress_id = f"model-{timestamped_id()}"
+    set_process_progress(progress_id, 0, 100, "queued", detail="等待下载任务启动")
+
+    def run_download() -> None:
+        try:
+            set_process_progress(progress_id, 0, 100, "preparing", detail="准备下载")
+            download_managed_model(normalized_key, progress_id=progress_id)
+            set_process_progress(progress_id, 100, 100, "done", done=True, detail="下载完成")
+        except Exception as exc:
+            set_process_progress(progress_id, 0, 1, "error", done=True, error=str(exc), detail="下载失败")
+
+    threading.Thread(target=run_download, daemon=True).start()
+    return {"progress_id": progress_id, "progress": get_process_progress(progress_id)}
+
+
+def unload_birefnet_cache(model_key: str | None = None) -> None:
+    keys = list(_BIREFNET_MODEL_CACHE.keys())
+    for cache_key in keys:
+        if model_key is None or cache_key[0] == model_key:
+            _BIREFNET_MODEL_CACHE.pop(cache_key, None)
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def uninstall_managed_model(model_key: str) -> dict:
+    if model_key in AI_MATTE_MODEL_REPOS:
+        repo_id = AI_MATTE_MODEL_REPOS[model_key]
+        unload_birefnet_cache(model_key)
+        for path in hf_cache_model_dirs(default_ai_model_cache_dir(), repo_id):
+            safe_remove_tree(path, [model_cache_root()])
+        return {"model": huggingface_model_item(model_key, repo_id), "message": "模型缓存已卸载。"}
+    if model_key == "corridorkey":
+        root = default_corridorkey_root()
+        _CORRIDORKEY_ENGINE_CACHE.clear()
+        safe_remove_tree(root, [(ROOT_DIR.parent / "sprite-video-lab-models").resolve()])
+        return {"model": corridorkey_model_item(), "message": "CorridorKey 已卸载。"}
+    if model_key == "realesrgan-anime":
+        item = realesrgan_model_item()
+        root = Path(str(item.get("path") or "")).expanduser()
+        safe_remove_tree(root, [managed_tools_root()])
+        return {"model": realesrgan_model_item(), "message": "Real-ESRGAN anime 已卸载。"}
+    raise ValueError(f"未知模型：{model_key}")
 
 
 def watch_snapshot() -> dict[str, int]:
@@ -861,6 +1740,14 @@ def video_info(path: Path) -> dict:
     }
 
 
+def video_has_audio(path: Path) -> bool:
+    try:
+        payload = ffprobe_json(path)
+    except Exception:
+        return False
+    return any((item.get("codec_type") == "audio") for item in (payload.get("streams") or []))
+
+
 def image_info(path: Path) -> dict:
     with Image.open(path) as image:
         width, height = image.size
@@ -954,6 +1841,7 @@ def media_info(path: Path, media_type: str | None = None) -> dict:
     resolved_type = media_type or detect_media_type(path)
     payload = video_info(path) if resolved_type == "video" else image_info(path)
     payload["media_type"] = resolved_type
+    payload["bytes"] = path.stat().st_size if path.exists() else 0
     return payload
 
 
@@ -1060,7 +1948,7 @@ def build_upload_payload(
     info_path = preview_path if preview_path and preview_path.exists() and media_type == "video" else source_path
     info = media_info_payload or media_info(info_path, media_type)
     info["media_type"] = media_type
-    return {
+    payload = {
         "upload_id": upload_id,
         "display_name": display_name,
         "media_url": f"/media/upload/{upload_id}",
@@ -1071,6 +1959,19 @@ def build_upload_payload(
         "video_info": info,
         "media_info": info,
     }
+    if media_type == "image_sequence":
+        payload["source_frames"] = [
+            {
+                "index": int(frame.get("index", index)),
+                "name": frame.get("name") or f"image_{index + 1}",
+                "raw_name": frame.get("raw_name") or frame.get("name") or "",
+                "width": int(frame.get("width") or 0),
+                "height": int(frame.get("height") or 0),
+                "url": f"/media/upload/{upload_id}/frames/{int(frame.get('index', index))}",
+            }
+            for index, frame in enumerate(source_frame_entries(upload_id))
+        ]
+    return payload
 
 
 def is_gif_source(path: Path) -> bool:
@@ -1253,6 +2154,60 @@ def register_uploaded_media(file_items: list) -> dict:
     return register_uploaded_image_sequence(items)
 
 
+def register_job_frame_as_upload(job_id: str, frame_index: int = 0) -> dict:
+    manifest = load_job_manifest(job_id)
+    frames = manifest.get("frames") or []
+    if not frames:
+        raise ValueError("job has no image frames")
+    frame = next((item for item in frames if safe_int(item.get("index"), -1) == frame_index), None) or frames[0]
+    processed_dir = job_dir(job_id) / "processed"
+    source_name = Path(str(frame.get("name") or "frame.png")).name
+    source_path = processed_dir / source_name
+    if not source_path.is_file():
+        raise FileNotFoundError(f"processed frame missing: {source_path}")
+
+    upload_id = timestamped_id()
+    target_dir = upload_dir(upload_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    display_name = clean_filename(str(frame.get("original_name") or source_name or "dual-background-result.png"))
+    if not display_name.lower().endswith(tuple(IMAGE_EXTENSIONS)):
+        display_name = f"{Path(display_name).stem or 'image'}.png"
+    target_path = target_dir / display_name
+    shutil.copy2(source_path, target_path)
+    with Image.open(target_path) as image:
+        width, height = image.size
+    manifest_payload = {
+        "upload_id": upload_id,
+        "source_path": str(target_path),
+        "preview_path": "",
+        "display_name": display_name,
+        "media_type": "image",
+        "source_job_id": job_id,
+        "source_frame_index": safe_int(frame.get("index"), 0),
+        "created_at": iso_now(),
+    }
+    save_upload_manifest(upload_id, manifest_payload)
+    payload = build_upload_payload(
+        upload_id,
+        target_path,
+        display_name,
+        "image",
+        media_info_payload={
+            "width": width,
+            "height": height,
+            "fps": 0.0,
+            "duration": 0.0,
+            "codec": "image",
+            "frame_count": 1,
+            "bytes": target_path.stat().st_size,
+            "media_type": "image",
+        },
+    )
+    payload["source_job_id"] = job_id
+    payload["source_frame_index"] = safe_int(frame.get("index"), 0)
+    return payload
+
+
 def auto_key_color(image: Image.Image) -> tuple[int, int, int]:
     rgba = image.convert("RGBA")
     width, height = rgba.size
@@ -1332,6 +2287,149 @@ def chroma_key_frame(
     return keyed
 
 
+def color_distance_rgb(pixel: tuple[int, int, int], key_rgb: tuple[int, int, int]) -> float:
+    r_value, g_value, b_value = pixel
+    k_r, k_g, k_b = key_rgb
+    return math.sqrt((r_value - k_r) ** 2 + (g_value - k_g) ** 2 + (b_value - k_b) ** 2)
+
+
+def anti_alias_alpha_edges(
+    image: Image.Image,
+    radius: float = 1.35,
+    band_radius: int = 2,
+    rgb_radius: float = 0.55,
+) -> Image.Image:
+    normalized_radius = max(0.0, float(radius or 0.0))
+    normalized_band_radius = max(1, int(band_radius or 1))
+    if normalized_radius <= 0:
+        return image.convert("RGBA")
+
+    rgba = image.convert("RGBA")
+    red, green, blue, alpha = rgba.split()
+    filter_size = (normalized_band_radius * 2) + 1
+    max_alpha = alpha.filter(ImageFilter.MaxFilter(filter_size))
+    min_alpha = alpha.filter(ImageFilter.MinFilter(filter_size))
+    edge_band = ImageChops.difference(max_alpha, min_alpha).point(lambda value: 255 if value else 0)
+
+    # Soften only the inside edge. Raising outside alpha would reveal background-color halos.
+    blurred_alpha = alpha.filter(ImageFilter.GaussianBlur(radius=normalized_radius))
+    inward_soft_alpha = ImageChops.darker(alpha, blurred_alpha)
+    antialiased_alpha = Image.composite(inward_soft_alpha, alpha, edge_band)
+    antialiased_alpha = antialiased_alpha.point(lambda value: 0 if value <= 1 else 255 if value >= 254 else value)
+
+    normalized_rgb_radius = max(0.0, float(rgb_radius or 0.0))
+    if normalized_rgb_radius > 0:
+        blurred_rgb = Image.merge("RGB", (red, green, blue)).filter(ImageFilter.GaussianBlur(radius=normalized_rgb_radius))
+        edge_rgb = Image.composite(blurred_rgb, Image.merge("RGB", (red, green, blue)), edge_band)
+        red, green, blue = edge_rgb.split()
+    return Image.merge("RGBA", (red, green, blue, antialiased_alpha))
+
+
+def edge_antialias_radius_from_softness(softness: int) -> float:
+    return clamp_float(1.1 + (max(0, int(softness)) * 0.045), 1.2, 1.8)
+
+
+def edge_connected_chroma_key_frame(
+    image: Image.Image,
+    key_rgb: tuple[int, int, int],
+    threshold: int,
+    softness: int,
+    halo_pixels: int,
+    despill_strength: float = 0.0,
+) -> Image.Image:
+    rgba = image.convert("RGBA")
+    width, height = rgba.size
+    pixels = list(rgba.getdata())
+    total = width * height
+    if total <= 0:
+        return rgba
+
+    max_distance = max(1, int(threshold) + max(0, int(softness)))
+    background = bytearray(total)
+    visited = bytearray(total)
+    queue: list[int] = []
+
+    def matches_background(index: int) -> bool:
+        r_value, g_value, b_value, alpha = pixels[index]
+        if alpha <= 0:
+            return False
+        return color_distance_rgb((r_value, g_value, b_value), key_rgb) <= max_distance
+
+    def seed(index: int) -> None:
+        if not visited[index] and matches_background(index):
+            visited[index] = 1
+            background[index] = 1
+            queue.append(index)
+
+    for x in range(width):
+        seed(x)
+        seed((height - 1) * width + x)
+    for y in range(height):
+        seed(y * width)
+        seed(y * width + width - 1)
+
+    alpha_bbox = rgba.getchannel("A").getbbox()
+    if alpha_bbox:
+        left, top, right, bottom = alpha_bbox
+        right -= 1
+        bottom -= 1
+        for x in range(left, right + 1):
+            seed(top * width + x)
+            seed(bottom * width + x)
+        for y in range(top, bottom + 1):
+            seed(y * width + left)
+            seed(y * width + right)
+
+    head = 0
+    while head < len(queue):
+        index = queue[head]
+        head += 1
+        x = index % width
+        y = index // width
+        neighbors = []
+        if x > 0:
+            neighbors.append(index - 1)
+        if x + 1 < width:
+            neighbors.append(index + 1)
+        if y > 0:
+            neighbors.append(index - width)
+        if y + 1 < height:
+            neighbors.append(index + width)
+        for next_index in neighbors:
+            if visited[next_index]:
+                continue
+            visited[next_index] = 1
+            if matches_background(next_index):
+                background[next_index] = 1
+                queue.append(next_index)
+
+    output_pixels: list[tuple[int, int, int, int]] = []
+    for index, (r_value, g_value, b_value, alpha) in enumerate(pixels):
+        if alpha <= 0:
+            output_pixels.append((r_value, g_value, b_value, 0))
+            continue
+        if not background[index]:
+            output_pixels.append((r_value, g_value, b_value, alpha))
+            continue
+        dist = color_distance_rgb((r_value, g_value, b_value), key_rgb)
+        if softness > 0 and dist > threshold:
+            next_alpha = int(alpha * max(0.0, min(1.0, (dist - threshold) / max(1, softness))))
+        else:
+            next_alpha = 0
+        output_pixels.append((r_value, g_value, b_value, next_alpha))
+
+    keyed = Image.new("RGBA", rgba.size)
+    keyed.putdata(output_pixels)
+    if halo_pixels > 0:
+        alpha_channel = keyed.getchannel("A")
+        filter_size = (max(0, int(halo_pixels)) * 2) + 1
+        keyed.putalpha(alpha_channel.filter(ImageFilter.MinFilter(filter_size)))
+    antialias_radius = edge_antialias_radius_from_softness(softness)
+    keyed = anti_alias_alpha_edges(keyed, radius=antialias_radius, band_radius=2, rgb_radius=0.55)
+    keyed = despill_alpha_edges(keyed, key_rgb, despill_strength)
+    return keyed
+
+
 def import_ai_matte_dependencies():
     configure_ai_model_cache()
     try:
@@ -1376,6 +2474,8 @@ def load_birefnet_model(model_key: str, requested_device: str):
     cache_dir = configure_ai_model_cache()
     model = auto_model.from_pretrained(repo_id, trust_remote_code=True, cache_dir=str(cache_dir))
     model.to(device)
+    if device == "cpu" and hasattr(model, "float"):
+        model.float()
     model.eval()
     _BIREFNET_MODEL_CACHE[cache_key] = model
     return model, device, normalized_model_key, repo_id
@@ -1661,7 +2761,7 @@ def run_birefnet_inference(
         model_dtype = next(model.parameters()).dtype
     except StopIteration:
         model_dtype = input_tensor.dtype
-    if str(device).startswith("cuda") and model_dtype in {torch_module.float16, torch_module.bfloat16}:
+    if model_dtype in {torch_module.float16, torch_module.bfloat16, torch_module.float32, torch_module.float64}:
         input_tensor = input_tensor.to(dtype=model_dtype)
     with torch_module.no_grad():
         prediction = model(input_tensor)[-1].sigmoid().to("cpu")
@@ -1789,6 +2889,60 @@ def despill_alpha_edges(
     return cleaned
 
 
+def subject_protect_alpha_mask(chroma_alpha: Image.Image, subject_alpha: Image.Image) -> Image.Image:
+    chroma_mask = chroma_alpha.convert("L")
+    subject_mask = subject_alpha.convert("L")
+    if subject_mask.size != chroma_mask.size:
+        subject_mask = subject_mask.resize(chroma_mask.size, LANCZOS)
+
+    protect_size = max(3, min(17, ((min(chroma_mask.size) // 96) * 2) + 3))
+    subject_core = subject_mask.filter(ImageFilter.MinFilter(protect_size))
+    subject_core = subject_core.point(lambda value: 255 if value >= 176 else 0)
+    return ImageChops.lighter(chroma_mask, subject_core)
+
+
+def despill_alpha_edges_with_protection(
+    image: Image.Image,
+    key_rgb: tuple[int, int, int],
+    strength: float,
+    protection_alpha: Image.Image,
+) -> Image.Image:
+    normalized_strength = max(0.0, min(2.5, float(strength or 0.0)))
+    if normalized_strength <= 0:
+        return image
+
+    rgba = image.convert("RGBA")
+    protection = protection_alpha.convert("L")
+    if protection.size != rgba.size:
+        protection = protection.resize(rgba.size, LANCZOS)
+
+    k_r, k_g, k_b = key_rgb
+    key_channels = (k_r, k_g, k_b)
+    spill_channel = max(range(3), key=lambda index: key_channels[index])
+    output_pixels: list[tuple[int, int, int, int]] = []
+    for (r_value, g_value, b_value, alpha), protected_value in zip(rgba.getdata(), protection.getdata()):
+        channels = [r_value, g_value, b_value]
+        spill_value = channels[spill_channel]
+        other_values = [value for index, value in enumerate(channels) if index != spill_channel]
+        spill = max(0, spill_value - max(other_values))
+        if spill <= 0:
+            output_pixels.append((r_value, g_value, b_value, alpha))
+            continue
+
+        dist = math.sqrt((r_value - k_r) ** 2 + (g_value - k_g) ** 2 + (b_value - k_b) ** 2)
+        key_closeness = 1.0 - min(dist / 220.0, 1.0)
+        edge_factor = 1.0 - (alpha / 255.0)
+        protection_factor = 1.0 - (protected_value / 255.0)
+        cleanup_factor = max(edge_factor, key_closeness * 0.7) * protection_factor
+        reduction = int(spill * normalized_strength * cleanup_factor)
+        channels[spill_channel] = max(0, spill_value - reduction)
+        output_pixels.append((channels[0], channels[1], channels[2], alpha))
+
+    cleaned = Image.new("RGBA", rgba.size)
+    cleaned.putdata(output_pixels)
+    return cleaned
+
+
 def apply_matte_pipeline(
     raw_images: list[Image.Image],
     chroma_enabled: bool,
@@ -1808,6 +2962,7 @@ def apply_matte_pipeline(
     luma_strength: float,
     corridorkey_enabled: bool,
     corridorkey_screen: str,
+    progress_callback=None,
 ) -> tuple[list[Image.Image], tuple[int, int, int], dict]:
     if not raw_images:
         raise ValueError("no frames to matte")
@@ -1832,6 +2987,7 @@ def apply_matte_pipeline(
         "luma_strength": max(0.0, min(2.0, float(luma_strength or 1.0))),
         "despill_strength": max(0.0, min(2.5, float(despill_strength or 0.0))),
         "halo_pixels": max(0, int(halo_pixels)),
+        "edge_antialias_radius": 0.0,
         "corridorkey_enabled": False,
         "corridorkey_screen_color": "",
         "corridorkey_device": "",
@@ -1849,10 +3005,28 @@ def apply_matte_pipeline(
     if mode == "none":
         return raw_images, key_rgb, matte_info
 
+    if mode == "edge_connected_chroma":
+        keyed_frames = []
+        matte_info["edge_antialias_radius"] = edge_antialias_radius_from_softness(softness)
+        for index, raw_image in enumerate(raw_images, start=1):
+            keyed_frames.append(
+                edge_connected_chroma_key_frame(
+                    image=raw_image,
+                    key_rgb=key_rgb,
+                    threshold=threshold,
+                    softness=softness,
+                    halo_pixels=halo_pixels,
+                    despill_strength=matte_info["despill_strength"],
+                )
+            )
+            if progress_callback:
+                progress_callback(index)
+        return keyed_frames, key_rgb, matte_info
+
     if mode in {"chroma", "corridorkey"}:
         keyed_frames = []
         corridor_info: dict | None = None
-        for raw_image in raw_images:
+        for index, raw_image in enumerate(raw_images, start=1):
             chroma_frame = chroma_key_frame(
                 image=raw_image,
                 key_rgb=key_rgb,
@@ -1872,13 +3046,15 @@ def apply_matte_pipeline(
                 keyed_frames.append(refined_frame)
             else:
                 keyed_frames.append(chroma_frame)
+            if progress_callback:
+                progress_callback(index)
         if corridor_info:
             matte_info.update(corridor_info)
         return keyed_frames, key_rgb, matte_info
 
     if mode == "luma":
         keyed_frames: list[Image.Image] = []
-        for raw_image in raw_images:
+        for index, raw_image in enumerate(raw_images, start=1):
             alpha = luminance_alpha_mask(
                 raw_image,
                 matte_info["luma_black"],
@@ -1893,19 +3069,31 @@ def apply_matte_pipeline(
             keyed_frame = apply_alpha_mask(raw_image, alpha)
             keyed_frame = despill_alpha_edges(keyed_frame, key_rgb, matte_info["despill_strength"])
             keyed_frames.append(keyed_frame)
+            if progress_callback:
+                progress_callback(index)
         return keyed_frames, key_rgb, matte_info
 
     keyed_frames: list[Image.Image] = []
     ai_info: dict | None = None
     corridor_info: dict | None = None
     resolved_ai_model = ai_model
-    for raw_image in raw_images:
+    for index, raw_image in enumerate(raw_images, start=1):
         ai_alpha, ai_info = birefnet_alpha_mask(raw_image, resolved_ai_model, ai_device, ai_resolution)
         resolved_ai_model = update_ai_model_after_fallback(resolved_ai_model, ai_info)
         if matte_info["halo_pixels"] > 0:
             filter_size = (matte_info["halo_pixels"] * 2) + 1
             ai_alpha = ai_alpha.filter(ImageFilter.MinFilter(filter_size))
-        if mode in {"birefnet_luma", "birefnet_luma_key", "birefnet_luma_corridorkey"}:
+        if mode == "subject_protect_chroma":
+            chroma_alpha = chroma_key_frame(
+                image=raw_image,
+                key_rgb=key_rgb,
+                threshold=threshold,
+                softness=softness,
+                despill_strength=0,
+                halo_pixels=halo_pixels,
+            ).getchannel("A")
+            alpha = subject_protect_alpha_mask(chroma_alpha, ai_alpha)
+        elif mode in {"birefnet_luma", "birefnet_luma_key", "birefnet_luma_corridorkey"}:
             luma_alpha = luminance_alpha_mask(
                 raw_image,
                 matte_info["luma_black"],
@@ -1933,8 +3121,18 @@ def apply_matte_pipeline(
                 keyed_frame.putalpha(refined_alpha)
         else:
             keyed_frame = apply_alpha_mask(raw_image, alpha)
-            keyed_frame = despill_alpha_edges(keyed_frame, key_rgb, matte_info["despill_strength"])
+            if mode == "subject_protect_chroma":
+                keyed_frame = despill_alpha_edges_with_protection(
+                    keyed_frame,
+                    key_rgb,
+                    matte_info["despill_strength"],
+                    ai_alpha,
+                )
+            else:
+                keyed_frame = despill_alpha_edges(keyed_frame, key_rgb, matte_info["despill_strength"])
         keyed_frames.append(keyed_frame)
+        if progress_callback:
+            progress_callback(index)
 
     if ai_info:
         matte_info.update(ai_info)
@@ -2186,6 +3384,7 @@ def process_video_to_job(
     batch_green_desaturate: bool = False,
     batch_semitransparent_to_black: bool = False,
     batch_semitransparent_to_opaque: bool = False,
+    progress_id: str = "",
 ) -> dict:
     source_path, media_type = source_media_entry(upload_id)
     info = upload_media_info(upload_id, source_path, media_type)
@@ -2242,6 +3441,12 @@ def process_video_to_job(
             max(1, keep_every),
         )
         source_entries = []
+    progress_total = max(1, len(raw_paths))
+    set_process_progress(progress_id, 0, progress_total, "matte")
+
+    def update_frame_progress(current: int) -> None:
+        set_process_progress(progress_id, current, progress_total, "processing")
+
     raw_images = [open_rgba_image(path) for path in raw_paths]
     output_scale = normalize_output_scale(output_scale)
     target_size = target_size_from_source_height(max(image.height for image in raw_images), output_scale)
@@ -2265,6 +3470,7 @@ def process_video_to_job(
         luma_strength=luma_strength,
         corridorkey_enabled=corridorkey_enabled,
         corridorkey_screen=corridorkey_screen,
+        progress_callback=update_frame_progress,
     )
 
     hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]
@@ -2322,6 +3528,7 @@ def process_video_to_job(
                 "height": frame.size[1],
             }
         )
+        set_process_progress(progress_id, index + 1, progress_total, "saving")
 
     manifest = {
         "job_id": job_id,
@@ -2368,6 +3575,223 @@ def process_video_to_job(
         "frames": frame_entries,
     }
     save_job_manifest(job_id, manifest)
+    set_process_progress(progress_id, len(frame_entries), progress_total, "done", done=True)
+    return manifest
+
+
+def matte_selected_frames_to_job(
+    source_job_id: str,
+    selected_indices: list[int],
+    output_scale: float,
+    reduce_px: int,
+    canvas_mode: str,
+    chroma_enabled: bool,
+    matte_mode: str,
+    key_mode: str,
+    manual_key_hex: str,
+    threshold: int,
+    softness: int,
+    despill_strength: float,
+    halo_pixels: int,
+    ai_model: str,
+    ai_device: str,
+    ai_resolution: int | str | None,
+    luma_black: int,
+    luma_white: int,
+    luma_gamma: float,
+    luma_strength: float,
+    corridorkey_enabled: bool,
+    corridorkey_screen: str,
+    batch_green_to_black: bool = False,
+    batch_green_desaturate: bool = False,
+    batch_semitransparent_to_black: bool = False,
+    batch_semitransparent_to_opaque: bool = False,
+    progress_id: str = "",
+) -> dict:
+    source_job_id = str(source_job_id or "").strip()
+    if not source_job_id:
+        raise ValueError("source job id is required")
+
+    source_manifest = load_job_manifest(source_job_id)
+    source_frames = source_manifest.get("frames") or []
+    frame_map = {int(entry.get("index", -1)): entry for entry in source_frames}
+    raw_dir = Path(str(source_manifest.get("raw_dir") or job_dir(source_job_id) / "raw"))
+    raw_paths = sorted(raw_dir.glob("frame_*.png"), key=lambda path: natural_sort_key(path.name))
+    if not raw_paths:
+        raise FileNotFoundError(f"raw frames missing for job: {source_job_id}")
+
+    seen_indices: set[int] = set()
+    selected_entries: list[dict] = []
+    selected_raw_paths: list[Path] = []
+    for raw_index in selected_indices:
+        frame_index = int(raw_index)
+        if frame_index in seen_indices or frame_index not in frame_map:
+            continue
+        entry = frame_map[frame_index]
+        position = int(entry.get("index", frame_index))
+        if position < 0 or position >= len(raw_paths):
+            raise FileNotFoundError(f"raw frame missing for index: {frame_index}")
+        selected_entries.append(entry)
+        selected_raw_paths.append(raw_paths[position])
+        seen_indices.add(frame_index)
+    if not selected_raw_paths:
+        raise ValueError("no frames selected for matting")
+
+    job_id = timestamped_id()
+    root = job_dir(job_id)
+    raw_output_dir = root / "raw"
+    processed_dir = root / "processed"
+    thumbs_dir = root / "thumbs"
+    for directory in (raw_output_dir, processed_dir, thumbs_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    copied_raw_paths: list[Path] = []
+    for output_index, raw_path in enumerate(selected_raw_paths, start=1):
+        copied_path = raw_output_dir / f"frame_{output_index:05d}.png"
+        shutil.copy2(raw_path, copied_path)
+        copied_raw_paths.append(copied_path)
+
+    progress_total = max(1, len(copied_raw_paths))
+    set_process_progress(progress_id, 0, progress_total, "matte")
+
+    def update_frame_progress(current: int) -> None:
+        set_process_progress(progress_id, current, progress_total, "processing")
+
+    raw_images = [open_rgba_image(path) for path in copied_raw_paths]
+    output_scale = normalize_output_scale(output_scale)
+    target_size = target_size_from_source_height(max(image.height for image in raw_images), output_scale)
+    keyed_frames, key_rgb, matte_info = apply_matte_pipeline(
+        raw_images=raw_images,
+        chroma_enabled=chroma_enabled,
+        matte_mode=matte_mode,
+        key_mode=key_mode,
+        manual_key_hex=manual_key_hex,
+        threshold=threshold,
+        softness=softness,
+        despill_strength=despill_strength,
+        halo_pixels=halo_pixels,
+        ai_model=ai_model,
+        ai_device=ai_device,
+        ai_resolution=ai_resolution,
+        luma_black=luma_black,
+        luma_white=luma_white,
+        luma_gamma=luma_gamma,
+        luma_strength=luma_strength,
+        corridorkey_enabled=corridorkey_enabled,
+        corridorkey_screen=corridorkey_screen,
+        progress_callback=update_frame_progress,
+    )
+
+    media_type = str(source_manifest.get("source_media_type") or "animation").lower()
+    hard_alpha = matte_info["mode"] == "chroma" and softness == 0 and not matte_info["corridorkey_enabled"]
+    if should_preserve_source_canvas(media_type, reduce_px, canvas_mode):
+        rendered_frames, bboxes, scale, canvas_size = resize_frames_on_source_canvas(
+            keyed_frames,
+            output_scale,
+            hard_alpha=hard_alpha,
+        )
+    else:
+        rendered_frames, bboxes, scale, canvas_size = stable_resize_frames(
+            keyed_frames,
+            target_size,
+            reduce_px,
+            canvas_mode,
+            hard_alpha=hard_alpha,
+        )
+
+    frame_entries: list[dict] = []
+    postprocess_changed = {
+        "green_to_black": 0,
+        "green_desaturate": 0,
+        "semitransparent_to_black": 0,
+        "semitransparent_to_opaque": 0,
+    }
+    for index, frame in enumerate(rendered_frames):
+        frame_name = f"frame_{index + 1:03d}.png"
+        thumb_name = f"thumb_{index + 1:03d}.png"
+        frame_path = processed_dir / frame_name
+        thumb_path = thumbs_dir / thumb_name
+        if batch_green_to_black:
+            frame, changed = green_to_black_image(frame)
+            postprocess_changed["green_to_black"] += changed
+        if batch_green_desaturate:
+            frame, changed = green_desaturate_image(frame)
+            postprocess_changed["green_desaturate"] += changed
+        if batch_semitransparent_to_black:
+            frame, changed = semitransparent_to_black_image(frame)
+            postprocess_changed["semitransparent_to_black"] += changed
+        if batch_semitransparent_to_opaque:
+            frame, changed = semitransparent_to_opaque_image(frame)
+            postprocess_changed["semitransparent_to_opaque"] += changed
+        frame.save(frame_path)
+        thumb = frame.copy()
+        thumb.thumbnail((128, 128))
+        thumb.save(thumb_path)
+        source_entry = selected_entries[index]
+        frame_entries.append(
+            {
+                "index": index,
+                "source_index": source_entry.get("index"),
+                "name": frame_name,
+                "original_name": source_entry.get("original_name") or source_entry.get("name") or frame_name,
+                "url": f"/work/jobs/{job_id}/processed/{frame_name}",
+                "thumb_url": f"/work/jobs/{job_id}/thumbs/{thumb_name}",
+                "bbox": list(bboxes[index]) if bboxes[index] else None,
+                "width": frame.size[0],
+                "height": frame.size[1],
+            }
+        )
+        set_process_progress(progress_id, index + 1, progress_total, "saving")
+
+    source_options = source_manifest.get("options") or {}
+    manifest = {
+        "job_id": job_id,
+        "source_job_id": source_job_id,
+        "upload_id": source_manifest.get("upload_id") or "",
+        "job_dir": str(root),
+        "processed_dir": str(processed_dir),
+        "raw_dir": str(raw_output_dir),
+        "source_path": source_manifest.get("source_path") or "",
+        "source_media_type": media_type,
+        "ffmpeg_accel": source_manifest.get("ffmpeg_accel") or {},
+        "video_info": source_manifest.get("video_info") or {},
+        "options": {
+            "start_time": source_options.get("start_time", 0),
+            "end_time": source_options.get("end_time", 0),
+            "start_frame": source_options.get("start_frame", 1),
+            "end_frame": source_options.get("end_frame", len(source_frames)),
+            "keep_every": source_options.get("keep_every", 1),
+            "target_size": target_size,
+            "output_scale": output_scale,
+            "reduce_px": reduce_px,
+            "canvas_mode": normalize_canvas_mode(canvas_mode),
+            "preserve_source_canvas": should_preserve_source_canvas(media_type, reduce_px, canvas_mode),
+            "output_width": canvas_size[0],
+            "output_height": canvas_size[1],
+            "chroma_enabled": chroma_enabled,
+            "matte_mode": matte_info["mode"],
+            "matte": matte_info,
+            "key_mode": key_mode,
+            "key_color": rgb_to_hex(key_rgb),
+            "threshold": threshold,
+            "softness": softness,
+            "despill_strength": despill_strength,
+            "halo_pixels": halo_pixels,
+            "corridorkey_enabled": matte_info["corridorkey_enabled"],
+            "corridorkey_screen": matte_info["corridorkey_screen_color"],
+            "batch_green_to_black": bool(batch_green_to_black),
+            "batch_green_desaturate": bool(batch_green_desaturate),
+            "batch_semitransparent_to_black": bool(batch_semitransparent_to_black),
+            "batch_semitransparent_to_opaque": bool(batch_semitransparent_to_opaque),
+            "postprocess_changed_pixels": postprocess_changed,
+            "selected_source_indices": [entry.get("index") for entry in selected_entries],
+            "scale": scale,
+        },
+        "frame_count": len(frame_entries),
+        "frames": frame_entries,
+    }
+    save_job_manifest(job_id, manifest)
+    set_process_progress(progress_id, len(frame_entries), progress_total, "done", done=True)
     return manifest
 
 
@@ -2614,6 +4038,491 @@ def semitransparent_to_opaque_preview(preview_id: str, alpha_min: int = 1, alpha
     preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
     save_preview_manifest(preview["preview_id"], preview)
     return preview
+
+
+def color_distance_sq(left: tuple[int, int, int], right: tuple[int, int, int]) -> int:
+    return sum((int(left[index]) - int(right[index])) ** 2 for index in range(3))
+
+
+def manual_point_repair_image(
+    processed_image: Image.Image,
+    source_image: Image.Image,
+    x: int,
+    y: int,
+    mode: str,
+    radius: int,
+    tolerance: int,
+) -> tuple[Image.Image, int]:
+    processed = processed_image.convert("RGBA")
+    source = source_image.convert("RGBA")
+    if source.size != processed.size:
+        source = source.resize(processed.size, LANCZOS)
+
+    width, height = processed.size
+    if width <= 0 or height <= 0:
+        return processed, 0
+    x = clamp_int(x, 0, width - 1)
+    y = clamp_int(y, 0, height - 1)
+    radius = clamp_int(radius, 1, max(width, height))
+    tolerance = clamp_int(tolerance, 0, 255)
+    tolerance_sq = tolerance * tolerance * 3
+    radius_sq = radius * radius
+    mode = "remove" if str(mode).lower() == "remove" else "keep"
+
+    processed_pixels = processed.load()
+    source_pixels = source.load()
+    seed = source_pixels[x, y][:3]
+    queue = [(x, y)]
+    seen = {(x, y)}
+    changed = 0
+
+    while queue:
+        px, py = queue.pop()
+        if (px - x) * (px - x) + (py - y) * (py - y) > radius_sq:
+            continue
+        source_pixel = source_pixels[px, py]
+        if color_distance_sq(source_pixel[:3], seed) > tolerance_sq:
+            continue
+
+        current = processed_pixels[px, py]
+        if mode == "remove":
+            if current[3] != 0:
+                processed_pixels[px, py] = (current[0], current[1], current[2], 0)
+                changed += 1
+        else:
+            restored = (source_pixel[0], source_pixel[1], source_pixel[2], 255)
+            if current != restored:
+                processed_pixels[px, py] = restored
+                changed += 1
+
+        for nx, ny in ((px - 1, py), (px + 1, py), (px, py - 1), (px, py + 1)):
+            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in seen:
+                seen.add((nx, ny))
+                queue.append((nx, ny))
+
+    return processed, changed
+
+
+def manual_brush_repair_image(
+    processed_image: Image.Image,
+    source_image: Image.Image,
+    points: list[dict],
+    mode: str,
+    radius: int,
+    tolerance: int,
+    feather: int = 6,
+) -> tuple[Image.Image, int]:
+    processed = processed_image.convert("RGBA")
+    source = source_image.convert("RGBA")
+    if source.size != processed.size:
+        source = source.resize(processed.size, LANCZOS)
+
+    width, height = processed.size
+    if width <= 0 or height <= 0:
+        return processed, 0
+    mode = "remove" if str(mode).lower() == "remove" else "keep"
+    radius = clamp_int(radius, 1, max(width, height))
+    tolerance = clamp_int(tolerance, 0, 255)
+    feather = clamp_int(feather, 0, radius)
+    tolerance_sq = tolerance * tolerance * 3
+    radius_sq = radius * radius
+    hard_radius = max(0, radius - feather)
+    hard_radius_sq = hard_radius * hard_radius
+    processed_pixels = processed.load()
+    source_pixels = source.load()
+    changed_pixels: set[tuple[int, int]] = set()
+
+    for raw_point in points[:512]:
+        px = clamp_int(safe_int(raw_point.get("x"), 0), 0, width - 1)
+        py = clamp_int(safe_int(raw_point.get("y"), 0), 0, height - 1)
+        seed = source_pixels[px, py][:3]
+        left = max(0, px - radius)
+        right = min(width - 1, px + radius)
+        top = max(0, py - radius)
+        bottom = min(height - 1, py + radius)
+
+        for y_pos in range(top, bottom + 1):
+            dy = y_pos - py
+            for x_pos in range(left, right + 1):
+                dx = x_pos - px
+                distance_sq = dx * dx + dy * dy
+                if distance_sq > radius_sq:
+                    continue
+                source_pixel = source_pixels[x_pos, y_pos]
+                if color_distance_sq(source_pixel[:3], seed) > tolerance_sq:
+                    continue
+
+                if feather <= 0 or distance_sq <= hard_radius_sq:
+                    strength = 1.0
+                else:
+                    distance = math.sqrt(distance_sq)
+                    strength = clamp_float((radius - distance) / max(1, feather), 0.0, 1.0)
+                if strength <= 0:
+                    continue
+
+                current = processed_pixels[x_pos, y_pos]
+                if mode == "remove":
+                    next_alpha = clamp_int(round(current[3] * (1.0 - strength)), 0, 255)
+                    next_pixel = (current[0], current[1], current[2], next_alpha)
+                else:
+                    next_alpha = clamp_int(round(current[3] + (255 - current[3]) * strength), 0, 255)
+                    next_pixel = (source_pixel[0], source_pixel[1], source_pixel[2], next_alpha)
+
+                if current != next_pixel:
+                    processed_pixels[x_pos, y_pos] = next_pixel
+                    changed_pixels.add((x_pos, y_pos))
+
+    return processed, len(changed_pixels)
+
+
+def soften_alpha_edges_image(image: Image.Image, radius: int = 2, passes: int = 1) -> tuple[Image.Image, int]:
+    rgba = image.convert("RGBA")
+    radius = clamp_int(radius, 1, 20)
+    passes = clamp_int(passes, 1, 5)
+    red, green, blue, alpha = rgba.split()
+    softened = alpha
+    for _ in range(passes):
+        softened = softened.filter(ImageFilter.GaussianBlur(radius=radius))
+    changed = sum(1 for before, after in zip(alpha.getdata(), softened.getdata()) if before != after)
+    return Image.merge("RGBA", (red, green, blue, softened)), changed
+
+
+def preview_manual_point_repair(
+    preview_id: str,
+    x: int,
+    y: int,
+    mode: str,
+    radius: int,
+    tolerance: int,
+    points: list[dict] | None = None,
+    feather: int = 6,
+) -> dict:
+    preview = load_preview_manifest(preview_id)
+    root = preview_dir(preview["preview_id"])
+    processed_path = root / "processed.png"
+    source_path = root / "source.png"
+    raw_path = root / "raw.png"
+    if not processed_path.exists():
+        raise FileNotFoundError(f"processed preview missing: {processed_path}")
+    source_for_repair = raw_path if raw_path.exists() else source_path
+    if not source_for_repair.exists():
+        raise FileNotFoundError(f"source preview missing: {source_for_repair}")
+
+    push_repair_undo(root, "processed", processed_path)
+    processed_image = open_rgba_image(processed_path)
+    source_image = open_rgba_image(source_for_repair)
+    brush_points = points if points else [{"x": x, "y": y}]
+    repaired, changed = manual_brush_repair_image(processed_image, source_image, brush_points, mode, radius, tolerance, feather)
+    processed_image.close()
+    source_image.close()
+    repaired.save(processed_path)
+    repaired.close()
+
+    postprocess = preview.setdefault("postprocess", {})
+    manual = postprocess.setdefault("manual_point_repair", {"operations": []})
+    operation = {
+        "mode": "remove" if str(mode).lower() == "remove" else "keep",
+        "x": int(x),
+        "y": int(y),
+        "radius": clamp_int(radius, 1, 4096),
+        "tolerance": clamp_int(tolerance, 0, 255),
+        "feather": clamp_int(feather, 0, 4096),
+        "point_count": len(brush_points),
+        "changed_pixels": changed,
+        "updated_at": iso_now(),
+    }
+    manual.setdefault("operations", []).append(operation)
+    manual["changed_pixels"] = int(manual.get("changed_pixels") or 0) + changed
+    manual["last_operation"] = operation
+    preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
+    save_preview_manifest(preview["preview_id"], preview)
+    return preview
+
+
+def preview_soften_alpha_edges(preview_id: str, radius: int = 2, passes: int = 1) -> dict:
+    preview = load_preview_manifest(preview_id)
+    root = preview_dir(preview["preview_id"])
+    processed_path = root / "processed.png"
+    if not processed_path.exists():
+        raise FileNotFoundError(f"processed preview missing: {processed_path}")
+
+    push_repair_undo(root, "processed", processed_path)
+    image = open_rgba_image(processed_path)
+    softened, changed = soften_alpha_edges_image(image, radius, passes)
+    image.close()
+    softened.save(processed_path)
+    softened.close()
+
+    postprocess = preview.setdefault("postprocess", {})
+    edge_soften = postprocess.setdefault("edge_soften", {"operations": []})
+    operation = {
+        "radius": clamp_int(radius, 1, 20),
+        "passes": clamp_int(passes, 1, 5),
+        "changed_pixels": changed,
+        "updated_at": iso_now(),
+    }
+    edge_soften.setdefault("operations", []).append(operation)
+    edge_soften["changed_pixels"] = int(edge_soften.get("changed_pixels") or 0) + changed
+    edge_soften["last_operation"] = operation
+    preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
+    save_preview_manifest(preview["preview_id"], preview)
+    return preview
+
+
+def preview_repair_history(preview_id: str, direction: str) -> dict:
+    preview = load_preview_manifest(preview_id)
+    root = preview_dir(preview["preview_id"])
+    processed_path = root / "processed.png"
+    if not processed_path.exists():
+        raise FileNotFoundError(f"processed preview missing: {processed_path}")
+    restore_repair_history(root, "processed", processed_path, direction)
+    preview["processed_url"] = f"/work/previews/{preview['preview_id']}/processed.png?ts={int(time.time() * 1000)}"
+    repair_history = preview.setdefault("postprocess", {}).setdefault("repair_history", {})
+    repair_history["last_direction"] = "redo" if str(direction).lower() == "redo" else "undo"
+    repair_history["updated_at"] = iso_now()
+    save_preview_manifest(preview["preview_id"], preview)
+    return preview
+
+
+def raw_frame_path_for_job(manifest: dict, frame_entry: dict, frame_index: int) -> Path:
+    raw_dir = Path(manifest.get("raw_dir") or job_dir(str(manifest.get("job_id") or "")) / "raw")
+    candidates = [
+        raw_dir / f"frame_{frame_index + 1:05d}.png",
+        raw_dir / f"frame_{frame_index + 1:03d}.png",
+        raw_dir / str(frame_entry.get("name") or ""),
+    ]
+    source_index = frame_entry.get("source_index")
+    if source_index is not None:
+        source_index = safe_int(source_index, frame_index)
+        candidates.insert(0, raw_dir / f"frame_{source_index + 1:05d}.png")
+        candidates.insert(1, raw_dir / f"frame_{source_index + 1:03d}.png")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"raw frame missing for frame {frame_index + 1}")
+
+
+def url_basename(value: str, fallback: str) -> str:
+    parsed_name = Path(urlparse(str(value or "")).path).name
+    return parsed_name or fallback
+
+
+def repair_history_dirs(root: Path, key: str) -> tuple[Path, Path]:
+    safe_key = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(key or "processed"))
+    history_root = root / "repair_history" / safe_key
+    undo_dir = history_root / "undo"
+    redo_dir = history_root / "redo"
+    undo_dir.mkdir(parents=True, exist_ok=True)
+    redo_dir.mkdir(parents=True, exist_ok=True)
+    return undo_dir, redo_dir
+
+
+def clear_history_dir(path: Path) -> None:
+    if not path.exists():
+        return
+    for item in path.glob("*.png"):
+        try:
+            item.unlink()
+        except OSError:
+            pass
+
+
+def sorted_history_files(path: Path) -> list[Path]:
+    if not path.exists():
+        return []
+    return sorted(path.glob("*.png"), key=lambda item: item.name)
+
+
+def trim_history_dir(path: Path, limit: int = 30) -> None:
+    files = sorted_history_files(path)
+    for item in files[:-limit]:
+        try:
+            item.unlink()
+        except OSError:
+            pass
+
+
+def push_repair_undo(root: Path, key: str, current_path: Path) -> None:
+    if not current_path.exists():
+        return
+    undo_dir, redo_dir = repair_history_dirs(root, key)
+    snapshot_name = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.png"
+    shutil.copy2(current_path, undo_dir / snapshot_name)
+    clear_history_dir(redo_dir)
+    trim_history_dir(undo_dir)
+
+
+def restore_repair_history(root: Path, key: str, current_path: Path, direction: str) -> None:
+    undo_dir, redo_dir = repair_history_dirs(root, key)
+    is_redo = str(direction or "").lower() == "redo"
+    source_dir = redo_dir if is_redo else undo_dir
+    target_dir = undo_dir if is_redo else redo_dir
+    source_files = sorted_history_files(source_dir)
+    if not source_files:
+        raise FileNotFoundError("no repair history to restore")
+    source_path = source_files[-1]
+    if current_path.exists():
+        snapshot_name = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}.png"
+        shutil.copy2(current_path, target_dir / snapshot_name)
+        trim_history_dir(target_dir)
+    shutil.copy2(source_path, current_path)
+    try:
+        source_path.unlink()
+    except OSError:
+        pass
+
+
+def job_manual_point_repair(
+    job_id: str,
+    frame_index: int,
+    x: int,
+    y: int,
+    mode: str,
+    radius: int,
+    tolerance: int,
+    points: list[dict] | None = None,
+    feather: int = 6,
+) -> dict:
+    manifest = load_job_manifest(job_id)
+    frames = manifest.get("frames") or []
+    if not frames:
+        raise ValueError("job has no frames")
+    frame_index = clamp_int(frame_index, 0, len(frames) - 1)
+    frame_entry = frames[frame_index]
+    root = job_dir(str(manifest.get("job_id") or job_id))
+    processed_path = root / "processed" / str(frame_entry.get("name") or f"frame_{frame_index + 1:03d}.png")
+    thumb_path = root / "thumbs" / url_basename(str(frame_entry.get("thumb_url") or ""), f"thumb_{frame_index + 1:03d}.png")
+    if not processed_path.exists():
+        raise FileNotFoundError(f"processed frame missing: {processed_path}")
+    raw_path = raw_frame_path_for_job(manifest, frame_entry, frame_index)
+
+    push_repair_undo(root, processed_path.stem, processed_path)
+    processed_image = open_rgba_image(processed_path)
+    source_image = open_rgba_image(raw_path)
+    brush_points = points if points else [{"x": x, "y": y}]
+    repaired, changed = manual_brush_repair_image(processed_image, source_image, brush_points, mode, radius, tolerance, feather)
+    processed_image.close()
+    source_image.close()
+    repaired.save(processed_path)
+
+    thumb = repaired.copy()
+    thumb.thumbnail((128, 128))
+    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+    thumb.save(thumb_path)
+    bbox = repaired.getchannel("A").getbbox()
+    canvas_size = repaired.size
+    repaired.close()
+
+    ts = int(time.time() * 1000)
+    frame_entry["bbox"] = list(bbox) if bbox else None
+    frame_entry["width"] = canvas_size[0]
+    frame_entry["height"] = canvas_size[1]
+    frame_entry["url"] = f"/work/jobs/{manifest['job_id']}/processed/{processed_path.name}?ts={ts}"
+    frame_entry["thumb_url"] = f"/work/jobs/{manifest['job_id']}/thumbs/{thumb_path.name}?ts={ts}"
+    postprocess = manifest.setdefault("postprocess", {})
+    manual = postprocess.setdefault("manual_point_repair", {"operations": []})
+    operation = {
+        "frame_index": frame_index,
+        "mode": "remove" if str(mode).lower() == "remove" else "keep",
+        "x": int(x),
+        "y": int(y),
+        "radius": clamp_int(radius, 1, 4096),
+        "tolerance": clamp_int(tolerance, 0, 255),
+        "feather": clamp_int(feather, 0, 4096),
+        "point_count": len(brush_points),
+        "changed_pixels": changed,
+        "updated_at": iso_now(),
+    }
+    manual.setdefault("operations", []).append(operation)
+    manual["changed_pixels"] = int(manual.get("changed_pixels") or 0) + changed
+    manual["last_operation"] = operation
+    save_job_manifest(manifest["job_id"], manifest)
+    return manifest
+
+
+def job_soften_alpha_edges(job_id: str, frame_index: int, radius: int = 2, passes: int = 1) -> dict:
+    manifest = load_job_manifest(job_id)
+    frames = manifest.get("frames") or []
+    if not frames:
+        raise ValueError("job has no frames")
+    frame_index = clamp_int(frame_index, 0, len(frames) - 1)
+    frame_entry = frames[frame_index]
+    root = job_dir(str(manifest.get("job_id") or job_id))
+    processed_path = root / "processed" / str(frame_entry.get("name") or f"frame_{frame_index + 1:03d}.png")
+    thumb_path = root / "thumbs" / url_basename(str(frame_entry.get("thumb_url") or ""), f"thumb_{frame_index + 1:03d}.png")
+    if not processed_path.exists():
+        raise FileNotFoundError(f"processed frame missing: {processed_path}")
+
+    push_repair_undo(root, processed_path.stem, processed_path)
+    image = open_rgba_image(processed_path)
+    softened, changed = soften_alpha_edges_image(image, radius, passes)
+    image.close()
+    softened.save(processed_path)
+    thumb = softened.copy()
+    thumb.thumbnail((128, 128))
+    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+    thumb.save(thumb_path)
+    bbox = softened.getchannel("A").getbbox()
+    canvas_size = softened.size
+    softened.close()
+
+    ts = int(time.time() * 1000)
+    frame_entry["bbox"] = list(bbox) if bbox else None
+    frame_entry["width"] = canvas_size[0]
+    frame_entry["height"] = canvas_size[1]
+    frame_entry["url"] = f"/work/jobs/{manifest['job_id']}/processed/{processed_path.name}?ts={ts}"
+    frame_entry["thumb_url"] = f"/work/jobs/{manifest['job_id']}/thumbs/{thumb_path.name}?ts={ts}"
+    postprocess = manifest.setdefault("postprocess", {})
+    edge_soften = postprocess.setdefault("edge_soften", {"operations": []})
+    operation = {
+        "frame_index": frame_index,
+        "radius": clamp_int(radius, 1, 20),
+        "passes": clamp_int(passes, 1, 5),
+        "changed_pixels": changed,
+        "updated_at": iso_now(),
+    }
+    edge_soften.setdefault("operations", []).append(operation)
+    edge_soften["changed_pixels"] = int(edge_soften.get("changed_pixels") or 0) + changed
+    edge_soften["last_operation"] = operation
+    save_job_manifest(manifest["job_id"], manifest)
+    return manifest
+
+
+def job_repair_history(job_id: str, frame_index: int, direction: str) -> dict:
+    manifest = load_job_manifest(job_id)
+    frames = manifest.get("frames") or []
+    if not frames:
+        raise ValueError("job has no frames")
+    frame_index = clamp_int(frame_index, 0, len(frames) - 1)
+    frame_entry = frames[frame_index]
+    root = job_dir(str(manifest.get("job_id") or job_id))
+    processed_path = root / "processed" / str(frame_entry.get("name") or f"frame_{frame_index + 1:03d}.png")
+    thumb_path = root / "thumbs" / url_basename(str(frame_entry.get("thumb_url") or ""), f"thumb_{frame_index + 1:03d}.png")
+    if not processed_path.exists():
+        raise FileNotFoundError(f"processed frame missing: {processed_path}")
+
+    restore_repair_history(root, processed_path.stem, processed_path, direction)
+    frame = open_rgba_image(processed_path)
+    thumb = frame.copy()
+    thumb.thumbnail((128, 128))
+    thumb_path.parent.mkdir(parents=True, exist_ok=True)
+    thumb.save(thumb_path)
+    bbox = frame.getchannel("A").getbbox()
+    canvas_size = frame.size
+    frame.close()
+
+    ts = int(time.time() * 1000)
+    frame_entry["bbox"] = list(bbox) if bbox else None
+    frame_entry["width"] = canvas_size[0]
+    frame_entry["height"] = canvas_size[1]
+    frame_entry["url"] = f"/work/jobs/{manifest['job_id']}/processed/{processed_path.name}?ts={ts}"
+    frame_entry["thumb_url"] = f"/work/jobs/{manifest['job_id']}/thumbs/{thumb_path.name}?ts={ts}"
+    repair_history = manifest.setdefault("postprocess", {}).setdefault("repair_history", {})
+    repair_history["last_direction"] = "redo" if str(direction).lower() == "redo" else "undo"
+    repair_history["frame_index"] = frame_index
+    repair_history["updated_at"] = iso_now()
+    save_job_manifest(manifest["job_id"], manifest)
+    return manifest
 
 
 def preview_frame(
@@ -3007,6 +4916,10 @@ def resolve_realesrgan_binary() -> str | None:
         if found:
             return found
     for path in (
+        DEFAULT_REALESRGAN_ROOT / "realesrgan-ncnn-vulkan.exe",
+        DEFAULT_REALESRGAN_ROOT / "realesrgan-ncnn-vulkan",
+        ROOT_DIR.parent / "tools" / "realesrgan-ncnn-vulkan.exe",
+        ROOT_DIR.parent / "tools" / "realesrgan-ncnn-vulkan" / "realesrgan-ncnn-vulkan.exe",
         ROOT_DIR / "tools" / "realesrgan-ncnn-vulkan.exe",
         ROOT_DIR / "tools" / "realesrgan-ncnn-vulkan" / "realesrgan-ncnn-vulkan.exe",
         WORK_DIR / "tools" / "realesrgan-ncnn-vulkan.exe",
@@ -3027,6 +4940,8 @@ def resolve_realesrgan_model_dir(binary: str | None = None) -> Path | None:
     candidates.extend(
         [
             ROOT_DIR / "tools" / "realesrgan-ncnn-vulkan" / "models",
+            ROOT_DIR.parent / "tools" / "realesrgan-ncnn-vulkan" / "models",
+            DEFAULT_REALESRGAN_ROOT / "models",
             WORK_DIR / "tools" / "realesrgan-ncnn-vulkan" / "models",
         ]
     )
@@ -3043,7 +4958,7 @@ def realesrgan_missing_message() -> str:
         "Real-ESRGAN anime is not ready. Expected "
         "realesrgan-ncnn-vulkan.exe plus models/realesrgan-x4plus-anime.param and .bin. "
         f"Set {REAL_ESRGAN_BINARY_ENV} and optionally {REAL_ESRGAN_MODEL_DIR_ENV}, "
-        "or install the portable package under work/tools/realesrgan-ncnn-vulkan."
+        "or install the portable package under F:\\Codex-Program\\tools\\realesrgan-ncnn-vulkan."
     )
 
 
@@ -3961,6 +5876,900 @@ def export_job(job_id: str, selected_indices: list[int], video_duration_ms: int)
     }
 
 
+def normalize_video_process_format(value: str) -> str:
+    value = str(value or "mp4").strip().lower()
+    return value if value in {"mp4", "webm", "mov", "gif"} else "mp4"
+
+
+def normalize_video_process_quality(value: str) -> str:
+    value = str(value or "balanced").strip().lower()
+    return value if value in {"high", "balanced", "small"} else "balanced"
+
+
+def ffmpeg_drawtext_escape(value: str) -> str:
+    return (
+        str(value or "")
+        .replace("\\", "\\\\")
+        .replace(":", "\\:")
+        .replace(",", "\\,")
+        .replace("'", "\\'")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+    )
+
+
+def ffmpeg_color(value: str, fallback: str = "white") -> str:
+    raw = str(value or "").strip()
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", raw):
+        return "0x" + raw[1:]
+    if re.fullmatch(r"0x[0-9a-fA-F]{6}", raw):
+        return raw
+    if re.fullmatch(r"[a-zA-Z]+", raw):
+        return raw.lower()
+    return fallback
+
+
+def normalized_video_process_subtitles(raw_subtitles, legacy_subtitle: dict | None = None) -> list[dict]:
+    source = raw_subtitles if isinstance(raw_subtitles, list) else []
+    if not source and isinstance(legacy_subtitle, dict) and str(legacy_subtitle.get("text") or "").strip():
+        source = [legacy_subtitle]
+    result: list[dict] = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        start = max(0.0, safe_float(item.get("start"), 0.0))
+        end = max(0.0, safe_float(item.get("end"), 0.0))
+        size = clamp_int(safe_int(item.get("size"), 32), 12, 128)
+        position = str(item.get("position") or "bottom").strip().lower()
+        if position not in {"top", "middle", "bottom"}:
+            position = "bottom"
+        box = str(item.get("box") or "boxed").strip().lower()
+        if box not in {"boxed", "outline", "none"}:
+            box = "boxed"
+        result.append(
+            {
+                "text": text,
+                "start": start,
+                "end": end,
+                "size": size,
+                "position": position,
+                "color": ffmpeg_color(str(item.get("color") or "white")),
+                "box": box,
+            }
+        )
+    return result[:256]
+
+
+def build_video_process_subtitle_filters(subtitles: list[dict]) -> list[str]:
+    filters: list[str] = []
+    for subtitle in subtitles:
+        start = max(0.0, safe_float(subtitle.get("start"), 0.0))
+        end = max(0.0, safe_float(subtitle.get("end"), 0.0))
+        enable = f":enable='gte(t,{start:.3f})'" if end <= start else f":enable='between(t,{start:.3f},{end:.3f})'"
+        position = str(subtitle.get("position") or "bottom")
+        y_expr = {
+            "top": "44",
+            "middle": "(h-text_h)/2",
+            "bottom": "h-text_h-44",
+        }.get(position, "h-text_h-44")
+        box_mode = str(subtitle.get("box") or "boxed")
+        style = ""
+        if box_mode == "boxed":
+            style = ":box=1:boxcolor=black@0.48:boxborderw=12"
+        elif box_mode == "outline":
+            style = ":borderw=3:bordercolor=black@0.82"
+        filters.append(
+            "drawtext="
+            f"text='{ffmpeg_drawtext_escape(str(subtitle.get('text') or ''))}':"
+            f"x=(w-text_w)/2:y={y_expr}:"
+            f"fontsize={clamp_int(safe_int(subtitle.get('size'), 32), 12, 128)}:"
+            f"fontcolor={subtitle.get('color') or 'white'}"
+            f"{style}"
+            f"{enable}"
+        )
+    return filters
+
+
+def build_video_process_filters(
+    width: int,
+    height: int,
+    fps: int,
+    *,
+    subtitle: dict | None = None,
+    subtitles: list[dict] | None = None,
+    force_gif_fps: bool = False,
+    include_resize: bool = True,
+) -> list[str]:
+    filters: list[str] = []
+    if fps > 0:
+        filters.append(f"fps={fps}")
+    elif force_gif_fps:
+        filters.append("fps=15")
+    if include_resize and width > 0 and height > 0:
+        filters.append(f"scale={width}:{height}:flags=lanczos")
+    elif include_resize and width > 0:
+        filters.append(f"scale={width}:-2:flags=lanczos")
+    elif include_resize and height > 0:
+        filters.append(f"scale=-2:{height}:flags=lanczos")
+    normalized_subtitles = subtitles if isinstance(subtitles, list) else normalized_video_process_subtitles([], subtitle)
+    filters.extend(build_video_process_subtitle_filters(normalized_subtitles))
+    return filters
+
+
+def normalized_video_process_segments(raw_segments, duration: float) -> list[dict]:
+    if not isinstance(raw_segments, list):
+        return []
+    result: list[dict] = []
+    for item in raw_segments:
+        if not isinstance(item, dict):
+            continue
+        start = max(0.0, safe_float(item.get("start"), 0.0))
+        end = max(0.0, safe_float(item.get("end"), 0.0))
+        if duration > 0:
+            start = min(start, duration)
+            end = min(end, duration)
+        if end > start:
+            result.append({"start": start, "end": end})
+    return result[:64]
+
+
+def normalized_video_process_clips(raw_clips, fallback_upload_id: str, fallback_duration: float) -> list[dict]:
+    source = raw_clips if isinstance(raw_clips, list) else []
+    result: list[dict] = []
+    for item in source:
+        if not isinstance(item, dict):
+            continue
+        upload_id = str(item.get("uploadId") or item.get("upload_id") or fallback_upload_id or "").strip()
+        if not upload_id:
+            continue
+        start = max(0.0, safe_float(item.get("start"), 0.0))
+        end = max(0.0, safe_float(item.get("end"), 0.0))
+        duration = fallback_duration
+        try:
+            clip_path, media_type = source_media_entry(upload_id)
+            if media_type == "video":
+                duration = safe_float(media_info(clip_path, "video").get("duration"), fallback_duration)
+        except Exception:
+            duration = fallback_duration
+        if duration > 0:
+            start = min(start, duration)
+            end = min(end, duration)
+        if end > start:
+            result.append(
+                {
+                    "upload_id": upload_id,
+                    "start": start,
+                    "end": end,
+                    "source_name": clean_filename(str(item.get("sourceName") or item.get("source_name") or upload_id)),
+                }
+            )
+    return result[:128]
+
+
+def even_dimension(value: int, fallback: int) -> int:
+    safe = value if value > 0 else fallback
+    safe = max(2, safe)
+    return safe if safe % 2 == 0 else safe + 1
+
+
+def video_process_canvas_size(width: int, height: int, source_infos: list[dict]) -> tuple[int, int]:
+    first = next((info for info in source_infos if safe_int(info.get("width"), 0) > 0 and safe_int(info.get("height"), 0) > 0), {})
+    source_width = safe_int(first.get("width"), 1280)
+    source_height = safe_int(first.get("height"), 720)
+    if width > 0 and height > 0:
+        return even_dimension(width, source_width), even_dimension(height, source_height)
+    if width > 0 and source_width > 0:
+        computed_height = int(round((source_height / source_width) * width))
+        return even_dimension(width, source_width), even_dimension(computed_height, source_height)
+    if height > 0 and source_height > 0:
+        computed_width = int(round((source_width / source_height) * height))
+        return even_dimension(computed_width, source_width), even_dimension(height, source_height)
+    return even_dimension(source_width, 1280), even_dimension(source_height, 720)
+
+
+def append_video_process_codec_args(args: list[str], output_format: str, quality: str, mute: bool) -> None:
+    crf_map = {
+        "mp4": {"high": "18", "balanced": "23", "small": "29"},
+        "webm": {"high": "24", "balanced": "32", "small": "42"},
+    }
+    if output_format == "mp4":
+        args += ["-c:v", "libx264", "-preset", "medium", "-crf", crf_map["mp4"][quality], "-pix_fmt", "yuv420p"]
+        if not mute:
+            args += ["-c:a", "aac", "-b:a", "160k"]
+    elif output_format == "webm":
+        args += ["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", crf_map["webm"][quality], "-pix_fmt", "yuv420p"]
+        if not mute:
+            args += ["-c:a", "libopus", "-b:a", "128k"]
+    else:
+        args += ["-c:v", "prores_ks", "-profile:v", "4", "-pix_fmt", "yuva444p10le"]
+        if not mute:
+            args += ["-c:a", "pcm_s16le"]
+
+
+def process_video_export(upload_id: str, options: dict) -> dict:
+    source_path, media_type = source_media_entry(upload_id)
+    if media_type != "video":
+        raise ValueError("video processing only supports video or GIF sources")
+
+    source_info = media_info(source_path, "video")
+    output_format = normalize_video_process_format(str(options.get("format") or "mp4"))
+    quality = normalize_video_process_quality(str(options.get("quality") or "balanced"))
+    width = clamp_int(safe_int(options.get("width"), 0), 0, 16384)
+    height = clamp_int(safe_int(options.get("height"), 0), 0, 16384)
+    fps = clamp_int(safe_int(options.get("fps"), 0), 0, 240)
+    mute = bool(options.get("mute"))
+    trim_start = max(0.0, safe_float(options.get("trim_start"), 0.0))
+    trim_end = max(0.0, safe_float(options.get("trim_end"), 0.0))
+    if trim_end <= trim_start:
+        trim_end = 0.0
+    subtitle = options.get("subtitle") if isinstance(options.get("subtitle"), dict) else {}
+    subtitles = normalized_video_process_subtitles(options.get("subtitles"), subtitle)
+    segments = normalized_video_process_segments(options.get("segments"), safe_float(source_info.get("duration"), 0.0))
+    clips = normalized_video_process_clips(options.get("clips") if isinstance(options.get("clips"), list) else options.get("segments"), upload_id, safe_float(source_info.get("duration"), 0.0))
+    raw_name = clean_filename(str(options.get("name") or source_path.stem or "processed_video"))
+    target_stem = Path(raw_name).stem or "processed_video"
+    output_scope = "export" if str(options.get("output_scope") or "work") == "export" else "work"
+    target_dir = (configured_exports_dir() if output_scope == "export" else VIDEO_PROCESS_DIR) / f"{timestamped_id()}-video-process"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_name = f"{target_stem}.{output_format}"
+    target_path = target_dir / target_name
+
+    ffmpeg = resolve_ffmpeg_binary("ffmpeg")
+    filters = build_video_process_filters(width, height, fps, subtitles=subtitles, force_gif_fps=output_format == "gif")
+    filter_chain = ",".join(filters)
+
+    if clips:
+        clip_entries: list[dict] = []
+        for clip in clips:
+            clip_path, clip_type = source_media_entry(str(clip.get("upload_id") or upload_id))
+            if clip_type != "video":
+                continue
+            clip_info = media_info(clip_path, "video")
+            clip_entries.append({**clip, "path": clip_path, "info": clip_info, "has_audio": video_has_audio(clip_path)})
+        if not clip_entries:
+            raise ValueError("no valid video clips to render")
+        canvas_width, canvas_height = video_process_canvas_size(width, height, [entry["info"] for entry in clip_entries])
+        target_fps = fps if fps > 0 else (15 if output_format == "gif" else safe_int(round(safe_float(clip_entries[0]["info"].get("fps"), 0.0)), 0))
+        preserve_audio = (not mute) and output_format != "gif" and all(bool(entry.get("has_audio")) for entry in clip_entries)
+        trim_parts: list[str] = []
+        video_inputs: list[str] = []
+        audio_inputs: list[str] = []
+        for index, entry in enumerate(clip_entries):
+            video_label = f"v{index}"
+            per_clip_filters = [
+                f"[{index}:v]trim=start={entry['start']:.3f}:end={entry['end']:.3f}",
+                "setpts=PTS-STARTPTS",
+                f"scale={canvas_width}:{canvas_height}:force_original_aspect_ratio=decrease:flags=lanczos",
+                f"pad={canvas_width}:{canvas_height}:(ow-iw)/2:(oh-ih)/2",
+                "setsar=1",
+                "format=yuv420p",
+            ]
+            if target_fps > 0:
+                per_clip_filters.append(f"fps={target_fps}")
+            trim_parts.append(",".join(per_clip_filters) + f"[{video_label}]")
+            video_inputs.append(f"[{video_label}]")
+            if preserve_audio:
+                audio_label = f"a{index}"
+                trim_parts.append(
+                    f"[{index}:a]atrim=start={entry['start']:.3f}:end={entry['end']:.3f},asetpts=PTS-STARTPTS,aresample=async=1[{audio_label}]"
+                )
+                audio_inputs.append(f"[{audio_label}]")
+        if preserve_audio:
+            trim_parts.append("".join([part for pair in zip(video_inputs, audio_inputs) for part in pair]) + f"concat=n={len(clip_entries)}:v=1:a=1[vcat][aout]")
+        else:
+            trim_parts.append("".join(video_inputs) + f"concat=n={len(clip_entries)}:v=1:a=0[vcat]")
+        post_filters = build_video_process_filters(0, 0, 0, subtitles=subtitles, force_gif_fps=False, include_resize=False)
+        trim_parts.append(f"[vcat]{','.join(post_filters) if post_filters else 'null'}[vout]")
+        if output_format == "gif":
+            palette_colors = {"high": 256, "balanced": 128, "small": 64}[quality]
+            trim_parts.append(f"[vout]split[s0][s1];[s0]palettegen=max_colors={palette_colors}[p];[s1][p]paletteuse=dither=bayer:bayer_scale=3[gifout]")
+            args = [ffmpeg, "-y"]
+            for entry in clip_entries:
+                args += ["-i", str(entry["path"])]
+            args += ["-filter_complex", ";".join(trim_parts), "-map", "[gifout]", "-loop", "0", str(target_path)]
+            run_process(args)
+            accel = ffmpeg_accel_payload(configured_ffmpeg_accel_mode(), None, "cpu")
+        else:
+            args = [ffmpeg, "-y"]
+            for entry in clip_entries:
+                args += ["-i", str(entry["path"])]
+            args += ["-filter_complex", ";".join(trim_parts), "-map", "[vout]"]
+            if preserve_audio:
+                args += ["-map", "[aout]"]
+            else:
+                args += ["-an"]
+            append_video_process_codec_args(args, output_format, quality, not preserve_audio)
+            args.append(str(target_path))
+            run_process(args)
+            accel = ffmpeg_accel_payload(configured_ffmpeg_accel_mode(), None, "cpu")
+    elif output_format == "gif":
+        palette_colors = {"high": 256, "balanced": 128, "small": 64}[quality]
+        gif_filter_chain = filter_chain if filter_chain else "fps=15"
+        filter_complex = (
+            f"[0:v]{gif_filter_chain},split[s0][s1];"
+            f"[s0]palettegen=max_colors={palette_colors}[p];"
+            f"[s1][p]paletteuse=dither=bayer:bayer_scale=3"
+        )
+        args = [ffmpeg, "-y"]
+        if trim_start > 0:
+            args += ["-ss", f"{trim_start:.3f}"]
+        args += ["-i", str(source_path)]
+        if trim_end > trim_start:
+            args += ["-t", f"{trim_end - trim_start:.3f}"]
+        args += ["-filter_complex", filter_complex, "-loop", "0", str(target_path)]
+        run_process(args)
+        accel = ffmpeg_accel_payload(configured_ffmpeg_accel_mode(), None, "cpu")
+    else:
+        def build_args(hwaccel: str | None) -> list[str]:
+            args = [ffmpeg, "-y"]
+            if hwaccel:
+                args += ["-hwaccel", hwaccel]
+            if trim_start > 0:
+                args += ["-ss", f"{trim_start:.3f}"]
+            args += ["-i", str(source_path)]
+            if trim_end > trim_start:
+                args += ["-t", f"{trim_end - trim_start:.3f}"]
+            if filter_chain:
+                args += ["-vf", filter_chain]
+            if mute:
+                args += ["-an"]
+            append_video_process_codec_args(args, output_format, quality, mute)
+            args.append(str(target_path))
+            return args
+
+        accel = run_ffmpeg_with_auto_accel(build_args)
+
+    if not target_path.exists():
+        raise RuntimeError("FFmpeg did not create an output file")
+
+    output_info = media_info(target_path, "video")
+    result = {
+        "name": target_name,
+        "url": export_url(target_dir, target_name) if output_scope == "export" else f"/work/video-process/{target_dir.name}/{target_name}",
+        "path": str(target_path),
+        "output_dir": str(target_dir),
+        "output_scope": output_scope,
+        "format": output_format,
+        "quality": quality,
+        "width": output_info.get("width") or 0,
+        "height": output_info.get("height") or 0,
+        "fps": output_info.get("fps") or 0,
+        "duration": output_info.get("duration") or 0,
+        "codec": output_info.get("codec") or "",
+        "source_bytes": source_path.stat().st_size if source_path.exists() else 0,
+        "output_bytes": target_path.stat().st_size,
+        "segments": clips if clips else segments,
+        "clips": clips,
+        "trim_start": trim_start,
+        "trim_end": trim_end,
+        "subtitles": subtitles,
+        "subtitle_enabled": bool(subtitles),
+        "ffmpeg_accel": accel,
+        "created_at": iso_now(),
+    }
+    (target_dir / "video-process.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def export_video_process_result(source: str, name: str = "") -> dict:
+    source_path = repair_mojibake_path(Path(str(source or "")))
+    if not source_path.exists() or not source_path.is_file():
+        raise FileNotFoundError("video process result not found")
+    if not is_within_root(source_path, VIDEO_PROCESS_DIR) and not is_within_root(source_path, configured_exports_dir()):
+        raise ValueError("video process result is outside the allowed workspace")
+    output_format = normalize_video_process_format(source_path.suffix.removeprefix("."))
+    target_name = clean_filename(name or source_path.name)
+    if not target_name.lower().endswith(source_path.suffix.lower()):
+        target_name = f"{Path(target_name).stem or source_path.stem}{source_path.suffix.lower()}"
+    target_dir = configured_exports_dir() / f"{timestamped_id()}-video-export"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target_path = target_dir / target_name
+    counter = 2
+    while target_path.exists():
+        target_path = target_dir / f"{Path(target_name).stem}-{counter:02d}{source_path.suffix.lower()}"
+        counter += 1
+    shutil.copy2(source_path, target_path)
+    output_info = media_info(target_path, "video")
+    result = {
+        "name": target_path.name,
+        "url": export_url(target_dir, target_path.name),
+        "path": str(target_path),
+        "output_dir": str(target_dir),
+        "format": output_format,
+        "width": output_info.get("width") or 0,
+        "height": output_info.get("height") or 0,
+        "output_bytes": target_path.stat().st_size,
+        "created_at": iso_now(),
+    }
+    (target_dir / "video-export.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def export_image_result_job(job_id: str) -> dict:
+    manifest = load_job_manifest(job_id)
+    processed_dir = job_dir(job_id) / "processed"
+    if not processed_dir.is_dir():
+        raise FileNotFoundError(f"processed image folder not found: {processed_dir}")
+
+    target_dir = configured_exports_dir() / f"{timestamped_id()}-image-matte"
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    copied: list[dict] = []
+    for index, entry in enumerate(manifest.get("frames") or [], start=1):
+        source_name = str(entry.get("name") or f"frame_{index:03d}.png")
+        source_path = processed_dir / source_name
+        if not source_path.is_file():
+            continue
+        original_name = clean_filename(str(entry.get("original_name") or source_name))
+        if not original_name.lower().endswith(".png"):
+            original_name = f"{Path(original_name).stem or f'image_{index:03d}'}.png"
+        target_name = original_name
+        target_path = target_dir / target_name
+        if target_path.exists():
+            target_name = f"{Path(original_name).stem}-{index:03d}.png"
+            target_path = target_dir / target_name
+        shutil.copy2(source_path, target_path)
+        copied.append(
+            {
+                "index": safe_int(entry.get("index"), index - 1),
+                "name": target_name,
+                "source_name": source_name,
+                "path": str(target_path),
+            }
+        )
+
+    if not copied:
+        raise ValueError("no matte result images to export")
+
+    result = {
+        "target_dir": str(target_dir),
+        "frame_count": len(copied),
+        "frames": copied,
+        "source_job_id": manifest.get("job_id") or job_id,
+        "created_at": iso_now(),
+    }
+    (target_dir / "export.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def dual_background_source_image(form: cgi.FieldStorage, role: str, upload_id: str) -> tuple[Image.Image, str, str]:
+    file_items = field_storage_items(form, f"{role}_file")
+    for item in file_items:
+        if getattr(item, "file", None) and str(getattr(item, "filename", "") or "").strip():
+            name = clean_filename(Path(str(item.filename).replace("\\", "/")).name or f"{role}.png")
+            with Image.open(item.file) as image:
+                return image.convert("RGBA"), name, "file"
+
+    if not upload_id:
+        raise ValueError(f"{role} image is missing")
+    target_index = safe_int(form.getfirst(f"{role}_index", ""), -1)
+    entries = source_frame_entries(upload_id)
+    entry = next((item for item in entries if safe_int(item.get("index"), -1) == target_index), None)
+    if entry is None and target_index >= 0 and target_index < len(entries):
+        entry = entries[target_index]
+    if not entry:
+        raise ValueError(f"{role} imported image is missing")
+    path = repair_mojibake_path(Path(str(entry.get("path") or "")))
+    with Image.open(path) as image:
+        return image.convert("RGBA"), clean_filename(str(entry.get("name") or path.name)), "import"
+
+
+def solve_dual_background_alpha(
+    black_image: Image.Image,
+    white_image: Image.Image,
+    bias: int = 0,
+    feather: int = 0,
+) -> Image.Image:
+    import numpy as np
+
+    black = black_image.convert("RGB")
+    white = white_image.convert("RGB")
+    if white.size != black.size:
+        white = white.resize(black.size, LANCZOS)
+
+    black_arr = np.asarray(black, dtype=np.float32) / 255.0
+    white_arr = np.asarray(white, dtype=np.float32) / 255.0
+    transparency = np.clip(np.mean(white_arr - black_arr, axis=2) + (float(bias) / 255.0), 0.0, 1.0)
+    alpha = np.clip(1.0 - transparency, 0.0, 1.0)
+
+    rgb = np.zeros_like(black_arr)
+    np.divide(black_arr, np.maximum(alpha[..., None], 1.0 / 255.0), out=rgb, where=alpha[..., None] > 1.0 / 255.0)
+    rgb = np.clip(rgb, 0.0, 1.0)
+    rgba = np.dstack([rgb, alpha])
+    output = Image.fromarray((rgba * 255.0 + 0.5).astype(np.uint8), "RGBA")
+    if feather > 0:
+        channels = output.split()
+        alpha_channel = channels[3].filter(ImageFilter.GaussianBlur(radius=max(0, min(8, feather)) / 2))
+        output = Image.merge("RGBA", (*channels[:3], alpha_channel))
+    return output
+
+
+def dual_background_matte_job(form: cgi.FieldStorage) -> dict:
+    upload_id = str(form.getfirst("upload_id", "") or "").strip()
+    black_image, black_name, black_source = dual_background_source_image(form, "black", upload_id)
+    white_image, white_name, white_source = dual_background_source_image(form, "white", upload_id)
+    bias = max(-64, min(64, safe_int(form.getfirst("bias", 0), 0)))
+    feather = max(0, min(8, safe_int(form.getfirst("feather", 0), 0)))
+    trim = str(form.getfirst("trim", "1") or "1").lower() not in {"0", "false", "no"}
+
+    result_image = solve_dual_background_alpha(black_image, white_image, bias=bias, feather=feather)
+    if trim:
+        bbox = result_image.getchannel("A").getbbox()
+        if bbox:
+            result_image = result_image.crop(bbox)
+    bbox = result_image.getchannel("A").getbbox()
+
+    job_id = timestamped_id()
+    root = job_dir(job_id)
+    raw_dir = root / "raw"
+    processed_dir = root / "processed"
+    thumbs_dir = root / "thumbs"
+    for directory in (raw_dir, processed_dir, thumbs_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    black_raw = raw_dir / "dual_black.png"
+    white_raw = raw_dir / "dual_white.png"
+    frame_name = "dual_background_matte.png"
+    thumb_name = "thumb_001.png"
+    frame_path = processed_dir / frame_name
+    thumb_path = thumbs_dir / thumb_name
+
+    black_image.save(black_raw)
+    white_image.save(white_raw)
+    result_image.save(frame_path, optimize=True)
+    thumb = result_image.copy()
+    thumb.thumbnail((128, 128))
+    thumb.save(thumb_path)
+
+    info = {
+        "media_type": "dual_background",
+        "duration": 0,
+        "fps": 0,
+        "width": result_image.width,
+        "height": result_image.height,
+        "frame_count": 1,
+        "bytes": frame_path.stat().st_size,
+    }
+    manifest = {
+        "job_id": job_id,
+        "upload_id": upload_id,
+        "job_dir": str(root),
+        "processed_dir": str(processed_dir),
+        "raw_dir": str(raw_dir),
+        "source_path": str(black_raw),
+        "source_media_type": "dual_background",
+        "ffmpeg_accel": static_image_payload(),
+        "video_info": info,
+        "options": {
+            "start_time": 0,
+            "end_time": 0,
+            "keep_every": 1,
+            "target_size": result_image.height,
+            "output_scale": 1,
+            "reduce_px": 0,
+            "canvas_mode": "dual_background",
+            "output_width": result_image.width,
+            "output_height": result_image.height,
+            "chroma_enabled": True,
+            "matte_mode": "dual_background",
+            "matte": {
+                "mode": "dual_background",
+                "black_source": black_source,
+                "white_source": white_source,
+                "black_name": black_name,
+                "white_name": white_name,
+                "bias": bias,
+                "feather": feather,
+                "trim": trim,
+            },
+            "scale": 1,
+        },
+        "frame_count": 1,
+        "frames": [
+            {
+                "index": 0,
+                "source_index": 0,
+                "name": frame_name,
+                "original_name": f"{Path(black_name).stem or 'dual'}-matte.png",
+                "url": f"/work/jobs/{job_id}/processed/{frame_name}",
+                "thumb_url": f"/work/jobs/{job_id}/thumbs/{thumb_name}",
+                "bbox": list(bbox) if bbox else None,
+                "width": result_image.width,
+                "height": result_image.height,
+            }
+        ],
+    }
+    save_job_manifest(job_id, manifest)
+    black_image.close()
+    white_image.close()
+    result_image.close()
+    thumb.close()
+    return manifest
+
+
+def render_image_split_canvas(processed_dir: Path, frame_map: dict[int, dict], item: dict) -> tuple[Image.Image, Path, int, int, str] | None:
+    source_index = safe_int(item.get("source_index"), -1)
+    entry = frame_map.get(source_index)
+    source_name = str(item.get("source_name") or "")
+    if not source_name and entry:
+        source_name = str(entry.get("name") or "")
+    source_path = processed_dir / Path(source_name).name
+    if not source_path.is_file() and entry:
+        source_path = processed_dir / Path(str(entry.get("name") or "")).name
+    if not source_path.is_file():
+        return None
+
+    with open_rgba_image(source_path) as source:
+        crop = item.get("crop") if isinstance(item.get("crop"), dict) else {}
+        frame_width = max(1, safe_int(crop.get("frameWidth"), source.width))
+        frame_height = max(1, safe_int(crop.get("frameHeight"), source.height))
+        crop_x = clamp_float(safe_float(crop.get("x"), 0.0), 0.0, float(max(0, frame_width - 1)))
+        crop_y = clamp_float(safe_float(crop.get("y"), 0.0), 0.0, float(max(0, frame_height - 1)))
+        crop_w = max(1.0, safe_float(crop.get("w"), float(frame_width)))
+        crop_h = max(1.0, safe_float(crop.get("h"), float(frame_height)))
+        crop_right = clamp_float(crop_x + crop_w, crop_x + 1.0, float(frame_width))
+        crop_bottom = clamp_float(crop_y + crop_h, crop_y + 1.0, float(frame_height))
+        source_logical_width = max(1, int(round(crop_right - crop_x)))
+        source_logical_height = max(1, int(round(crop_bottom - crop_y)))
+
+        scale_x = source.width / frame_width
+        scale_y = source.height / frame_height
+        left = max(0, min(source.width - 1, int(round(crop_x * scale_x))))
+        top = max(0, min(source.height - 1, int(round(crop_y * scale_y))))
+        right = max(left + 1, min(source.width, int(round(crop_right * scale_x))))
+        bottom = max(top + 1, min(source.height, int(round(crop_bottom * scale_y))))
+        cropped = source.crop((left, top, right, bottom))
+
+        output = item.get("output") if isinstance(item.get("output"), dict) else {}
+        mode = str(output.get("mode") or "source")
+        output_width = max(1, safe_int(output.get("width"), source_logical_width))
+        output_height = max(1, safe_int(output.get("height"), source_logical_height))
+
+        if mode == "fit":
+            fit_scale = min(output_width / source_logical_width, output_height / source_logical_height)
+            draw_width = max(1, int(round(source_logical_width * fit_scale)))
+            draw_height = max(1, int(round(source_logical_height * fit_scale)))
+            resized = cropped if cropped.size == (draw_width, draw_height) else resize_rgba_with_premultiplied_alpha(cropped, (draw_width, draw_height))
+            canvas = Image.new("RGBA", (output_width, output_height), (0, 0, 0, 0))
+            canvas.alpha_composite(resized, ((output_width - draw_width) // 2, (output_height - draw_height) // 2))
+            canvas = anti_alias_alpha_edges(canvas, radius=0.85, band_radius=1, rgb_radius=0.35)
+            return canvas, source_path, output_width, output_height, mode
+
+        output_width = source_logical_width
+        output_height = source_logical_height
+        canvas = cropped if cropped.size == (output_width, output_height) else resize_rgba_with_premultiplied_alpha(cropped, (output_width, output_height))
+        canvas = anti_alias_alpha_edges(canvas, radius=0.85, band_radius=1, rgb_radius=0.35)
+        return canvas, source_path, output_width, output_height, mode
+
+
+def png_bytes(image: Image.Image, optimize: bool = True) -> bytes:
+    buffer = BytesIO()
+    image.save(buffer, format="PNG", optimize=optimize)
+    return buffer.getvalue()
+
+
+PNG_COMPRESSION_LEVELS = {
+    "faithful": {"colors": 256, "label": "faithful"},
+    "balanced": {"colors": 128, "label": "balanced"},
+    "strong": {"colors": 64, "label": "strong"},
+    "extreme": {"colors": 32, "label": "extreme"},
+}
+
+
+def normalize_png_compression_level(value: str) -> str:
+    value = str(value or "balanced")
+    return value if value in PNG_COMPRESSION_LEVELS else "balanced"
+
+
+def compressed_png_bytes(image: Image.Image, compression_level: str = "balanced") -> bytes:
+    compression_level = normalize_png_compression_level(compression_level)
+    colors = int(PNG_COMPRESSION_LEVELS[compression_level]["colors"])
+    candidates = [png_bytes(image, optimize=True)]
+    try:
+        quantized = image.quantize(colors=colors, method=Image.Quantize.FASTOCTREE, dither=Image.Dither.FLOYDSTEINBERG)
+        candidates.append(png_bytes(quantized, optimize=True))
+    except Exception:
+        pass
+    return min(candidates, key=len)
+
+
+def compress_image_split_result_job(job_id: str, items: list[dict], compression_level: str = "balanced") -> dict:
+    compression_level = normalize_png_compression_level(compression_level)
+    colors = int(PNG_COMPRESSION_LEVELS[compression_level]["colors"])
+    manifest = load_job_manifest(job_id)
+    processed_dir = job_dir(job_id) / "processed"
+    if not processed_dir.is_dir():
+        raise FileNotFoundError(f"processed image folder not found: {processed_dir}")
+    if not items:
+        raise ValueError("no split images to compress")
+
+    frame_map: dict[int, dict] = {}
+    for entry in manifest.get("frames") or []:
+        frame_map[safe_int(entry.get("source_index", entry.get("index")), 0)] = entry
+        frame_map[safe_int(entry.get("index"), 0)] = entry
+
+    run_id = f"{timestamped_id()}-image-compress"
+    target_dir = COMPRESSED_DIR / run_id
+    target_dir.mkdir(parents=True, exist_ok=True)
+    frames: list[dict] = []
+    used_names: set[str] = set()
+    for output_index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        rendered = render_image_split_canvas(processed_dir, frame_map, item)
+        if not rendered:
+            continue
+        canvas, source_path, width, height, mode = rendered
+        before = png_bytes(canvas, optimize=False)
+        after = compressed_png_bytes(canvas, compression_level)
+        name = clean_filename(str(item.get("name") or f"part_{output_index:02d}"))
+        target_stem = Path(name).stem or f"part_{output_index:02d}"
+        target_name = f"{target_stem}.png"
+        counter = 2
+        while target_name.lower() in used_names or (target_dir / target_name).exists():
+            target_name = f"{target_stem}-{counter:02d}.png"
+            counter += 1
+        used_names.add(target_name.lower())
+        target_path = target_dir / target_name
+        target_path.write_bytes(after)
+        frames.append(
+            {
+                "key": str(item.get("key") or ""),
+                "index": output_index - 1,
+                "name": target_name,
+                "source_name": source_path.name,
+                "url": f"/work/compressed/{run_id}/{target_name}",
+                "width": width,
+                "height": height,
+                "mode": mode,
+                "before_bytes": len(before),
+                "after_bytes": len(after),
+                "saved_bytes": max(0, len(before) - len(after)),
+                "saved_ratio": 0 if not before else max(0.0, 1.0 - (len(after) / len(before))),
+                "compression_level": compression_level,
+                "compressor": f"Pillow PNG quantize {colors} + optimize",
+            }
+        )
+
+    if not frames:
+        raise ValueError("no split images were compressed")
+
+    result = {
+        "compress_id": run_id,
+        "frame_count": len(frames),
+        "frames": frames,
+        "compression_level": compression_level,
+        "compressor": f"Pillow PNG quantize {colors} + optimize",
+        "created_at": iso_now(),
+    }
+    (target_dir / "compression.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
+def export_image_split_result_job(job_id: str, items: list[dict], export_mode: str = "folder") -> dict:
+    manifest = load_job_manifest(job_id)
+    processed_dir = job_dir(job_id) / "processed"
+    if not processed_dir.is_dir():
+        raise FileNotFoundError(f"processed image folder not found: {processed_dir}")
+    if not items:
+        raise ValueError("no split images to export")
+
+    frame_map: dict[int, dict] = {}
+    for entry in manifest.get("frames") or []:
+        frame_map[safe_int(entry.get("source_index", entry.get("index")), 0)] = entry
+        frame_map[safe_int(entry.get("index"), 0)] = entry
+
+    normalized_export_mode = "direct" if str(export_mode or "") == "direct" else "folder"
+    export_root = configured_exports_dir()
+    target_dir = export_root if normalized_export_mode == "direct" else export_root / f"{timestamped_id()}-image-split"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    used_names: set[str] = set()
+
+    def unique_target_path(raw_name: str, fallback_index: int) -> tuple[str, Path]:
+        name = clean_filename(raw_name or f"part_{fallback_index:02d}")
+        stem = Path(name).stem or f"part_{fallback_index:02d}"
+        suffix = ".png"
+        candidate = f"{stem}{suffix}"
+        counter = 2
+        while candidate.lower() in used_names or (target_dir / candidate).exists():
+            candidate = f"{stem}-{counter:02d}{suffix}"
+            counter += 1
+        used_names.add(candidate.lower())
+        return candidate, target_dir / candidate
+
+    exported: list[dict] = []
+    for output_index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        source_index = safe_int(item.get("source_index"), -1)
+        entry = frame_map.get(source_index)
+        source_name = str(item.get("source_name") or "")
+        if not source_name and entry:
+            source_name = str(entry.get("name") or "")
+        source_path = processed_dir / Path(source_name).name
+        if not source_path.is_file() and entry:
+            source_path = processed_dir / Path(str(entry.get("name") or "")).name
+        if not source_path.is_file():
+            continue
+
+        with open_rgba_image(source_path) as source:
+            crop = item.get("crop") if isinstance(item.get("crop"), dict) else {}
+            frame_width = max(1, safe_int(crop.get("frameWidth"), source.width))
+            frame_height = max(1, safe_int(crop.get("frameHeight"), source.height))
+            crop_x = clamp_float(safe_float(crop.get("x"), 0.0), 0.0, float(max(0, frame_width - 1)))
+            crop_y = clamp_float(safe_float(crop.get("y"), 0.0), 0.0, float(max(0, frame_height - 1)))
+            crop_w = max(1.0, safe_float(crop.get("w"), float(frame_width)))
+            crop_h = max(1.0, safe_float(crop.get("h"), float(frame_height)))
+            crop_right = clamp_float(crop_x + crop_w, crop_x + 1.0, float(frame_width))
+            crop_bottom = clamp_float(crop_y + crop_h, crop_y + 1.0, float(frame_height))
+            source_logical_width = max(1, int(round(crop_right - crop_x)))
+            source_logical_height = max(1, int(round(crop_bottom - crop_y)))
+
+            scale_x = source.width / frame_width
+            scale_y = source.height / frame_height
+            left = max(0, min(source.width - 1, int(round(crop_x * scale_x))))
+            top = max(0, min(source.height - 1, int(round(crop_y * scale_y))))
+            right = max(left + 1, min(source.width, int(round(crop_right * scale_x))))
+            bottom = max(top + 1, min(source.height, int(round(crop_bottom * scale_y))))
+            cropped = source.crop((left, top, right, bottom))
+
+            output = item.get("output") if isinstance(item.get("output"), dict) else {}
+            mode = str(output.get("mode") or "source")
+            output_width = max(1, safe_int(output.get("width"), source_logical_width))
+            output_height = max(1, safe_int(output.get("height"), source_logical_height))
+
+            if mode == "fit":
+                fit_scale = min(output_width / source_logical_width, output_height / source_logical_height)
+                draw_width = max(1, int(round(source_logical_width * fit_scale)))
+                draw_height = max(1, int(round(source_logical_height * fit_scale)))
+                resized = cropped if cropped.size == (draw_width, draw_height) else resize_rgba_with_premultiplied_alpha(cropped, (draw_width, draw_height))
+                canvas = Image.new("RGBA", (output_width, output_height), (0, 0, 0, 0))
+                canvas.alpha_composite(resized, ((output_width - draw_width) // 2, (output_height - draw_height) // 2))
+            else:
+                output_width = source_logical_width
+                output_height = source_logical_height
+                canvas = cropped if cropped.size == (output_width, output_height) else resize_rgba_with_premultiplied_alpha(cropped, (output_width, output_height))
+            canvas = anti_alias_alpha_edges(canvas, radius=0.85, band_radius=1, rgb_radius=0.35)
+
+            target_name, target_path = unique_target_path(str(item.get("name") or ""), output_index)
+            if bool(item.get("compressed")):
+                target_path.write_bytes(compressed_png_bytes(canvas, str(item.get("compression_level") or "balanced")))
+            else:
+                canvas.save(target_path)
+            exported.append(
+                {
+                    "index": output_index - 1,
+                    "name": target_name,
+                    "source_name": source_path.name,
+                    "path": str(target_path),
+                    "width": output_width,
+                    "height": output_height,
+                    "mode": mode,
+                    "compressed": bool(item.get("compressed")),
+                }
+            )
+
+    if not exported:
+        raise ValueError("no split images were exported")
+
+    result = {
+        "target_dir": str(target_dir),
+        "frame_count": len(exported),
+        "frames": exported,
+        "export_mode": normalized_export_mode,
+        "source_job_id": manifest.get("job_id") or job_id,
+        "created_at": iso_now(),
+    }
+    manifest_name = "export.json" if normalized_export_mode == "folder" else f"{timestamped_id()}-image-split-export.json"
+    (target_dir / manifest_name).write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    return result
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "SpriteVideoLab/0.1"
 
@@ -3992,8 +6801,22 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/runtime-info":
             self.send_json({"ok": True, "runtime": runtime_info()})
             return
+        if parsed.path == "/api/models":
+            self.send_json({"ok": True, **model_management_payload()})
+            return
+        if parsed.path == "/api/process-progress":
+            progress_id = (parse_qs(parsed.query).get("id") or [""])[0]
+            self.send_json({"ok": True, "progress": get_process_progress(progress_id)})
+            return
         if parsed.path == "/api/output-path":
             self.send_json({"ok": True, "output_path": output_path_payload()})
+            return
+        if parsed.path == "/api/resource-file":
+            resource_path = Path(unquote((parse_qs(parsed.query).get("path") or [""])[0])).expanduser().resolve()
+            if not resource_path.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND)
+                return
+            self.serve_file(resource_path, allow_range=resource_path.suffix.lower() in VIDEO_EXTENSIONS)
             return
         if parsed.path == "/":
             self.serve_app_file(APP_DIR / "index.html", content_type="text/html; charset=utf-8")
@@ -4003,7 +6826,18 @@ class AppHandler(BaseHTTPRequestHandler):
             self.serve_app_file(APP_DIR / relative)
             return
         if parsed.path.startswith("/media/upload/"):
-            upload_id = parsed.path.removeprefix("/media/upload/")
+            media_path = parsed.path.removeprefix("/media/upload/")
+            if "/frames/" in media_path:
+                upload_id, frame_index_text = media_path.split("/frames/", 1)
+                frame_index = safe_int(frame_index_text.strip("/"), -1)
+                frame_entries = source_frame_entries(upload_id)
+                frame_entry = next((entry for entry in frame_entries if safe_int(entry.get("index"), -1) == frame_index), None)
+                if not frame_entry:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self.serve_media_file(Path(str(frame_entry.get("path") or "")), allow_range=False)
+                return
+            upload_id = media_path
             self.serve_media_file(source_video_path(upload_id), allow_range=True)
             return
         if parsed.path.startswith("/work/"):
@@ -4018,7 +6852,30 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        progress_id_for_error = ""
         try:
+            if parsed.path == "/api/one-click-login":
+                self.send_json({"ok": True, "auth": one_click_login_payload()})
+                return
+            if parsed.path == "/api/download-default-birefnet":
+                result = download_default_birefnet_model()
+                self.send_json({"ok": True, "download": result, "runtime": runtime_info()})
+                return
+            if parsed.path == "/api/model-download":
+                payload = self.read_json_body()
+                result = download_managed_model(str(payload.get("key") or "").strip())
+                self.send_json({"ok": True, "result": result, **model_management_payload()})
+                return
+            if parsed.path == "/api/model-download-start":
+                payload = self.read_json_body()
+                result = start_model_download_task(str(payload.get("key") or "").strip())
+                self.send_json({"ok": True, **result})
+                return
+            if parsed.path == "/api/model-uninstall":
+                payload = self.read_json_body()
+                result = uninstall_managed_model(str(payload.get("key") or "").strip())
+                self.send_json({"ok": True, "result": result, **model_management_payload()})
+                return
             if parsed.path == "/api/import-path":
                 payload = self.read_json_body()
                 raw_path = str(payload.get("path") or "").strip().strip("\"'")
@@ -4074,8 +6931,22 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"ok": True, "result": result})
                 return
+            if parsed.path == "/api/dual-background-matte":
+                form = cgi.FieldStorage(
+                    fp=self.rfile,
+                    headers=self.headers,
+                    environ={
+                        "REQUEST_METHOD": "POST",
+                        "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                        "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+                    },
+                )
+                result = dual_background_matte_job(form)
+                self.send_json({"ok": True, "job": result})
+                return
             if parsed.path == "/api/process":
                 payload = self.read_json_body()
+                progress_id_for_error = str(payload.get("progress_id") or "").strip()
                 upload_id = str(payload.get("upload_id") or "")
                 result = process_video_to_job(
                     upload_id=upload_id,
@@ -4108,6 +6979,46 @@ class AppHandler(BaseHTTPRequestHandler):
                     batch_green_desaturate=bool(payload.get("batch_green_desaturate", False)),
                     batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
                     batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
+                    progress_id=progress_id_for_error,
+                )
+                self.send_json({"ok": True, "job": result})
+                return
+            if parsed.path == "/api/matte-selected-frames":
+                payload = self.read_json_body()
+                progress_id_for_error = str(payload.get("progress_id") or "").strip()
+                job_id = str(payload.get("job_id") or "")
+                selected_indices_raw = payload.get("selected_indices") or []
+                if not isinstance(selected_indices_raw, list):
+                    selected_indices_raw = []
+                source_manifest = load_job_manifest(job_id)
+                result = matte_selected_frames_to_job(
+                    source_job_id=job_id,
+                    selected_indices=[safe_int(value, -1) for value in selected_indices_raw],
+                    output_scale=output_scale_from_payload(payload, source_manifest.get("video_info") or {}),
+                    reduce_px=max(0, safe_int(payload.get("reduce_px"), 0)),
+                    canvas_mode=normalize_canvas_mode(str(payload.get("canvas_mode") or "auto")),
+                    chroma_enabled=bool(payload.get("chroma_enabled", True)),
+                    matte_mode=str(payload.get("matte_mode") or ""),
+                    key_mode=str(payload.get("key_mode") or "auto"),
+                    manual_key_hex=str(payload.get("manual_key_hex") or "#00FF00"),
+                    threshold=max(0, safe_int(payload.get("threshold"), 80)),
+                    softness=max(0, safe_int(payload.get("softness"), 32)),
+                    despill_strength=max(0.0, safe_float(payload.get("despill_strength"), 0.85)),
+                    halo_pixels=max(0, safe_int(payload.get("halo_pixels"), 1)),
+                    ai_model=normalize_ai_model_key(str(payload.get("ai_model") or DEFAULT_AI_MATTE_MODEL)),
+                    ai_device=normalize_ai_device(str(payload.get("ai_device") or "auto")),
+                    ai_resolution=payload.get("ai_resolution"),
+                    luma_black=max(0, min(254, safe_int(payload.get("luma_black"), 24))),
+                    luma_white=max(1, min(255, safe_int(payload.get("luma_white"), 230))),
+                    luma_gamma=max(0.05, safe_float(payload.get("luma_gamma"), 1.0)),
+                    luma_strength=max(0.0, min(2.0, safe_float(payload.get("luma_strength"), 1.0))),
+                    corridorkey_enabled=bool(payload.get("corridorkey_enabled", False)),
+                    corridorkey_screen=normalize_corridorkey_screen(str(payload.get("corridorkey_screen") or "auto")),
+                    batch_green_to_black=bool(payload.get("batch_green_to_black", False)),
+                    batch_green_desaturate=bool(payload.get("batch_green_desaturate", False)),
+                    batch_semitransparent_to_black=bool(payload.get("batch_semitransparent_to_black", False)),
+                    batch_semitransparent_to_opaque=bool(payload.get("batch_semitransparent_to_opaque", False)),
+                    progress_id=progress_id_for_error,
                 )
                 self.send_json({"ok": True, "job": result})
                 return
@@ -4186,6 +7097,73 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"ok": True, "preview": result})
                 return
+            if parsed.path == "/api/preview-manual-point":
+                payload = self.read_json_body()
+                raw_points = payload.get("points") if isinstance(payload.get("points"), list) else None
+                result = preview_manual_point_repair(
+                    str(payload.get("preview_id") or ""),
+                    x=safe_int(payload.get("x"), 0),
+                    y=safe_int(payload.get("y"), 0),
+                    mode=str(payload.get("mode") or "keep"),
+                    radius=max(1, min(4096, safe_int(payload.get("radius"), 18))),
+                    tolerance=max(0, min(255, safe_int(payload.get("tolerance"), 28))),
+                    points=raw_points,
+                    feather=max(0, min(4096, safe_int(payload.get("feather"), 6))),
+                )
+                self.send_json({"ok": True, "preview": result})
+                return
+            if parsed.path == "/api/preview-soften-alpha":
+                payload = self.read_json_body()
+                result = preview_soften_alpha_edges(
+                    str(payload.get("preview_id") or ""),
+                    radius=max(1, min(20, safe_int(payload.get("radius"), 2))),
+                    passes=max(1, min(5, safe_int(payload.get("passes"), 1))),
+                )
+                self.send_json({"ok": True, "preview": result})
+                return
+            if parsed.path == "/api/preview-repair-history":
+                payload = self.read_json_body()
+                result = preview_repair_history(
+                    str(payload.get("preview_id") or ""),
+                    direction=str(payload.get("direction") or "undo"),
+                )
+                self.send_json({"ok": True, "preview": result})
+                return
+            if parsed.path == "/api/job-manual-point":
+                payload = self.read_json_body()
+                raw_points = payload.get("points") if isinstance(payload.get("points"), list) else None
+                result = job_manual_point_repair(
+                    str(payload.get("job_id") or ""),
+                    frame_index=safe_int(payload.get("frame_index"), 0),
+                    x=safe_int(payload.get("x"), 0),
+                    y=safe_int(payload.get("y"), 0),
+                    mode=str(payload.get("mode") or "keep"),
+                    radius=max(1, min(4096, safe_int(payload.get("radius"), 18))),
+                    tolerance=max(0, min(255, safe_int(payload.get("tolerance"), 28))),
+                    points=raw_points,
+                    feather=max(0, min(4096, safe_int(payload.get("feather"), 6))),
+                )
+                self.send_json({"ok": True, "job": result})
+                return
+            if parsed.path == "/api/job-soften-alpha":
+                payload = self.read_json_body()
+                result = job_soften_alpha_edges(
+                    str(payload.get("job_id") or ""),
+                    frame_index=safe_int(payload.get("frame_index"), 0),
+                    radius=max(1, min(20, safe_int(payload.get("radius"), 2))),
+                    passes=max(1, min(5, safe_int(payload.get("passes"), 1))),
+                )
+                self.send_json({"ok": True, "job": result})
+                return
+            if parsed.path == "/api/job-repair-history":
+                payload = self.read_json_body()
+                result = job_repair_history(
+                    str(payload.get("job_id") or ""),
+                    frame_index=safe_int(payload.get("frame_index"), 0),
+                    direction=str(payload.get("direction") or "undo"),
+                )
+                self.send_json({"ok": True, "job": result})
+                return
             if parsed.path == "/api/export":
                 payload = self.read_json_body()
                 result = export_job(
@@ -4194,6 +7172,55 @@ class AppHandler(BaseHTTPRequestHandler):
                     video_duration_ms=safe_int(payload.get("video_duration_ms"), 100),
                 )
                 self.send_json({"ok": True, "export": result})
+                return
+            if parsed.path == "/api/process-video-export":
+                payload = self.read_json_body()
+                result = process_video_export(
+                    upload_id=str(payload.get("upload_id") or ""),
+                    options=payload,
+                )
+                self.send_json({"ok": True, "video": result})
+                return
+            if parsed.path == "/api/export-video-process-result":
+                payload = self.read_json_body()
+                result = export_video_process_result(
+                    source=str(payload.get("path") or ""),
+                    name=str(payload.get("name") or ""),
+                )
+                self.send_json({"ok": True, "video": result})
+                return
+            if parsed.path == "/api/register-job-frame-upload":
+                payload = self.read_json_body()
+                result = register_job_frame_as_upload(
+                    job_id=str(payload.get("job_id") or ""),
+                    frame_index=safe_int(payload.get("frame_index"), 0),
+                )
+                self.send_json({"ok": True, "upload": result})
+                return
+            if parsed.path == "/api/export-image-result":
+                payload = self.read_json_body()
+                result = export_image_result_job(job_id=str(payload.get("job_id") or ""))
+                self.send_json({"ok": True, "export": result})
+                return
+            if parsed.path == "/api/export-image-split-result":
+                payload = self.read_json_body()
+                raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                result = export_image_split_result_job(
+                    job_id=str(payload.get("job_id") or ""),
+                    items=raw_items,
+                    export_mode=str(payload.get("export_mode") or "folder"),
+                )
+                self.send_json({"ok": True, "export": result})
+                return
+            if parsed.path == "/api/compress-image-split-result":
+                payload = self.read_json_body()
+                raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+                result = compress_image_split_result_job(
+                    job_id=str(payload.get("job_id") or ""),
+                    items=raw_items,
+                    compression_level=str(payload.get("compression_level") or "balanced"),
+                )
+                self.send_json({"ok": True, "compression": result})
                 return
             if parsed.path == "/api/magic-preview":
                 if not MAGIC_PREVIEW_LOCK.acquire(blocking=False):
@@ -4234,6 +7261,40 @@ class AppHandler(BaseHTTPRequestHandler):
                     }
                 )
                 return
+            if parsed.path == "/api/select-resource-folder":
+                result = choose_resource_folder()
+                self.send_json(
+                    {
+                        "ok": True,
+                        "folder": result,
+                        "cancelled": bool(result.get("cancelled")),
+                    }
+                )
+                return
+            if parsed.path == "/api/resource-folder-assets":
+                payload = self.read_json_body()
+                result = scan_resource_folder(
+                    str(payload.get("path") or ""),
+                    limit=max(1, min(2000, safe_int(payload.get("limit"), 500))),
+                )
+                self.send_json({"ok": True, **result})
+                return
+            if parsed.path == "/api/resource-assets-delete":
+                payload = self.read_json_body()
+                raw_assets = payload.get("assets") if isinstance(payload.get("assets"), list) else []
+                result = delete_resource_assets(str(payload.get("root") or ""), raw_assets)
+                self.send_json({"ok": True, **result})
+                return
+            if parsed.path == "/api/resource-assets-move":
+                payload = self.read_json_body()
+                raw_assets = payload.get("assets") if isinstance(payload.get("assets"), list) else []
+                result = move_resource_assets(
+                    str(payload.get("root") or ""),
+                    str(payload.get("target_relative_path") or ""),
+                    raw_assets,
+                )
+                self.send_json({"ok": True, **result})
+                return
             if parsed.path == "/api/open-path":
                 payload = self.read_json_body()
                 target = Path(str(payload.get("path") or "").strip()).expanduser().resolve()
@@ -4243,9 +7304,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
         except FileNotFoundError as exc:
+            if progress_id_for_error:
+                set_process_progress(progress_id_for_error, 0, 1, "error", done=True, error=str(exc))
             self.send_error_json(str(exc), status=HTTPStatus.NOT_FOUND)
             return
         except Exception as exc:
+            if progress_id_for_error:
+                set_process_progress(progress_id_for_error, 0, 1, "error", done=True, error=str(exc))
             self.send_error_json(str(exc), status=HTTPStatus.BAD_REQUEST)
             return
 
@@ -4331,7 +7396,7 @@ class AppHandler(BaseHTTPRequestHandler):
 def serve_once(host: str, port: int) -> None:
     ensure_runtime_dirs()
     server = ThreadingHTTPServer((host, port), AppHandler)
-    print(f"Sprite Video Lab running at http://{host}:{port}")
+    print(f"{PRODUCT_NAME} ({PRODUCT_NAME_ZH}) running at http://{host}:{port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -4355,7 +7420,7 @@ def run_with_reloader(host: str, port: int) -> None:
     ensure_runtime_dirs()
     watch_state = watch_snapshot()
     child: subprocess.Popen | None = None
-    print(f"Sprite Video Lab reloader watching {len(watch_state)} files.")
+    print(f"{PRODUCT_NAME} reloader watching {len(watch_state)} files.")
     try:
         while True:
             if child is None or child.poll() is not None:
@@ -4374,7 +7439,7 @@ def run_with_reloader(host: str, port: int) -> None:
             time.sleep(0.8)
             next_snapshot = watch_snapshot()
             if next_snapshot != watch_state:
-                print("Changes detected. Reloading Sprite Video Lab...")
+                print(f"Changes detected. Reloading {PRODUCT_NAME}...")
                 watch_state = next_snapshot
                 stop_child_process(child)
                 child = None
@@ -4385,7 +7450,7 @@ def run_with_reloader(host: str, port: int) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Sprite Video Lab.")
+    parser = argparse.ArgumentParser(description=f"Run {PRODUCT_NAME}.")
     parser.add_argument("--serve", action="store_true", help="Run the HTTP server once without file watching.")
     parser.add_argument("--host", default=None, help=f"Host to bind. Defaults to ${HOST_ENV} or {DEFAULT_HOST}.")
     parser.add_argument("--port", type=int, default=None, help=f"Port to bind. Defaults to ${PORT_ENV} or {DEFAULT_PORT}.")
