@@ -134,7 +134,7 @@
         <section class="panel media-panel workflow-target" id="previewPanel" hidden>
           <div class="section-head">
             <div>
-              <p class="section-kicker">Timeline</p>
+              <p class="section-kicker">截取</p>
               <h2>源画面与截取区间</h2>
             </div>
             <div class="preview-head-actions">
@@ -234,7 +234,7 @@
         <section class="panel process-panel workflow-target" id="extractPanel" hidden>
           <div class="section-head">
             <div>
-              <p class="section-kicker">Extract</p>
+              <p class="section-kicker">提取</p>
               <h2>提取帧</h2>
             </div>
             <div class="step-lock-note" id="extractLockNote">导入素材后，先按这里的基础输出设置提取帧。</div>
@@ -295,7 +295,7 @@
         <section class="panel process-panel workflow-target" id="processPanel" hidden>
           <div class="section-head">
             <div>
-              <p class="section-kicker">Matte</p>
+              <p class="section-kicker">抠图</p>
               <h2>抠图</h2>
             </div>
             <div class="step-lock-note" id="processLockNote">先在提取结果里选择需要处理的帧，再对选中帧抠图。</div>
@@ -320,7 +320,7 @@
                     <label class="field">
                       <span>抠图算法</span>
                       <select id="matteModeInput">
-                        <option value="chroma">chroma key</option>
+                        <option value="chroma">色键抠图</option>
                         <option value="birefnet">只用 BiRefNet</option>
                         <option value="corridorkey">只用 CorridorKey</option>
                         <option value="luma">只用 Luma</option>
@@ -343,7 +343,7 @@
                       </summary>
                       <dl>
                         <div>
-                          <dt>chroma key</dt>
+                          <dt>色键抠图</dt>
                           <dd>最快。适合绿幕、蓝幕、白底、灰底等受控纯色背景。</dd>
                         </div>
                         <div>
@@ -1099,7 +1099,7 @@
           <section id="dualMatteInputPanel" class="panel image-workflow-panel dual-matte-panel">
             <div class="section-head">
               <div>
-                <p class="section-kicker">Dual Background Matte</p>
+                <p class="section-kicker">双背景抠图</p>
                 <h2>双背景抠图</h2>
               </div>
               <span class="section-note">选择同一物体在纯黑与纯白背景下的两张图片，反解透明通道并生成 PNG。</span>

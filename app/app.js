@@ -194,7 +194,7 @@ const PRODUCT_SUBTITLE = "Sprite Forge Lab";
 const MATTE_MODE_BASE_LABELS = {
   edge_connected_chroma: "\u8FB9\u754C\u80CC\u666F\u62A0\u56FE\uFF08\u5FEB\u901F\u4FDD\u5185\uFF09",
   subject_protect_chroma: "\u4E3B\u4F53\u4FDD\u62A4\u62A0\u56FE\uFF08AI\u6162\u901F\uFF09",
-  chroma: "chroma key",
+  chroma: "色键抠图",
   birefnet: "\u53EA\u7528 BiRefNet",
   corridorkey: "\u53EA\u7528 CorridorKey",
   luma: "\u53EA\u7528 Luma",
@@ -849,7 +849,7 @@ function createImageProcessPanel() {
   });
 
   const kicker = imagePanel.querySelector(".section-kicker");
-  if (kicker) kicker.textContent = "Image Matte";
+  if (kicker) kicker.textContent = "图片抠图";
   const title = imagePanel.querySelector("h2");
   if (title) title.textContent = "\u62A0\u56FE";
   const lockNote = imagePanel.querySelector(`#${imageMatteId("processLockNote")}`);
@@ -3214,12 +3214,12 @@ function mergeSegmentRangeControls() {
 
   const startBox = document.createElement("div");
   startBox.className = "segment-frame-box";
-  startBox.innerHTML = "<span>闁荤姍鍐ㄦЩ妞ゎ偅鍔楅�?/span>";
+  startBox.innerHTML = "<span>起始帧</span>";
   startBox.append(startStepper);
 
   const endBox = document.createElement("div");
   endBox.className = "segment-frame-box";
-  endBox.innerHTML = "<span>缂傚倷鐒﹂幐璇差焽椤愩倖鏆?/span>";
+  endBox.innerHTML = "<span>结束帧</span>";
   endBox.append(endStepper);
 
   rangeControl.append(startBox, rangeTrack, endBox);
@@ -11023,7 +11023,7 @@ function syncResultActions() {
   const hasImageUpload = Boolean(state.imageUpload);
   if (els.processButton) {
     els.processButton.disabled = !hasExtractSelection;
-    els.processButton.textContent = "Matte selected frames";
+    els.processButton.textContent = "抠选中帧";
   }
   if (els.imageProcessButton) {
     els.imageProcessButton.disabled = !hasImageUpload;
@@ -11035,7 +11035,7 @@ function syncResultActions() {
   }
   if (els.previewFrameButton) {
     els.previewFrameButton.disabled = !state.upload;
-    els.previewFrameButton.textContent = "Preview current frame";
+    els.previewFrameButton.textContent = "预览当前帧";
   }
   if (els.imagePreviewFrameButton) {
     els.imagePreviewFrameButton.disabled = !hasImageUpload;
@@ -11049,7 +11049,7 @@ function syncResultActions() {
   }
   if (els.processLockNote) {
     els.processLockNote.hidden = hasExtractSelection;
-    els.processLockNote.textContent = "Select frames from extraction results before matting.";
+    els.processLockNote.textContent = "先在提取结果里选择需要处理的帧，再对选中帧抠图。";
   }
   if (els.imageProcessLockNote) {
     els.imageProcessLockNote.hidden = hasImageUpload;
@@ -12221,11 +12221,11 @@ function updateSourcePreviewPlaybackUI() {
       button.disabled = !canPlay;
     }
   });
-  els.sourcePreviewPlayButton.textContent = isPlaying ? "Pause" : "Play";
-  els.sourcePreviewPlayButton.setAttribute("aria-label", isPlaying ? "Pause preview" : "Play preview");
+  els.sourcePreviewPlayButton.textContent = isPlaying ? "暂停" : "播放";
+  els.sourcePreviewPlayButton.setAttribute("aria-label", isPlaying ? "暂停预览" : "播放预览");
   els.sourcePreviewPlayButton.setAttribute("aria-pressed", isPlaying ? "true" : "false");
-  els.sourcePreviewRestartButton.textContent = "Restart";
-  els.sourcePreviewRestartButton.setAttribute("aria-label", "Restart preview");
+  els.sourcePreviewRestartButton.textContent = "重播";
+  els.sourcePreviewRestartButton.setAttribute("aria-label", "重播预览");
   const previewTime = Number.isFinite(els.videoPreview.currentTime)
     ? els.videoPreview.currentTime
     : Number(state.segment.start || 0);
@@ -12287,7 +12287,7 @@ function seekSourcePreviewToFrame(frame) {
   const nextFrame = clampSegmentFrame(frame);
   const nextTime = sourceFrameToTime(nextFrame);
   els.videoPreview.currentTime = nextTime;
-  els.currentTimeLabel.textContent = `閻熸粎澧楅幐鍛婃�?${formatSeconds(nextTime)}`;
+  els.currentTimeLabel.textContent = `当前时间 ${formatSeconds(nextTime)}`;
   updateVideoProgress(nextTime);
   updateSourcePreviewTimeUI(nextTime);
 }
@@ -12439,7 +12439,7 @@ function updateSourcePreviewTimeUI(currentTime = 0) {
     els.sourcePreviewCurrentTime.textContent = "0.00s";
     els.sourcePreviewDurationLabel.textContent = "0.00s";
     if (els.sourceCurrentFrameLabel) {
-      els.sourceCurrentFrameLabel.textContent = "閻熸粎澧楅幐鍛婃櫠閻樺灚�?#000";
+      els.sourceCurrentFrameLabel.textContent = "当前帧 #000";
     }
     return;
   }
@@ -12451,7 +12451,7 @@ function updateSourcePreviewTimeUI(currentTime = 0) {
     const currentFrame = sourceTimeToFrame(currentTime);
     const frameCount = getSegmentFrameCount();
     const padLength = Math.max(3, String(frameCount).length);
-    els.sourceCurrentFrameLabel.textContent = `閻熸粎澧楅幐鍛婃櫠閻樺灚�?#${String(currentFrame).padStart(padLength, "0")} / ${frameCount}`;
+    els.sourceCurrentFrameLabel.textContent = `当前帧 #${String(currentFrame).padStart(padLength, "0")} / ${frameCount}`;
   }
 }
 
@@ -12552,7 +12552,7 @@ function updateSegmentConfirmationUI() {
 
 async function extractFrames() {
   if (!state.upload) {
-    setStatus("Please import media before extracting frames.", "error");
+    setStatus("请先导入素材，再提取帧。", "error");
     return;
   }
 
@@ -12573,7 +12573,7 @@ async function extractFrames() {
   await withBusy(els.extractButton, async () => {
     stopExtractPreviewTimer();
     startProcessProgress(progressId, estimateProcessingFrameCount(), progressTarget);
-    setStatus(isImageUpload() ? "Preparing image..." : isImageSequenceUpload() ? "Extracting image sequence..." : "Extracting frames...");
+    setStatus(isImageUpload() ? "正在准备图片..." : isImageSequenceUpload() ? "正在提取图片序列..." : "正在提取帧...");
     try {
       const data = await apiJson("/api/process", {
         method: "POST",
@@ -12592,7 +12592,7 @@ async function extractFrames() {
       showAnimationWorkbench();
       window.requestAnimationFrame(() => scrollToWorkflowTarget("extractResultPanel"));
       updateProcessProgress(data.job.frame_count, data.job.frame_count);
-      setStatus("Extraction completed, got " + data.job.frame_count + " frames.", "success");
+      setStatus(`提取完成，共 ${data.job.frame_count} 帧。`, "success");
     } finally {
       stopProcessProgressPolling();
       window.setTimeout(() => hideProcessProgress(progressTarget), 900);
@@ -12602,13 +12602,13 @@ async function extractFrames() {
 
 async function processSelectedFrames() {
   if (!state.extractJob) {
-    setStatus("Please select extracted frames first.", "error");
+    setStatus("请先在提取结果中选择帧。", "error");
     return;
   }
 
   const selectedFrames = getSelectedExtractFrames();
   if (selectedFrames.length === 0) {
-    setStatus("Please confirm the selected segment first.", "error");
+    setStatus("请先确认选区并选择需要处理的帧。", "error");
     return;
   }
 
@@ -12624,7 +12624,7 @@ async function processSelectedFrames() {
   await withBusy(els.processButton, async () => {
     stopPreviewTimer();
     startProcessProgress(progressId, selectedFrames.length, progressTarget);
-    setStatus("Matting " + selectedFrames.length + " selected frame(s) with " + formatMatteModeLabel(currentMatteMode("video")) + "...");
+    setStatus(`正在使用 ${formatMatteModeLabel(currentMatteMode("video"))} 抠图 ${selectedFrames.length} 帧...`);
     try {
       const data = await apiJson("/api/matte-selected-frames", {
         method: "POST",
@@ -12640,7 +12640,7 @@ async function processSelectedFrames() {
       renderJob();
       window.requestAnimationFrame(() => scrollToWorkflowTarget("resultPanel"));
       updateProcessProgress(data.job.frame_count, data.job.frame_count);
-      setStatus("Matte completed, generated " + data.job.frame_count + " frames.", "success");
+      setStatus(`抠图完成，共生成 ${data.job.frame_count} 帧。`, "success");
     } finally {
       stopProcessProgressPolling();
       window.setTimeout(() => hideProcessProgress(progressTarget), 900);
@@ -13168,7 +13168,7 @@ function restoreExtractSimilarity(snapshot) {
   refreshExtractSimilarityGroups(false);
 }
 
-function invalidateExtractSimilarity(message = "Similarity analysis cleared.") {
+function invalidateExtractSimilarity(message = "相似帧分析已清空。") {
   state.extractSimilarity = null;
   setExtractSimilarityStatus(message);
   renderExtractFrames();
@@ -13360,17 +13360,17 @@ function applyExtractSimilarityGroups(analysis, threshold = normalizeExtractSimi
 
 function renderExtractSimilarityStatus() {
   if (state.extractSimilarityInFlight) {
-    setExtractSimilarityStatus("Waiting for similarity analysis.");
+    setExtractSimilarityStatus("正在等待相似帧分析。");
     return;
   }
   const summary = state.extractSimilarity?.summary;
   if (!summary) {
-    setExtractSimilarityStatus("No similarity analysis yet.");
+    setExtractSimilarityStatus("尚未进行相似帧分析。");
     return;
   }
-  const ignoreLabel = summary.ignoreNear ? "Ignored near frames: " + summary.ignoreNearCount : "Near frames included";
+  const ignoreLabel = summary.ignoreNear ? `已忽略相邻 ${summary.ignoreNearCount} 帧` : "包含相邻帧";
   setExtractSimilarityStatus(
-    "Frames " + summary.frameCount + " / Groups " + summary.groupCount + " / Grouped " + summary.groupedFrameCount + " / " + ignoreLabel
+    `总帧数 ${summary.frameCount} / 相似组 ${summary.groupCount} / 已归组 ${summary.groupedFrameCount} / ${ignoreLabel}`
   );
 }
 
@@ -13390,12 +13390,12 @@ function refreshExtractSimilarityGroups(shouldRender = true) {
 
 async function analyzeExtractSimilarity() {
   if (!state.extractJob?.frames?.length) {
-    setStatus("Please extract frames before analyzing similarity.", "error");
+    setStatus("请先提取帧，再分析相似帧。", "error");
     return;
   }
   const frames = state.extractJob.frames;
   if (frames.length < 2) {
-    setStatus("Need at least 2 frames for similarity analysis.", "error");
+    setStatus("至少需要 2 帧才能分析相似度。", "error");
     return;
   }
 
@@ -13403,19 +13403,19 @@ async function analyzeExtractSimilarity() {
   state.extractSimilarityInFlight = true;
   state.extractSimilarity = null;
   syncResultActions();
-  setExtractSimilarityStatus("Analyzing " + frames.length + " frames...");
+  setExtractSimilarityStatus(`正在分析 ${frames.length} 帧...`);
 
   try {
     const features = [];
     for (let index = 0; index < frames.length; index += 1) {
       features.push(await extractSimilarityFeature(frames[index]));
       if (index % 8 === 0 || index === frames.length - 1) {
-        setExtractSimilarityStatus("Analyzing " + (index + 1) + "/" + frames.length);
+        setExtractSimilarityStatus(`正在分析 ${index + 1}/${frames.length}`);
         await new Promise((resolve) => window.requestAnimationFrame(resolve));
       }
     }
 
-    setExtractSimilarityStatus("Similarity analysis complete.");
+    setExtractSimilarityStatus("相似帧分析完成。");
     await new Promise((resolve) => window.requestAnimationFrame(resolve));
     const entries = buildExtractSimilarityEntries(frames, features, options);
     state.extractSimilarity = applyExtractSimilarityGroups({
@@ -13425,10 +13425,10 @@ async function analyzeExtractSimilarity() {
       summary: null,
     }, options.threshold);
     renderExtractFrames();
-    setStatus("Similarity analysis complete.", "success");
+    setStatus("相似帧分析完成。", "success");
   } catch (error) {
     state.extractSimilarity = null;
-    setExtractSimilarityStatus("Similarity analysis failed.");
+    setExtractSimilarityStatus("相似帧分析失败。");
     setStatus(error.message || String(error), "error");
   } finally {
     state.extractSimilarityInFlight = false;
@@ -13455,7 +13455,7 @@ function applyExtractSimilarityKeepFirst() {
   state.extractPreview.currentIndex = 0;
   state.extractSelectionTouched = true;
   renderExtractFrames();
-  setStatus("Kept the first frame in each similarity group.", "success");
+  setStatus("已保留每组相似帧中的第一帧。", "success");
 }
 
 function applyExtractSimilarityDropSimilar() {
@@ -13473,7 +13473,7 @@ function applyExtractSimilarityDropSimilar() {
   state.extractPreview.currentIndex = 0;
   state.extractSelectionTouched = true;
   renderExtractFrames();
-  setStatus("Dropped similar frames.", "success");
+  setStatus("已移除相似帧。", "success");
 }
 
 function renderExtractJob() {
@@ -13491,13 +13491,13 @@ function renderExtractJob() {
   const outputScaleLabel = formatOutputScaleLabel(options.output_scale || legacyOutputScale);
   els.extractResultPanel.hidden = false;
   els.extractJobSummary.innerHTML = [
-    summaryCard("Job ID", escapeHtml(state.extractJob.job_id)),
-    summaryCard("Frames", String(state.extractJob.frame_count) + " frames"),
-    summaryCard("Source", escapeHtml(formatSourceModeLabel(state.extractJob.ffmpeg_accel, sourceMediaType))),
-    summaryCard("Output scale", escapeHtml(outputScaleLabel)),
-    summaryCard("Output size", `${outputWidth} x ${outputHeight}`),
-    summaryCard("Canvas", escapeHtml(formatCanvasModeLabel(options.canvas_mode))),
-    summaryCard("Sampling", sourceMediaType === "image" ? "Single image" : sourceMediaType === "image_sequence" ? "Image sequence" : "Every " + (options.keep_every || 1) + " frame(s)"),
+    summaryCard("任务 ID", escapeHtml(state.extractJob.job_id)),
+    summaryCard("帧数", `${state.extractJob.frame_count} 帧`),
+    summaryCard("来源", escapeHtml(formatSourceModeLabel(state.extractJob.ffmpeg_accel, sourceMediaType))),
+    summaryCard("输出比例", escapeHtml(outputScaleLabel)),
+    summaryCard("输出尺寸", `${outputWidth} x ${outputHeight}`),
+    summaryCard("画布", escapeHtml(formatCanvasModeLabel(options.canvas_mode))),
+    summaryCard("采样", sourceMediaType === "image" ? "单张图片" : sourceMediaType === "image_sequence" ? "图片序列" : `每 ${options.keep_every || 1} 帧保留 1 帧`),
   ].join("");
   renderExtractFrames();
   syncResultActions();
@@ -13526,7 +13526,7 @@ function renderExtractFrames() {
         : "";
       const similarityStyle = similarity?.groupColor ? ` style="--similarity-color: ${similarity.groupColor};"` : "";
       const similarityBadge = similarity
-        ? `<span class="similarity-badge" title="Similarity ${similarity.relativeScore} / #${similarFrameNumber}">${similarity.displayScore}%</span>`
+        ? `<span class="similarity-badge" title="相似度 ${similarity.relativeScore} / #${similarFrameNumber}">${similarity.displayScore}%</span>`
         : "";
       const similarityMeta = similarity
         ? `<span class="similarity-match">#${similarFrameNumber}${similarity.groupId ? ` / G${similarity.groupId}` : ""}</span>`
@@ -13538,11 +13538,11 @@ function renderExtractFrames() {
             <input type="checkbox" data-index="${frame.index}" ${checked ? "checked" : ""}>
             ${orderNumber ? `<span class="frame-order-number">${orderNumber}</span>` : ""}
           </div>
-          <img src="${frame.thumb_url}" alt="frame ${frameNumber}">
+          <img src="${frame.thumb_url}" alt="第 ${frameNumber} 帧">
           <div class="frame-meta">
             <span>#${frameNumber}</span>
             ${similarityMeta}
-            <span>${escapeHtml(frame.original_name || frame.name)}</span>
+            <span>${escapeHtml(displayFrameName(frame, frameNumber))}</span>
           </div>
         </label>
       `;
@@ -13557,7 +13557,7 @@ function renderExtractFrames() {
 
 function renderExtractSelectionCount() {
   const total = state.extractJob?.frame_count || 0;
-  els.extractSelectionCount.textContent = "Selected " + state.extractSelected.size + " / " + total + " frames";
+  els.extractSelectionCount.textContent = `已选择 ${state.extractSelected.size} / ${total} 帧`;
   syncResultActions();
 }
 
@@ -13656,7 +13656,7 @@ function clearExtractFrames() {
   showExtractWorkbench();
   showAnimationWorkbench();
   persistSession();
-  setStatus("Extract selection order updated.", "success");
+  setStatus("已更新选帧顺序。", "success");
 }
 
 function renderJob() {
@@ -13734,10 +13734,10 @@ function renderFrames() {
             <input type="checkbox" data-index="${frame.index}" ${checked ? "checked" : ""}>
             ${orderNumber ? `<span class="frame-order-number">${orderNumber}</span>` : ""}
           </div>
-          <img src="${frame.thumb_url}" alt="frame ${frameNumber}">
+          <img src="${frame.thumb_url}" alt="第 ${frameNumber} 帧">
           <div class="frame-meta">
             <span>#${frameNumber}</span>
-            <span>${escapeHtml(frame.original_name || frame.name)}</span>
+            <span>${escapeHtml(displayFrameName(frame, frameNumber))}</span>
           </div>
         </label>
       `;
@@ -14348,9 +14348,9 @@ function updateExtractPreviewControls(selectedCount) {
     ? `${currentIndex + 1} / ${selectedCount}`
     : "0 / 0";
   els.extractPreviewPlayPauseButton.textContent = canAnimate
-    ? (state.extractPreview.isPlaying ? "Pause" : "Play")
-    : "Single";
-  els.extractPreviewSelectedCount.textContent = "Selected " + selectedCount + " frames";
+    ? (state.extractPreview.isPlaying ? "暂停预览" : "播放预览")
+    : "单帧";
+  els.extractPreviewSelectedCount.textContent = `已加载 ${selectedCount} 帧`;
 }
 
 async function loadPreviewImage(url) {
@@ -14422,13 +14422,13 @@ function drawExtractPreviewPlaceholder() {
   ctx.fillStyle = state.extractPreview.background;
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   els.extractPreviewEmptyState.hidden = false;
-  els.extractPreviewFrameLabel.textContent = "閻熸粎澧楅幐鍛婃�?-";
+  els.extractPreviewFrameLabel.textContent = "当前帧 -";
 }
 
 function renderExtractPreviewFrameImage(image, frame, selectedCount) {
   paintFrameOnCanvas(els.extractPreviewCanvas, image, state.extractPreview.background);
   els.extractPreviewEmptyState.hidden = true;
-  els.extractPreviewFrameLabel.textContent = `閻熸粎澧楅幐鍛婃�?#${String(frame.index + 1).padStart(3, "0")}`;
+  els.extractPreviewFrameLabel.textContent = `当前帧 #${String(frame.index + 1).padStart(3, "0")}`;
   updateExtractPreviewControls(selectedCount);
 }
 
@@ -14800,7 +14800,7 @@ async function exportMagicFrames(variantKey = "half", button = els.exportMagicFr
     renderExportResult();
     const frameCount = Number(data.export?.frame_count || 0);
     const outputSize = formatMagicOutputSize(data.export);
-    setStatus(`${config.label} \u5904\u7406\u540E\u5E27\u5DF2\u5BFC\u51FA\uFF1A${frameCount} \u5E27\uFF0C MOV \u786C\u8FB9\u7F18\u653E\u5927\u56DE ${outputSize}\uFF0C\u5DF2\u751F\u6210\u900F\u660E MOV\u3001GIF \u548C Sprite Sheet\u3002`, "success");
+    setStatus(`${config.label} \u5904\u7406\u540E\u5E27\u5DF2\u5BFC\u51FA\uFF1A${frameCount} \u5E27\uFF0CMOV \u786C\u8FB9\u7F18\u653E\u5927\u56DE ${outputSize}\uFF0C\u5DF2\u751F\u6210\u900F\u660E MOV\u3001GIF \u548C\u7CBE\u7075\u8868\u3002`, "success");
   });
 }
 
@@ -14848,16 +14848,16 @@ function renderExportResult() {
     .map(([label, url, name]) => `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${label}: ${escapeHtml(name || url)}</a>`)
     .join("");
   const sheetButton = state.exportResult.sheet_dir
-    ? `<button id="openSheetDirButton" class="ghost-button" type="button">\u6253\u5F00 Sprite Sheet + JSON</button>`
+    ? `<button id="openSheetDirButton" class="ghost-button" type="button">\u6253\u5F00\u7CBE\u7075\u8868 + JSON</button>`
     : "";
 
   els.exportResult.innerHTML = `
     <div class="result-summary">
       ${summaryCard("\u5bfc\u51fa\u5e27\u6570", `${state.exportResult.frame_count} \u5e27`)}
-      ${summaryCard("\u5bfc\u51fa\u5185\u5bb9", "frames \u6587\u4ef6\u5939 / \u900f\u660e MOV / GIF / Sprite Sheet + JSON")}
+      ${summaryCard("\u5bfc\u51fa\u5185\u5bb9", "\u5e27\u6587\u4ef6\u5939 / \u900f\u660e MOV / GIF / \u7cbe\u7075\u8868 + JSON")}
     </div>
     <div class="link-list">
-      <button id="openFramesDirButton" class="ghost-button" type="button">\u6253\u5f00 frames \u6587\u4ef6\u5939</button>
+      <button id="openFramesDirButton" class="ghost-button" type="button">\u6253\u5f00\u5e27\u6587\u4ef6\u5939</button>
       ${sheetButton}
       ${mediaLinks}
     </div>
@@ -14974,7 +14974,7 @@ function persistAuth() {
 
 function updateAuthUI() {
   const loggedIn = Boolean(state.auth);
-  els.accountName.textContent = loggedIn ? state.auth.display_name || "Local user" : "Not logged in";
+  els.accountName.textContent = loggedIn ? state.auth.display_name || "本地创作者" : "未登录";
   els.loginButton.hidden = loggedIn;
   els.logoutButton.hidden = !loggedIn;
 }
@@ -14985,7 +14985,7 @@ async function handleOneClickLogin() {
     state.auth = data.auth;
     persistAuth();
     updateAuthUI();
-    setStatus("Logged in: " + (state.auth.display_name || "Local user"), "success");
+    setStatus("已登录：" + (state.auth.display_name || "本地创作者"), "success");
   });
 }
 
@@ -15139,6 +15139,22 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function looksLikeBrokenText(value) {
+  const text = String(value || "");
+  if (!text) {
+    return false;
+  }
+  return /�|<\/?span|閻|闂|绋|鍛|櫠|灚|熸|粎|澧|幐/.test(text);
+}
+
+function displayFrameName(frame, frameNumber = "") {
+  const raw = String(frame?.original_name || frame?.name || "").trim();
+  if (!raw || looksLikeBrokenText(raw)) {
+    return frameNumber ? `第 ${frameNumber} 帧` : "当前帧";
+  }
+  return raw;
 }
 
 function clamp(value, min, max) {
