@@ -29,7 +29,7 @@ app/                                  前端页面、样式和浏览器交互逻
 app/index.html                        主工作台入口
 app/app.js                            主前端逻辑
 app/styles.css                        主界面样式
-app/favicon.svg                       产品图标
+app/favicon.png                       产品图标
 app/line-cleaner-experiment.*         实验性线稿清理页面
 docs/                                 项目生成规则和维护说明
 server.py                             本地 HTTP 服务、文件 API 和处理流水线
