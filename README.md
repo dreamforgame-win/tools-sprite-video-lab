@@ -1,6 +1,6 @@
 # 灵帧工坊（Sprite Forge Lab）
 
-> **下载入口**：优先下载 [SpriteForgeLab-light.zip 轻量包](https://gitlab-gz.dianchu.cc/api/v4/projects/skill-hub%2Fart-skill%2Fsprite-forge-lab/packages/generic/sprite-forge-lab/v0.2.2/SpriteForgeLab-light.zip)，解压后只需要双击 `Start.exe`。也可以进入 [最新 Release v0.2.2](https://gitlab-gz.dianchu.cc/skill-hub/art-skill/sprite-forge-lab/-/releases/v0.2.2) 查看发布说明。不要下载 GitLab 自动生成的 `Source code zip`，那只是源码包。
+> **下载入口**：优先下载 [SpriteForgeLab-light.zip 轻量包](https://gitlab-gz.dianchu.cc/api/v4/projects/skill-hub%2Fart-skill%2Fsprite-forge-lab/packages/generic/sprite-forge-lab/v0.2.3/SpriteForgeLab-light.zip)，解压后只需要双击 `Start.exe`。也可以进入 [最新 Release v0.2.3](https://gitlab-gz.dianchu.cc/skill-hub/art-skill/sprite-forge-lab/-/releases/v0.2.3) 查看发布说明。不要下载 GitLab 自动生成的 `Source code zip`，那只是源码包。
 
 灵帧工坊是一个面向 2D 游戏、美术素材和动效资源整理的本地 Web 工具台。它可以把视频、GIF、图片或序列帧处理成透明 Sprite 资源，并提供图片拆图、双背景抠图、资源管理、AI 主体抠图、绿幕/蓝幕精修、MAGIC 线稿清理和 Real-ESRGAN 二次处理等能力。
 
@@ -38,7 +38,7 @@ server.py                             本地 HTTP 服务、文件 API 和处理�
 requirements.txt                      基础运行依赖
 requirements-ai.txt                   可选 AI 运行依赖
 Start.exe                             同事使用的唯一启动入口
-_internal/*.bat                       内部辅助脚本，小白用户不用打开
+_internal/                            内部程序文件、脚本、运行缓存和模型缓存，小白用户不用打开
 setup_and_start.bat                   开发环境的一键安装并启动入口
 setup_ai_runtime.bat                  Windows AI 环境和外部模型准备脚本
 start_sprite_video_lab.bat            Windows 快速启动脚本

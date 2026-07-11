@@ -93,7 +93,7 @@ $outputRootResolved = Resolve-ExistingPath -PathValue $OutputRoot
 
 $bundleRoot = Join-Path $outputRootResolved "SpriteForgeLab"
 $internalRoot = Join-Path $bundleRoot "_internal"
-$runtimeRoot = Join-Path $bundleRoot "runtime"
+$runtimeRoot = Join-Path $internalRoot "runtime"
 $pythonRuntimeRoot = Join-Path $runtimeRoot "python"
 $ffmpegRuntimeRoot = Join-Path $runtimeRoot "ffmpeg"
 $modelsRuntimeRoot = Join-Path $runtimeRoot "models\portable-models"
@@ -107,14 +107,21 @@ Ensure-Directory -PathValue $bundleRoot
 Ensure-Directory -PathValue $internalRoot
 
 Write-Host "Copying project files..."
-$projectFiles = @(
+$rootFiles = @(
     "Start.exe",
+    "README.md"
+)
+foreach ($item in $rootFiles) {
+    Copy-RequiredItem -RepoRoot $repoRoot -RelativePath $item -BundleRoot $bundleRoot
+}
+
+Write-Host "Copying internal project files..."
+$projectFiles = @(
     "app",
     "docs",
     "server.py",
     "requirements.txt",
     "requirements-ai.txt",
-    "README.md",
     "AGENT_INSTALL.md",
     "AI_MATTING.md",
     "USAGE.md",
@@ -126,7 +133,7 @@ $projectFiles = @(
     "sprite_video_lab_icon.png"
 )
 foreach ($item in $projectFiles) {
-    Copy-RequiredItem -RepoRoot $repoRoot -RelativePath $item -BundleRoot $bundleRoot
+    Copy-RequiredItem -RepoRoot $repoRoot -RelativePath $item -BundleRoot $internalRoot
 }
 
 Write-Host "Copying internal launch scripts..."
@@ -197,9 +204,8 @@ Recommended coworker flow:
 3. Open Model Management in the app and download missing models or tools.
 
 Light package notes:
-- This package does not include Python runtime, AI models, model cache, ffmpeg, Real-ESRGAN, or generated work files.
-- Runtime and model cache are created next to the project by default:
-  ..\sprite-video-lab-models\
+- The visible folder is intentionally clean. Application files, runtime cache, model cache, and work files are under _internal.
+- This package does not include AI models, ffmpeg, Real-ESRGAN, or generated work files.
 - If your network needs a proxy, set it only in your local shell before starting:
   set SPRITE_VIDEO_LAB_PROXY=http://127.0.0.1:7897
 

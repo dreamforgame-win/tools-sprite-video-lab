@@ -16,8 +16,9 @@ if not "%SPRITE_VIDEO_LAB_PROXY%"=="" (
   set "HTTP_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
   set "HTTPS_PROXY=%SPRITE_VIDEO_LAB_PROXY%"
 )
-if "%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%"=="" set "SPRITE_VIDEO_LAB_AI_MODEL_CACHE=%APP_ROOT%\..\sprite-video-lab-models\huggingface"
-if "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%"=="" set "SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT=%APP_ROOT%\..\sprite-video-lab-models\CorridorKey"
+if "%SPRITE_VIDEO_LAB_DATA_ROOT%"=="" set "SPRITE_VIDEO_LAB_DATA_ROOT=%APP_ROOT%\_data"
+if "%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%"=="" set "SPRITE_VIDEO_LAB_AI_MODEL_CACHE=%SPRITE_VIDEO_LAB_DATA_ROOT%\huggingface"
+if "%SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT%"=="" set "SPRITE_VIDEO_LAB_CORRIDORKEY_ROOT=%SPRITE_VIDEO_LAB_DATA_ROOT%\CorridorKey"
 if "%HF_HOME%"=="" set "HF_HOME=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%"
 if "%HUGGINGFACE_HUB_CACHE%"=="" set "HUGGINGFACE_HUB_CACHE=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%\hub"
 if "%TRANSFORMERS_CACHE%"=="" set "TRANSFORMERS_CACHE=%SPRITE_VIDEO_LAB_AI_MODEL_CACHE%\transformers"
@@ -40,8 +41,8 @@ if exist "%APP_ROOT%\.venv\Scripts\python.exe" (
   set "PYTHON_EXE=%APP_ROOT%\.venv\Scripts\python.exe"
   goto :python_ready
 )
-if exist "%APP_ROOT%\..\sprite-video-lab-models\venv\Scripts\python.exe" (
-  set "PYTHON_EXE=%APP_ROOT%\..\sprite-video-lab-models\venv\Scripts\python.exe"
+if exist "%SPRITE_VIDEO_LAB_DATA_ROOT%\venv\Scripts\python.exe" (
+  set "PYTHON_EXE=%SPRITE_VIDEO_LAB_DATA_ROOT%\venv\Scripts\python.exe"
   goto :python_ready
 )
 for /f "delims=" %%i in ('where python 2^>nul') do (

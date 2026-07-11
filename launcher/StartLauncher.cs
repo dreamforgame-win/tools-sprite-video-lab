@@ -6,21 +6,24 @@ internal static class StartLauncher
 {
     private static int Main()
     {
-        string appRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        string internalRoot = Path.Combine(appRoot, "_internal");
+        string launcherRoot = AppDomain.CurrentDomain.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        string internalRoot = Path.Combine(launcherRoot, "_internal");
+        string appRoot = Directory.Exists(internalRoot) && File.Exists(Path.Combine(internalRoot, "server.py"))
+            ? internalRoot
+            : launcherRoot;
         string setupScript = ExistingPath(Path.Combine(internalRoot, "setup_and_start.bat"), Path.Combine(appRoot, "setup_and_start.bat"));
         string startScript = ExistingPath(Path.Combine(internalRoot, "start_sprite_video_lab.bat"), Path.Combine(appRoot, "start_sprite_video_lab.bat"));
 
         if (setupScript.Length == 0 || startScript.Length == 0)
         {
-            ShowError("启动脚本缺失，请重新下载轻量包。");
+            ShowError("Launch scripts are missing. Please download SpriteForgeLab-light.zip again.");
             return 1;
         }
 
         string dataRoot = Environment.GetEnvironmentVariable("SPRITE_VIDEO_LAB_DATA_ROOT");
         if (string.IsNullOrWhiteSpace(dataRoot))
         {
-            dataRoot = Path.GetFullPath(Path.Combine(appRoot, "..", "sprite-video-lab-models"));
+            dataRoot = Path.Combine(appRoot, "_data");
         }
 
         string python = Environment.GetEnvironmentVariable("SPRITE_VIDEO_LAB_PYTHON");
@@ -87,7 +90,7 @@ internal static class StartLauncher
         }
         catch (Exception ex)
         {
-            ShowError("启动失败：" + ex.Message);
+            ShowError("Failed to start: " + ex.Message);
             return 1;
         }
     }
