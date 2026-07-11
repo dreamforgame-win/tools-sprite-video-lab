@@ -1,5 +1,7 @@
 # 灵帧工坊（Sprite Forge Lab）
 
+> **下载入口**：优先下载 [SpriteForgeLab-light.zip 轻量包](https://gitlab-gz.dianchu.cc/-/project/279/uploads/34c0b84aed649b5c015673caadef35c4/SpriteForgeLab-light.zip)，解压后首次运行 `setup_and_start.bat`。也可以进入 [最新 Release v0.2.1](https://gitlab-gz.dianchu.cc/skill-hub/art-skill/sprite-forge-lab/-/releases/v0.2.1) 查看发布说明。不要下载 GitLab 自动生成的 `Source code zip`，那只是源码包。
+
 灵帧工坊是一个面向 2D 游戏、美术素材和动效资源整理的本地 Web 工具台。它可以把视频、GIF、图片或序列帧处理成透明 Sprite 资源，并提供图片拆图、双背景抠图、资源管理、AI 主体抠图、绿幕/蓝幕精修、MAGIC 线稿清理和 Real-ESRGAN 二次处理等能力。
 
 项目采用“本地后端 + 浏览器前端”的模式：Python 在同事电脑上启动本地 HTTP 服务，前端是原生 HTML/CSS/JavaScript，运行数据默认写入本机 `work/` 目录。仓库不提交模型、虚拟环境、外部二进制工具或导出素材。
