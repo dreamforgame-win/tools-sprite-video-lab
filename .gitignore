@@ -10,6 +10,7 @@ env/
 work/
 .playwright-cli/
 .superpowers/
+.worktrees/
 dist/
 SpriteForgeLab/
 SpriteVideoLab/
