@@ -1029,8 +1029,10 @@ class DownloadResultTests(unittest.TestCase):
             final_path = service.results_dir / f'{record["id"]}.png'
             try:
                 final_path.symlink_to(external)
-            except (OSError, NotImplementedError) as exc:
-                self.skipTest(f"symlinks unavailable: {exc}")
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    self.skipTest(f"symlinks unavailable: {exc}")
+                raise
             response = BinaryResponse(make_image_bytes("PNG"))
 
             with mock.patch("urllib.request.urlopen", return_value=response):
