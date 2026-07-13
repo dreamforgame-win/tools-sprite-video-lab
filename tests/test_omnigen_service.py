@@ -399,6 +399,20 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "not-json")
             self.assertFalse(service.history_path.exists())
 
+    def test_invalid_utf8_history_is_backed_up_before_empty_history_starts(self):
+        corrupt_bytes = b'\xff\xfe{"records": []}'
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.history_path.parent.mkdir(parents=True, exist_ok=True)
+            service.history_path.write_bytes(corrupt_bytes)
+
+            self.assertEqual(service.list_history(), [])
+
+            backups = list(service.history_path.parent.glob("history.corrupt-*.json"))
+            self.assertEqual(len(backups), 1)
+            self.assertEqual(backups[0].read_bytes(), corrupt_bytes)
+            self.assertFalse(service.history_path.exists())
+
     def test_corrupt_history_backup_failure_propagates_without_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
             service = OmniGenService(Path(directory))
@@ -555,7 +569,7 @@ class HistoryStoreTests(unittest.TestCase):
                 nonlocal staging_calls
                 destination = Path(destination)
                 if (
-                    destination.parent.parent == service.results_dir
+                    destination.parent.parent == service.trash_dir
                     and destination.parent.name.startswith(".delete-")
                 ):
                     staging_calls += 1
@@ -576,6 +590,7 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(service.history_path.read_bytes(), history_before)
             self.assertEqual(len(service.list_history()), 2)
             self.assertEqual(list(service.results_dir.glob(".delete-*")), [])
+            self.assertEqual(list(service.trash_dir.iterdir()), [])
 
     def test_history_write_failure_restores_staged_files_and_history(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -611,6 +626,75 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(service.history_path.read_bytes(), history_before)
             self.assertEqual(len(service.list_history()), 2)
             self.assertEqual(list(service.results_dir.glob(".delete-*")), [])
+            self.assertEqual(list(service.trash_dir.iterdir()), [])
+
+    def test_delete_unlink_cleanup_failure_returns_success_and_retries_later(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            local_file = service.results_dir / "result.png"
+            local_file.write_bytes(b"image")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], local_path=str(local_file.resolve()))
+            real_unlink = Path.unlink
+
+            def fail_trash_unlink(path, *args, **kwargs):
+                if Path(path).is_relative_to(service.trash_dir):
+                    raise OSError("trash unlink failed")
+                return real_unlink(path, *args, **kwargs)
+
+            with mock.patch(
+                "omnigen_service.Path.unlink",
+                autospec=True,
+                side_effect=fail_trash_unlink,
+            ):
+                deleted = service.delete_records(
+                    [record["id"]], delete_files=True
+                )
+
+            self.assertEqual(deleted["deleted_ids"], [record["id"]])
+            self.assertEqual(service.list_history(), [])
+            self.assertFalse(local_file.exists())
+            self.assertEqual(list(service.results_dir.iterdir()), [])
+            self.assertTrue(any(service.trash_dir.rglob("*")))
+
+            reloaded = OmniGenService(root)
+
+            self.assertEqual(list(reloaded.trash_dir.iterdir()), [])
+
+    def test_delete_rmdir_cleanup_failure_returns_success_and_retries_later(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            local_file = service.results_dir / "result.png"
+            local_file.write_bytes(b"image")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], local_path=str(local_file.resolve()))
+            real_rmdir = Path.rmdir
+
+            def fail_trash_rmdir(path, *args, **kwargs):
+                if Path(path).is_relative_to(service.trash_dir):
+                    raise OSError("trash rmdir failed")
+                return real_rmdir(path, *args, **kwargs)
+
+            with mock.patch(
+                "omnigen_service.Path.rmdir",
+                autospec=True,
+                side_effect=fail_trash_rmdir,
+            ):
+                deleted = service.delete_records(
+                    [record["id"]], delete_files=True
+                )
+
+            self.assertEqual(deleted["deleted_ids"], [record["id"]])
+            self.assertEqual(service.list_history(), [])
+            self.assertFalse(local_file.exists())
+            self.assertEqual(list(service.results_dir.iterdir()), [])
+            self.assertTrue(any(service.trash_dir.iterdir()))
+
+            reloaded = OmniGenService(root)
+
+            self.assertEqual(list(reloaded.trash_dir.iterdir()), [])
 
 
 class DownloadResultTests(unittest.TestCase):
@@ -752,6 +836,82 @@ class DownloadResultTests(unittest.TestCase):
             self.assertTrue(jpeg_path.exists())
             self.assertFalse(png_path.exists())
             self.assertEqual(list(service.results_dir.iterdir()), [jpeg_path])
+
+    def test_cross_format_persistence_failure_restores_staged_previous_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            record = service.create_record("prompt", "model-a", {})
+            png_response = BinaryResponse(make_image_bytes("PNG"))
+            jpeg_response = BinaryResponse(make_image_bytes("JPEG"))
+            with mock.patch("urllib.request.urlopen", return_value=png_response):
+                first = service.download_result(
+                    record["id"], "https://example.test/result.png"
+                )
+            png_path = Path(first["local_path"])
+
+            def fail_persistence(*args, **kwargs):
+                self.assertFalse(png_path.exists())
+                raise ValueError("history write failed")
+
+            with mock.patch(
+                "urllib.request.urlopen", return_value=jpeg_response
+            ), mock.patch.object(
+                service, "update_record", side_effect=fail_persistence
+            ):
+                with self.assertRaisesRegex(ValueError, "history write failed"):
+                    service.download_result(
+                        record["id"], "https://example.test/result.jpg"
+                    )
+
+            self.assertTrue(png_path.exists())
+            self.assertFalse((service.results_dir / f'{record["id"]}.jpg').exists())
+            self.assertEqual(
+                service.find_record(record["id"])["local_path"], str(png_path)
+            )
+
+    def test_cross_format_cleanup_failure_stays_succeeded_and_retries_later(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            record = service.create_record("prompt", "model-a", {})
+            png_response = BinaryResponse(make_image_bytes("PNG"))
+            jpeg_response = BinaryResponse(make_image_bytes("JPEG"))
+            with mock.patch("urllib.request.urlopen", return_value=png_response):
+                first = service.download_result(
+                    record["id"], "https://example.test/result.png"
+                )
+            png_path = Path(first["local_path"])
+            real_unlink = Path.unlink
+
+            def fail_trash_unlink(path, *args, **kwargs):
+                if Path(path).is_relative_to(service.trash_dir):
+                    raise OSError("trash unlink failed")
+                return real_unlink(path, *args, **kwargs)
+
+            with mock.patch(
+                "urllib.request.urlopen", return_value=jpeg_response
+            ), mock.patch(
+                "omnigen_service.Path.unlink",
+                autospec=True,
+                side_effect=fail_trash_unlink,
+            ):
+                second = service.download_result(
+                    record["id"], "https://example.test/result.jpg"
+                )
+
+            jpeg_path = Path(second["local_path"])
+            self.assertEqual(second["status"], "succeeded")
+            self.assertEqual(
+                service.find_record(record["id"])["local_path"], str(jpeg_path)
+            )
+            self.assertTrue(jpeg_path.exists())
+            self.assertFalse(png_path.exists())
+            self.assertEqual(list(service.results_dir.iterdir()), [jpeg_path])
+            self.assertTrue(any(service.trash_dir.rglob("*")))
+
+            reloaded = OmniGenService(root)
+
+            self.assertEqual(list(reloaded.trash_dir.iterdir()), [])
 
     def test_invalid_image_is_rejected_and_temporary_file_removed(self):
         with tempfile.TemporaryDirectory() as directory:

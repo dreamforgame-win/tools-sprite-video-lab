@@ -64,12 +64,50 @@ class OmniGenService:
         self.settings_path = self.work_dir / "settings.json"
         self.history_path = self.work_dir / "omnigen" / "history.json"
         self.results_dir = self.work_dir / "omnigen" / "results"
+        self.trash_dir = self.work_dir / "omnigen" / ".trash"
         self.profile_dir = self.work_dir / "profile"
         self.endpoint = endpoint
         self._lock = threading.RLock()
 
         self.results_dir.mkdir(parents=True, exist_ok=True)
+        self.trash_dir.mkdir(parents=True, exist_ok=True)
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            self._cleanup_trash_unlocked()
+
+    def _cleanup_trash_transaction_unlocked(self, transaction_dir: Path) -> None:
+        try:
+            entries = list(transaction_dir.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if entry.is_symlink() or not entry.is_dir():
+                    entry.unlink()
+            except OSError:
+                pass
+        try:
+            transaction_dir.rmdir()
+        except OSError:
+            pass
+
+    def _cleanup_trash_unlocked(self) -> None:
+        try:
+            entries = list(self.trash_dir.iterdir())
+        except OSError:
+            return
+        for entry in entries:
+            try:
+                if entry.is_symlink() or not entry.is_dir():
+                    entry.unlink()
+                else:
+                    self._cleanup_trash_transaction_unlocked(entry)
+            except OSError:
+                pass
+
+    def _new_trash_transaction_unlocked(self, prefix: str) -> Path:
+        self._cleanup_trash_unlocked()
+        return Path(tempfile.mkdtemp(prefix=prefix, dir=self.trash_dir))
 
     def _read_json(self, path: Path, default):
         try:
@@ -118,7 +156,7 @@ class OmniGenService:
                 history = json.load(handle)
         except FileNotFoundError:
             return {"records": []}
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
             self._backup_corrupt_history_unlocked()
             return {"records": []}
         if (
@@ -198,6 +236,7 @@ class OmniGenService:
         self, record_ids: list[str], *, delete_files: bool = False
     ) -> dict:
         with self._lock:
+            self._cleanup_trash_unlocked()
             history = self._read_history_unlocked()
             selected_ids = set(record_ids)
             selected = [
@@ -231,17 +270,15 @@ class OmniGenService:
             ]
             if delete_files:
                 existing_paths = [path for path in resolved_paths if path.exists()]
-                quarantine_dir = None
+                transaction_dir = None
                 staged_paths = []
                 try:
                     if existing_paths:
-                        quarantine_dir = Path(
-                            tempfile.mkdtemp(
-                                prefix=".delete-", dir=self.results_dir
-                            )
+                        transaction_dir = self._new_trash_transaction_unlocked(
+                            ".delete-"
                         )
                         for index, original_path in enumerate(existing_paths):
-                            staged_path = quarantine_dir / (
+                            staged_path = transaction_dir / (
                                 f"{index}-{uuid.uuid4().hex}"
                             )
                             os.replace(original_path, staged_path)
@@ -253,14 +290,12 @@ class OmniGenService:
                     for original_path, staged_path in reversed(staged_paths):
                         if staged_path.exists():
                             os.replace(staged_path, original_path)
-                    if quarantine_dir is not None and quarantine_dir.exists():
-                        quarantine_dir.rmdir()
+                    if transaction_dir is not None:
+                        self._cleanup_trash_transaction_unlocked(transaction_dir)
                     raise
                 else:
-                    for _original_path, staged_path in staged_paths:
-                        staged_path.unlink()
-                    if quarantine_dir is not None:
-                        quarantine_dir.rmdir()
+                    if transaction_dir is not None:
+                        self._cleanup_trash_transaction_unlocked(transaction_dir)
             else:
                 self._atomic_write_json(
                     self.history_path, {"records": remaining_records}
@@ -291,7 +326,7 @@ class OmniGenService:
 
     def download_result(self, record_id: str, result_url: str) -> dict:
         result_url = self._validate_result_url(result_url)
-        record = self.find_record(record_id)
+        self.find_record(record_id)
         try:
             stable_record_id = str(uuid.UUID(str(record_id)))
         except ValueError:
@@ -357,50 +392,72 @@ class OmniGenService:
                     f"Downloaded image format is not supported: {image_format or 'unknown'}"
                 )
             final_path = self.results_dir / f"{stable_record_id}{extension}"
-            backup_path = None
-            final_installed = False
-            try:
-                if final_path.exists():
-                    backup_path = self.results_dir / (
-                        f".{stable_record_id}.{uuid.uuid4().hex}.bak"
-                    )
-                    os.replace(final_path, backup_path)
-                os.replace(temporary_path, final_path)
-                temporary_path = None
-                final_installed = True
-                updated = self.update_record(
-                    record_id,
-                    remote_url=response_url,
-                    local_path=str(final_path.resolve()),
-                    local_url=f"/work/omnigen/results/{final_path.name}",
-                    width=width,
-                    height=height,
-                    bytes=len(image_bytes),
-                    status="succeeded",
-                    progress=100,
-                    error="",
+            with self._lock:
+                self._cleanup_trash_unlocked()
+                record = self.find_record(record_id)
+                transaction_dir = self._new_trash_transaction_unlocked(
+                    ".download-"
                 )
-            except Exception:
-                if backup_path is not None and backup_path.exists():
-                    os.replace(backup_path, final_path)
-                elif final_installed:
-                    final_path.unlink(missing_ok=True)
-                raise
-            else:
-                if backup_path is not None:
-                    backup_path.unlink()
-                previous_local_path = str(record.get("local_path") or "").strip()
-                if previous_local_path:
-                    previous_path = Path(previous_local_path).resolve()
-                    final_resolved = final_path.resolve()
-                    if (
-                        previous_path != final_resolved
-                        and previous_path.is_relative_to(self.results_dir.resolve())
-                        and previous_path.exists()
-                        and not previous_path.is_dir()
-                    ):
-                        previous_path.unlink()
-                return updated
+                staged_paths = []
+                final_installed = False
+                try:
+                    paths_to_stage = []
+                    if final_path.exists():
+                        if final_path.is_dir():
+                            raise ValueError(
+                                "Refusing to replace a result directory"
+                            )
+                        paths_to_stage.append(final_path.resolve())
+
+                    previous_local_path = str(
+                        record.get("local_path") or ""
+                    ).strip()
+                    if previous_local_path:
+                        previous_path = Path(previous_local_path).resolve()
+                        if (
+                            previous_path.is_relative_to(self.results_dir.resolve())
+                            and previous_path.exists()
+                            and not previous_path.is_dir()
+                            and previous_path not in paths_to_stage
+                        ):
+                            paths_to_stage.append(previous_path)
+
+                    for index, original_path in enumerate(paths_to_stage):
+                        staged_path = transaction_dir / (
+                            f"old-{index}-{uuid.uuid4().hex}"
+                        )
+                        os.replace(original_path, staged_path)
+                        staged_paths.append((original_path, staged_path))
+
+                    os.replace(temporary_path, final_path)
+                    temporary_path = None
+                    final_installed = True
+                    updated = self.update_record(
+                        record_id,
+                        remote_url=response_url,
+                        local_path=str(final_path.resolve()),
+                        local_url=f"/work/omnigen/results/{final_path.name}",
+                        width=width,
+                        height=height,
+                        bytes=len(image_bytes),
+                        status="succeeded",
+                        progress=100,
+                        error="",
+                    )
+                except Exception:
+                    if final_installed and final_path.exists():
+                        failed_path = transaction_dir / (
+                            f"new-{uuid.uuid4().hex}"
+                        )
+                        os.replace(final_path, failed_path)
+                    for original_path, staged_path in reversed(staged_paths):
+                        if staged_path.exists():
+                            os.replace(staged_path, original_path)
+                    self._cleanup_trash_transaction_unlocked(transaction_dir)
+                    raise
+                else:
+                    self._cleanup_trash_transaction_unlocked(transaction_dir)
+                    return updated
         except ValueError:
             raise
         except OSError as exc:
