@@ -116,26 +116,26 @@ class OmniGenService:
         try:
             with self.history_path.open("r", encoding="utf-8") as handle:
                 history = json.load(handle)
-            if not isinstance(history, dict) or not isinstance(
-                history.get("records"), list
-            ):
-                raise ValueError("invalid history structure")
-            return history
         except FileNotFoundError:
             return {"records": []}
-        except (json.JSONDecodeError, OSError, ValueError):
-            if self.history_path.exists():
-                timestamp = datetime.now(timezone.utc).strftime(
-                    "%Y%m%dT%H%M%S%fZ"
-                )
-                corrupt_path = self.history_path.with_name(
-                    f"history.corrupt-{timestamp}.json"
-                )
-                try:
-                    os.replace(self.history_path, corrupt_path)
-                except OSError:
-                    pass
+        except json.JSONDecodeError:
+            self._backup_corrupt_history_unlocked()
             return {"records": []}
+        if (
+            not isinstance(history, dict)
+            or not isinstance(history.get("records"), list)
+            or not all(isinstance(record, dict) for record in history["records"])
+        ):
+            self._backup_corrupt_history_unlocked()
+            return {"records": []}
+        return history
+
+    def _backup_corrupt_history_unlocked(self) -> None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        corrupt_path = self.history_path.with_name(
+            f"history.corrupt-{timestamp}.json"
+        )
+        os.replace(self.history_path, corrupt_path)
 
     def list_history(self) -> list[dict]:
         with self._lock:
@@ -221,28 +221,77 @@ class OmniGenService:
                         raise ValueError(
                             "Refusing to delete a directory from OmniGen history"
                         )
-                    resolved_paths.append(resolved_path)
+                    if resolved_path not in resolved_paths:
+                        resolved_paths.append(resolved_path)
 
-                for resolved_path in resolved_paths:
-                    if resolved_path.exists():
-                        resolved_path.unlink()
-
-            history["records"] = [
+            remaining_records = [
                 record
                 for record in history["records"]
                 if record.get("id") not in selected_ids
             ]
-            self._atomic_write_json(self.history_path, history)
+            if delete_files:
+                existing_paths = [path for path in resolved_paths if path.exists()]
+                quarantine_dir = None
+                staged_paths = []
+                try:
+                    if existing_paths:
+                        quarantine_dir = Path(
+                            tempfile.mkdtemp(
+                                prefix=".delete-", dir=self.results_dir
+                            )
+                        )
+                        for index, original_path in enumerate(existing_paths):
+                            staged_path = quarantine_dir / (
+                                f"{index}-{uuid.uuid4().hex}"
+                            )
+                            os.replace(original_path, staged_path)
+                            staged_paths.append((original_path, staged_path))
+                    self._atomic_write_json(
+                        self.history_path, {"records": remaining_records}
+                    )
+                except Exception:
+                    for original_path, staged_path in reversed(staged_paths):
+                        if staged_path.exists():
+                            os.replace(staged_path, original_path)
+                    if quarantine_dir is not None and quarantine_dir.exists():
+                        quarantine_dir.rmdir()
+                    raise
+                else:
+                    for _original_path, staged_path in staged_paths:
+                        staged_path.unlink()
+                    if quarantine_dir is not None:
+                        quarantine_dir.rmdir()
+            else:
+                self._atomic_write_json(
+                    self.history_path, {"records": remaining_records}
+                )
             return {
                 "deleted_ids": [record["id"] for record in selected],
                 "files_deleted": delete_files,
             }
 
+    @staticmethod
+    def _validate_result_url(result_url) -> str:
+        url = str(result_url or "").strip()
+        try:
+            parsed_url = urllib.parse.urlparse(url)
+            hostname = parsed_url.hostname
+        except ValueError:
+            hostname = None
+            parsed_url = None
+        if (
+            parsed_url is None
+            or parsed_url.scheme.lower() not in {"http", "https"}
+            or not hostname
+        ):
+            raise ValueError(
+                "Result URL must use HTTP or HTTPS and include a valid hostname"
+            )
+        return url
+
     def download_result(self, record_id: str, result_url: str) -> dict:
-        parsed_url = urllib.parse.urlparse(str(result_url))
-        if parsed_url.scheme.lower() not in {"http", "https"}:
-            raise ValueError("Result URL must use HTTP or HTTPS")
-        self.find_record(record_id)
+        result_url = self._validate_result_url(result_url)
+        record = self.find_record(record_id)
         try:
             stable_record_id = str(uuid.UUID(str(record_id)))
         except ValueError:
@@ -257,6 +306,12 @@ class OmniGenService:
         )
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
+                response_url = (
+                    response.geturl()
+                    if callable(getattr(response, "geturl", None))
+                    else result_url
+                )
+                response_url = self._validate_result_url(response_url)
                 image_bytes = response.read(MAX_IMAGE_RESPONSE_BYTES + 1)
         except (
             urllib.error.HTTPError,
@@ -315,7 +370,7 @@ class OmniGenService:
                 final_installed = True
                 updated = self.update_record(
                     record_id,
-                    remote_url=str(result_url),
+                    remote_url=response_url,
                     local_path=str(final_path.resolve()),
                     local_url=f"/work/omnigen/results/{final_path.name}",
                     width=width,
@@ -334,6 +389,17 @@ class OmniGenService:
             else:
                 if backup_path is not None:
                     backup_path.unlink()
+                previous_local_path = str(record.get("local_path") or "").strip()
+                if previous_local_path:
+                    previous_path = Path(previous_local_path).resolve()
+                    final_resolved = final_path.resolve()
+                    if (
+                        previous_path != final_resolved
+                        and previous_path.is_relative_to(self.results_dir.resolve())
+                        and previous_path.exists()
+                        and not previous_path.is_dir()
+                    ):
+                        previous_path.unlink()
                 return updated
         except ValueError:
             raise
@@ -400,12 +466,23 @@ class OmniGenService:
 
     @staticmethod
     def _first_http_result_url(payload) -> str:
-        result_keys = ("result", "results", "output", "outputs", "url", "urls")
+        result_keys = (
+            "result",
+            "results",
+            "output",
+            "outputs",
+            "images",
+            "image_url",
+            "url",
+            "urls",
+        )
 
         def find(value):
             if isinstance(value, str):
-                parsed = urllib.parse.urlparse(value)
-                return value if parsed.scheme.lower() in {"http", "https"} else ""
+                try:
+                    return OmniGenService._validate_result_url(value)
+                except ValueError:
+                    return ""
             if isinstance(value, list):
                 for item in value:
                     found = find(item)
@@ -429,7 +506,14 @@ class OmniGenService:
         if not task_id:
             raise ValueError("Generation record has no task_id")
 
-        payload = self.call_tool("get_generation_task", {"task_id": task_id})
+        try:
+            payload = self.call_tool(
+                "get_generation_task", {"task_id": task_id}
+            )
+        except OmniGenError as exc:
+            safe_error = redact_secret(exc, self._token())
+            self.update_record(record_id, error=safe_error)
+            raise OmniGenError(safe_error) from None
         task_payload = payload.get("task") if isinstance(payload, dict) else None
         if not isinstance(task_payload, dict):
             task_payload = payload if isinstance(payload, dict) else {}
@@ -457,6 +541,8 @@ class OmniGenService:
             result_url = self._first_http_result_url(task_payload)
             if not result_url:
                 result_url = self._first_http_result_url(payload)
+            if not result_url:
+                result_url = self._first_http_result_url(record.get("remote_url"))
             if not result_url:
                 return self.update_record(
                     record_id,

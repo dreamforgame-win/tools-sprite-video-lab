@@ -1,6 +1,7 @@
 import http.client
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -398,6 +399,44 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "not-json")
             self.assertFalse(service.history_path.exists())
 
+    def test_corrupt_history_backup_failure_propagates_without_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.history_path.parent.mkdir(parents=True, exist_ok=True)
+            service.history_path.write_text("not-json", encoding="utf-8")
+
+            with mock.patch(
+                "omnigen_service.os.replace", side_effect=OSError("backup denied")
+            ):
+                with self.assertRaisesRegex(OSError, "backup denied"):
+                    service.list_history()
+                with self.assertRaisesRegex(OSError, "backup denied"):
+                    service.create_record("prompt", "model-a", {})
+
+            self.assertEqual(
+                service.history_path.read_text(encoding="utf-8"), "not-json"
+            )
+            self.assertEqual(
+                list(service.history_path.parent.glob("history.corrupt-*.json")), []
+            )
+
+    def test_history_read_oserror_propagates_without_corruption_backup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.history_path.parent.mkdir(parents=True, exist_ok=True)
+            service.history_path.write_text('{"records": []}', encoding="utf-8")
+
+            with mock.patch(
+                "omnigen_service.Path.open", side_effect=PermissionError("read denied")
+            ):
+                with self.assertRaisesRegex(PermissionError, "read denied"):
+                    service.list_history()
+
+            self.assertTrue(service.history_path.exists())
+            self.assertEqual(
+                list(service.history_path.parent.glob("history.corrupt-*.json")), []
+            )
+
     def test_delete_records_only_leaves_local_file_intact(self):
         with tempfile.TemporaryDirectory() as directory:
             service = OmniGenService(Path(directory))
@@ -492,6 +531,87 @@ class HistoryStoreTests(unittest.TestCase):
                 {file_record["id"], directory_record["id"]},
             )
 
+    def test_second_file_staging_failure_restores_all_files_and_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            files = [
+                service.results_dir / "first.png",
+                service.results_dir / "second.png",
+            ]
+            records = []
+            for index, local_file in enumerate(files):
+                local_file.write_bytes(f"image-{index}".encode("ascii"))
+                record = service.create_record(f"prompt-{index}", "model-a", {})
+                records.append(
+                    service.update_record(
+                        record["id"], local_path=str(local_file.resolve())
+                    )
+                )
+            history_before = service.history_path.read_bytes()
+            real_replace = os.replace
+            staging_calls = 0
+
+            def fail_second_staging(source, destination):
+                nonlocal staging_calls
+                destination = Path(destination)
+                if (
+                    destination.parent.parent == service.results_dir
+                    and destination.parent.name.startswith(".delete-")
+                ):
+                    staging_calls += 1
+                    if staging_calls == 2:
+                        raise OSError("second staging failed")
+                return real_replace(source, destination)
+
+            with mock.patch(
+                "omnigen_service.os.replace", side_effect=fail_second_staging
+            ):
+                with self.assertRaisesRegex(OSError, "second staging failed"):
+                    service.delete_records(
+                        [record["id"] for record in records], delete_files=True
+                    )
+
+            self.assertEqual(files[0].read_bytes(), b"image-0")
+            self.assertEqual(files[1].read_bytes(), b"image-1")
+            self.assertEqual(service.history_path.read_bytes(), history_before)
+            self.assertEqual(len(service.list_history()), 2)
+            self.assertEqual(list(service.results_dir.glob(".delete-*")), [])
+
+    def test_history_write_failure_restores_staged_files_and_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            files = [
+                service.results_dir / "first.png",
+                service.results_dir / "second.png",
+            ]
+            record_ids = []
+            for index, local_file in enumerate(files):
+                local_file.write_bytes(f"image-{index}".encode("ascii"))
+                record = service.create_record(f"prompt-{index}", "model-a", {})
+                service.update_record(
+                    record["id"], local_path=str(local_file.resolve())
+                )
+                record_ids.append(record["id"])
+            history_before = service.history_path.read_bytes()
+            real_replace = os.replace
+
+            def fail_history_replace(source, destination):
+                if Path(destination) == service.history_path:
+                    raise OSError("history replace failed")
+                return real_replace(source, destination)
+
+            with mock.patch(
+                "omnigen_service.os.replace", side_effect=fail_history_replace
+            ):
+                with self.assertRaisesRegex(OSError, "history replace failed"):
+                    service.delete_records(record_ids, delete_files=True)
+
+            self.assertEqual(files[0].read_bytes(), b"image-0")
+            self.assertEqual(files[1].read_bytes(), b"image-1")
+            self.assertEqual(service.history_path.read_bytes(), history_before)
+            self.assertEqual(len(service.list_history()), 2)
+            self.assertEqual(list(service.results_dir.glob(".delete-*")), [])
+
 
 class DownloadResultTests(unittest.TestCase):
     def test_rejects_non_http_url_without_opening_network(self):
@@ -504,6 +624,36 @@ class DownloadResultTests(unittest.TestCase):
                     service.download_result(record["id"], "file:///tmp/result.png")
 
             urlopen.assert_not_called()
+
+    def test_rejects_http_url_without_valid_hostname(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            record = service.create_record("prompt", "model-a", {})
+            response = BinaryResponse(make_image_bytes())
+
+            with mock.patch(
+                "urllib.request.urlopen", return_value=response
+            ) as urlopen:
+                with self.assertRaisesRegex(ValueError, "hostname"):
+                    service.download_result(record["id"], "https:////bad")
+
+            urlopen.assert_not_called()
+
+    def test_rejects_redirected_response_without_valid_http_hostname(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            record = service.create_record("prompt", "model-a", {})
+            response = BinaryResponse(make_image_bytes())
+            response.geturl = mock.Mock(return_value="https:////bad")
+
+            with mock.patch("urllib.request.urlopen", return_value=response):
+                with self.assertRaisesRegex(ValueError, "hostname"):
+                    service.download_result(
+                        record["id"], "https://example.test/result.png"
+                    )
+
+            self.assertEqual(list(service.results_dir.iterdir()), [])
+            self.assertEqual(service.find_record(record["id"])["remote_url"], "")
 
     def test_downloads_verified_png_to_stable_name_and_persists_metadata(self):
         image_data = make_image_bytes("PNG", (3, 2))
@@ -579,6 +729,29 @@ class DownloadResultTests(unittest.TestCase):
                     )
 
                 self.assertEqual(Path(downloaded["local_path"]).suffix, extension)
+
+    def test_cross_format_retry_retires_previous_recorded_file_after_commit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            record = service.create_record("prompt", "model-a", {})
+            png_response = BinaryResponse(make_image_bytes("PNG"))
+            jpeg_response = BinaryResponse(make_image_bytes("JPEG"))
+
+            with mock.patch("urllib.request.urlopen", return_value=png_response):
+                first = service.download_result(
+                    record["id"], "https://example.test/result.png"
+                )
+            png_path = Path(first["local_path"])
+            with mock.patch("urllib.request.urlopen", return_value=jpeg_response):
+                second = service.download_result(
+                    record["id"], "https://example.test/result.jpg"
+                )
+
+            jpeg_path = Path(second["local_path"])
+            self.assertEqual(jpeg_path.suffix, ".jpg")
+            self.assertTrue(jpeg_path.exists())
+            self.assertFalse(png_path.exists())
+            self.assertEqual(list(service.results_dir.iterdir()), [jpeg_path])
 
     def test_invalid_image_is_rejected_and_temporary_file_removed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -680,6 +853,28 @@ class RefreshTaskTests(unittest.TestCase):
             self.assertEqual(refreshed["status"], "running")
             self.assertEqual(refreshed["progress"], 42.5)
 
+    def test_call_tool_failure_persists_redacted_error_and_reraises(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.set_token("secret-token")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(
+                record["id"], task_id="task-1", status="running", progress=37
+            )
+            service.call_tool = mock.Mock(
+                side_effect=OmniGenError("poll secret-token failed")
+            )
+
+            with self.assertRaises(OmniGenError) as raised:
+                service.refresh_task(record["id"])
+
+            persisted = service.find_record(record["id"])
+            self.assertEqual(persisted["status"], "running")
+            self.assertEqual(persisted["progress"], 37)
+            self.assertIn("[REDACTED]", persisted["error"])
+            self.assertNotIn("secret-token", persisted["error"])
+            self.assertNotIn("secret-token", str(raised.exception))
+
     def test_failed_and_canceled_tasks_store_redacted_errors(self):
         cases = (
             ("ERROR", "failed", {"message": "secret-token failed"}),
@@ -765,6 +960,52 @@ class RefreshTaskTests(unittest.TestCase):
 
             service.download_result.assert_called_once_with(record["id"], result_url)
             self.assertEqual(refreshed["status"], "succeeded")
+
+    def test_succeeded_provider_image_shapes_download_first_url(self):
+        result_url = "https://example.test/provider-result.png"
+        payloads = (
+            {"status": "succeeded", "images": [{"url": result_url}]},
+            {"status": "succeeded", "output": {"image_url": result_url}},
+        )
+        for payload in payloads:
+            with self.subTest(
+                payload=payload
+            ), tempfile.TemporaryDirectory() as directory:
+                service = OmniGenService(Path(directory))
+                record = service.create_record("prompt", "model-a", {})
+                service.update_record(record["id"], task_id="task-1")
+                service.call_tool = mock.Mock(return_value=payload)
+                downloaded = service.update_record(
+                    record["id"], status="succeeded", progress=100
+                )
+                service.download_result = mock.Mock(return_value=downloaded)
+
+                service.refresh_task(record["id"])
+
+                service.download_result.assert_called_once_with(
+                    record["id"], result_url
+                )
+
+    def test_succeeded_task_retries_persisted_remote_url_when_payload_omits_it(self):
+        result_url = "https://example.test/persisted-result.png"
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(
+                record["id"],
+                task_id="task-1",
+                status="download_failed",
+                remote_url=result_url,
+            )
+            service.call_tool = mock.Mock(return_value={"status": "succeeded"})
+            downloaded = service.update_record(
+                record["id"], status="succeeded", progress=100
+            )
+            service.download_result = mock.Mock(return_value=downloaded)
+
+            service.refresh_task(record["id"])
+
+            service.download_result.assert_called_once_with(record["id"], result_url)
 
     def test_truncated_http_download_becomes_safe_download_failed_record(self):
         result_url = "https://example.test/truncated.png"
