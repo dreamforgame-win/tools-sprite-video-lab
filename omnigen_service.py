@@ -1,4 +1,5 @@
 import copy
+import http.client
 import json
 import os
 import tempfile
@@ -257,7 +258,12 @@ class OmniGenService:
         try:
             with urllib.request.urlopen(request, timeout=60) as response:
                 image_bytes = response.read(MAX_IMAGE_RESPONSE_BYTES + 1)
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            http.client.HTTPException,
+            OSError,
+        ) as exc:
             raise OmniGenError(f"Unable to download generated image: {exc}") from None
         if len(image_bytes) > MAX_IMAGE_RESPONSE_BYTES:
             raise OmniGenError("Generated image exceeded 32 MB limit")
@@ -281,7 +287,13 @@ class OmniGenService:
                     image_format = str(image.format or "").upper()
                     width, height = image.size
                     image.verify()
-            except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+            except (
+                UnidentifiedImageError,
+                Image.DecompressionBombError,
+                OSError,
+                SyntaxError,
+                ValueError,
+            ):
                 raise ValueError("Downloaded result is not a valid image") from None
 
             extension = IMAGE_EXTENSIONS.get(image_format)

@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import tempfile
@@ -764,6 +765,58 @@ class RefreshTaskTests(unittest.TestCase):
 
             service.download_result.assert_called_once_with(record["id"], result_url)
             self.assertEqual(refreshed["status"], "succeeded")
+
+    def test_truncated_http_download_becomes_safe_download_failed_record(self):
+        result_url = "https://example.test/truncated.png"
+        response = BinaryResponse(make_image_bytes())
+        response.read = mock.Mock(
+            side_effect=http.client.IncompleteRead(b"partial", 128)
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.set_token("secret-token")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], task_id="task-1")
+            service.call_tool = mock.Mock(
+                return_value={"status": "succeeded", "result": {"url": result_url}}
+            )
+
+            with mock.patch("urllib.request.urlopen", return_value=response):
+                refreshed = service.refresh_task(record["id"])
+
+            self.assertEqual(refreshed["status"], "download_failed")
+            self.assertEqual(refreshed["remote_url"], result_url)
+            self.assertTrue(refreshed["error"])
+            self.assertNotIn("secret-token", refreshed["error"])
+            self.assertEqual(list(service.results_dir.iterdir()), [])
+
+    def test_decompression_bomb_becomes_safe_download_failed_record(self):
+        result_url = "https://example.test/oversized-dimensions.png"
+        response = BinaryResponse(make_image_bytes())
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.set_token("secret-token")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], task_id="task-1")
+            service.call_tool = mock.Mock(
+                return_value={"status": "succeeded", "result": {"url": result_url}}
+            )
+
+            with mock.patch(
+                "urllib.request.urlopen", return_value=response
+            ), mock.patch(
+                "omnigen_service.Image.open",
+                side_effect=Image.DecompressionBombError(
+                    "unsafe dimensions for secret-token"
+                ),
+            ):
+                refreshed = service.refresh_task(record["id"])
+
+            self.assertEqual(refreshed["status"], "download_failed")
+            self.assertEqual(refreshed["remote_url"], result_url)
+            self.assertTrue(refreshed["error"])
+            self.assertNotIn("secret-token", refreshed["error"])
+            self.assertEqual(list(service.results_dir.iterdir()), [])
 
     def test_download_failure_preserves_remote_url_and_next_refresh_retries(self):
         result_url = "https://example.test/result.png"
