@@ -3,6 +3,8 @@ import io
 import json
 import os
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -53,6 +55,48 @@ def make_image_bytes(image_format="PNG", size=(3, 2)):
     output = io.BytesIO()
     Image.new("RGB", size, (12, 34, 56)).save(output, format=image_format)
     return output.getvalue()
+
+
+def write_transaction_manifest(
+    service,
+    operation,
+    transaction_id,
+    record_ids,
+    mappings,
+    intended_final_path="",
+):
+    transaction_dir = service.trash_dir / f".{operation}-{transaction_id}"
+    transaction_dir.mkdir()
+    manifest = {
+        "version": 1,
+        "operation": operation,
+        "transaction_id": transaction_id,
+        "record_ids": record_ids,
+        "mappings": [
+            {
+                "original_path": str(original),
+                "staged_path": str(staged),
+            }
+            for original, staged in mappings
+        ],
+        "intended_final_path": str(intended_final_path or ""),
+        "commit_marker": (
+            {
+                "scope": "history",
+                "field": "file_transactions",
+                "value": transaction_id,
+            }
+            if operation == "delete"
+            else {
+                "scope": "record",
+                "record_id": record_ids[0],
+                "field": "file_transaction_id",
+                "value": transaction_id,
+            }
+        ),
+    }
+    service._atomic_write_json(transaction_dir / "manifest.json", manifest)
+    return transaction_dir, manifest
 
 
 class LocalProfileTests(unittest.TestCase):
@@ -465,7 +509,11 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(service.list_history(), [])
             self.assertEqual(
                 result,
-                {"deleted_ids": [record["id"]], "files_deleted": False},
+                {
+                    "deleted_ids": [record["id"]],
+                    "files_deleted": False,
+                    "cleanup_pending": False,
+                },
             )
 
     def test_delete_records_and_files_removes_file_inside_results(self):
@@ -571,7 +619,11 @@ class HistoryStoreTests(unittest.TestCase):
                 if (
                     destination.parent.parent == service.trash_dir
                     and destination.parent.name.startswith(".delete-")
+                    and destination.name != "manifest.json"
                 ):
+                    self.assertTrue(
+                        (destination.parent / "manifest.json").exists()
+                    )
                     staging_calls += 1
                     if staging_calls == 2:
                         raise OSError("second staging failed")
@@ -653,6 +705,7 @@ class HistoryStoreTests(unittest.TestCase):
                 )
 
             self.assertEqual(deleted["deleted_ids"], [record["id"]])
+            self.assertTrue(deleted["cleanup_pending"])
             self.assertEqual(service.list_history(), [])
             self.assertFalse(local_file.exists())
             self.assertEqual(list(service.results_dir.iterdir()), [])
@@ -661,6 +714,232 @@ class HistoryStoreTests(unittest.TestCase):
             reloaded = OmniGenService(root)
 
             self.assertEqual(list(reloaded.trash_dir.iterdir()), [])
+
+
+class FileTransactionRecoveryTests(unittest.TestCase):
+    def test_precommit_delete_transaction_restores_file_and_keeps_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            original = service.results_dir / "result.png"
+            original.write_bytes(b"original")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], local_path=str(original))
+            transaction_id = "delete-precommit"
+            staged = service.trash_dir / f".delete-{transaction_id}" / "old-0"
+            write_transaction_manifest(
+                service,
+                "delete",
+                transaction_id,
+                [record["id"]],
+                [(original, staged)],
+            )
+            os.replace(original, staged)
+
+            recovered = OmniGenService(root)
+
+            self.assertEqual(original.read_bytes(), b"original")
+            self.assertEqual(recovered.find_record(record["id"])["id"], record["id"])
+            self.assertEqual(list(recovered.trash_dir.iterdir()), [])
+
+    def test_committed_delete_transaction_purges_staged_file_and_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            original = service.results_dir / "result.png"
+            original.write_bytes(b"original")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], local_path=str(original))
+            transaction_id = "delete-committed"
+            staged = service.trash_dir / f".delete-{transaction_id}" / "old-0"
+            write_transaction_manifest(
+                service,
+                "delete",
+                transaction_id,
+                [record["id"]],
+                [(original, staged)],
+            )
+            os.replace(original, staged)
+            service._atomic_write_json(
+                service.history_path,
+                {"records": [], "file_transactions": [transaction_id]},
+            )
+
+            recovered = OmniGenService(root)
+
+            self.assertFalse(original.exists())
+            self.assertEqual(recovered.list_history(), [])
+            stored = json.loads(recovered.history_path.read_text(encoding="utf-8"))
+            self.assertNotIn("file_transactions", stored)
+            self.assertEqual(list(recovered.trash_dir.iterdir()), [])
+
+    def test_precommit_replacement_restores_old_and_removes_new_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            old_path = service.results_dir / "result.png"
+            final_path = service.results_dir / "result.jpg"
+            old_path.write_bytes(b"old")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], local_path=str(old_path))
+            transaction_id = "replace-precommit"
+            staged = service.trash_dir / f".replace-{transaction_id}" / "old-0"
+            write_transaction_manifest(
+                service,
+                "replace",
+                transaction_id,
+                [record["id"]],
+                [(old_path, staged)],
+                final_path,
+            )
+            os.replace(old_path, staged)
+            final_path.write_bytes(b"new")
+
+            recovered = OmniGenService(root)
+
+            self.assertEqual(old_path.read_bytes(), b"old")
+            self.assertFalse(final_path.exists())
+            self.assertEqual(
+                recovered.find_record(record["id"])["local_path"], str(old_path)
+            )
+            self.assertEqual(list(recovered.trash_dir.iterdir()), [])
+
+    def test_committed_replacement_keeps_new_file_and_purges_old(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            old_path = service.results_dir / "result.png"
+            final_path = service.results_dir / "result.jpg"
+            old_path.write_bytes(b"old")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], local_path=str(old_path))
+            transaction_id = "replace-committed"
+            staged = service.trash_dir / f".replace-{transaction_id}" / "old-0"
+            write_transaction_manifest(
+                service,
+                "replace",
+                transaction_id,
+                [record["id"]],
+                [(old_path, staged)],
+                final_path,
+            )
+            os.replace(old_path, staged)
+            final_path.write_bytes(b"new")
+            service.update_record(
+                record["id"],
+                local_path=str(final_path),
+                file_transaction_id=transaction_id,
+                cleanup_pending=True,
+            )
+
+            recovered = OmniGenService(root)
+
+            self.assertEqual(final_path.read_bytes(), b"new")
+            self.assertFalse(old_path.exists())
+            stored_record = recovered.find_record(record["id"])
+            self.assertEqual(stored_record["local_path"], str(final_path))
+            self.assertNotIn("file_transaction_id", stored_record)
+            self.assertNotIn("cleanup_pending", stored_record)
+            self.assertEqual(list(recovered.trash_dir.iterdir()), [])
+
+    def test_same_path_replacement_marker_distinguishes_commit_state(self):
+        for committed in (False, True):
+            with self.subTest(
+                committed=committed
+            ), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                service = OmniGenService(root)
+                final_path = service.results_dir / "result.png"
+                final_path.write_bytes(b"old")
+                record = service.create_record("prompt", "model-a", {})
+                service.update_record(record["id"], local_path=str(final_path))
+                transaction_id = f"same-path-{committed}"
+                staged = (
+                    service.trash_dir
+                    / f".replace-{transaction_id}"
+                    / "old-0"
+                )
+                write_transaction_manifest(
+                    service,
+                    "replace",
+                    transaction_id,
+                    [record["id"]],
+                    [(final_path, staged)],
+                    final_path,
+                )
+                os.replace(final_path, staged)
+                final_path.write_bytes(b"new")
+                if committed:
+                    service.update_record(
+                        record["id"],
+                        local_path=str(final_path),
+                        file_transaction_id=transaction_id,
+                        cleanup_pending=True,
+                    )
+
+                recovered = OmniGenService(root)
+
+                expected = b"new" if committed else b"old"
+                self.assertEqual(final_path.read_bytes(), expected)
+                stored_record = recovered.find_record(record["id"])
+                self.assertNotIn("file_transaction_id", stored_record)
+                self.assertEqual(list(recovered.trash_dir.iterdir()), [])
+
+    def test_second_service_waits_for_active_transaction_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root)
+            original = service.results_dir / "result.png"
+            original.write_bytes(b"original")
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(record["id"], local_path=str(original))
+            transaction_id = "delete-active"
+            staged = service.trash_dir / f".delete-{transaction_id}" / "old-0"
+            write_transaction_manifest(
+                service,
+                "delete",
+                transaction_id,
+                [record["id"]],
+                [(original, staged)],
+            )
+            recovered = {}
+            completed = threading.Event()
+            timeout_error = {}
+
+            def open_second_service():
+                try:
+                    recovered["service"] = OmniGenService(root)
+                finally:
+                    completed.set()
+
+            def try_bounded_lock():
+                try:
+                    with service._file_transaction_lock(timeout=0.05):
+                        pass
+                except Exception as exc:
+                    timeout_error["error"] = exc
+
+            with service._file_transaction_lock():
+                os.replace(original, staged)
+                thread = threading.Thread(target=open_second_service, daemon=True)
+                thread.start()
+                bounded_thread = threading.Thread(
+                    target=try_bounded_lock, daemon=True
+                )
+                bounded_thread.start()
+                bounded_thread.join(timeout=1)
+                time.sleep(0.2)
+                self.assertFalse(bounded_thread.is_alive())
+                self.assertIsInstance(timeout_error.get("error"), TimeoutError)
+                self.assertFalse(completed.is_set())
+                self.assertFalse(original.exists())
+
+            thread.join(timeout=3)
+            self.assertTrue(completed.is_set())
+            self.assertEqual(original.read_bytes(), b"original")
+            self.assertEqual(
+                recovered["service"].find_record(record["id"])["id"], record["id"]
+            )
 
     def test_delete_rmdir_cleanup_failure_returns_success_and_retries_later(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -687,6 +966,7 @@ class HistoryStoreTests(unittest.TestCase):
                 )
 
             self.assertEqual(deleted["deleted_ids"], [record["id"]])
+            self.assertTrue(deleted["cleanup_pending"])
             self.assertEqual(service.list_history(), [])
             self.assertFalse(local_file.exists())
             self.assertEqual(list(service.results_dir.iterdir()), [])
@@ -738,6 +1018,30 @@ class DownloadResultTests(unittest.TestCase):
 
             self.assertEqual(list(service.results_dir.iterdir()), [])
             self.assertEqual(service.find_record(record["id"])["remote_url"], "")
+
+    def test_replacement_rejects_symlink_without_touching_external_target(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root / "work")
+            record = service.create_record("prompt", "model-a", {})
+            external = root / "external.png"
+            external.write_bytes(b"external")
+            final_path = service.results_dir / f'{record["id"]}.png'
+            try:
+                final_path.symlink_to(external)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlinks unavailable: {exc}")
+            response = BinaryResponse(make_image_bytes("PNG"))
+
+            with mock.patch("urllib.request.urlopen", return_value=response):
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    service.download_result(
+                        record["id"], "https://example.test/result.png"
+                    )
+
+            self.assertTrue(final_path.is_symlink())
+            self.assertEqual(external.read_bytes(), b"external")
+            self.assertEqual(service.find_record(record["id"])["local_path"], "")
 
     def test_downloads_verified_png_to_stable_name_and_persists_metadata(self):
         image_data = make_image_bytes("PNG", (3, 2))
@@ -901,6 +1205,7 @@ class DownloadResultTests(unittest.TestCase):
 
             jpeg_path = Path(second["local_path"])
             self.assertEqual(second["status"], "succeeded")
+            self.assertTrue(second["cleanup_pending"])
             self.assertEqual(
                 service.find_record(record["id"])["local_path"], str(jpeg_path)
             )

@@ -4,10 +4,12 @@ import json
 import os
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +22,7 @@ DEFAULT_PROFILE_NAME = "游客"
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled"}
 MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
+FILE_TRANSACTION_LOCK_TIMEOUT_SECONDS = 5.0
 IMAGE_EXTENSIONS = {
     "PNG": ".png",
     "JPEG": ".jpg",
@@ -65,6 +68,9 @@ class OmniGenService:
         self.history_path = self.work_dir / "omnigen" / "history.json"
         self.results_dir = self.work_dir / "omnigen" / "results"
         self.trash_dir = self.work_dir / "omnigen" / ".trash"
+        self.transaction_lock_path = (
+            self.work_dir / "omnigen" / ".transactions.lock"
+        )
         self.profile_dir = self.work_dir / "profile"
         self.endpoint = endpoint
         self._lock = threading.RLock()
@@ -73,41 +79,59 @@ class OmniGenService:
         self.trash_dir.mkdir(parents=True, exist_ok=True)
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         with self._lock:
-            self._cleanup_trash_unlocked()
+            with self._file_transaction_lock():
+                self._recover_file_transactions_unlocked()
 
-    def _cleanup_trash_transaction_unlocked(self, transaction_dir: Path) -> None:
-        try:
-            entries = list(transaction_dir.iterdir())
-        except OSError:
-            return
-        for entry in entries:
-            try:
-                if entry.is_symlink() or not entry.is_dir():
-                    entry.unlink()
-            except OSError:
-                pass
-        try:
-            transaction_dir.rmdir()
-        except OSError:
-            pass
+    @contextmanager
+    def _file_transaction_lock(
+        self, timeout: float = FILE_TRANSACTION_LOCK_TIMEOUT_SECONDS
+    ):
+        self.transaction_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        deadline = time.monotonic() + max(0.0, float(timeout))
 
-    def _cleanup_trash_unlocked(self) -> None:
-        try:
-            entries = list(self.trash_dir.iterdir())
-        except OSError:
-            return
-        for entry in entries:
-            try:
-                if entry.is_symlink() or not entry.is_dir():
-                    entry.unlink()
-                else:
-                    self._cleanup_trash_transaction_unlocked(entry)
-            except OSError:
-                pass
+        def wait_for_retry() -> None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Timed out waiting for the OmniGen file transaction lock"
+                )
+            time.sleep(min(0.05, remaining))
 
-    def _new_trash_transaction_unlocked(self, prefix: str) -> Path:
-        self._cleanup_trash_unlocked()
-        return Path(tempfile.mkdtemp(prefix=prefix, dir=self.trash_dir))
+        with self.transaction_lock_path.open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                while True:
+                    try:
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError:
+                        wait_for_retry()
+                try:
+                    yield
+                finally:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                while True:
+                    try:
+                        fcntl.flock(
+                            handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB
+                        )
+                        break
+                    except OSError:
+                        wait_for_retry()
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _read_json(self, path: Path, default):
         try:
@@ -175,6 +199,290 @@ class OmniGenService:
         )
         os.replace(self.history_path, corrupt_path)
 
+    def _validate_lexical_result_file(self, path) -> Path:
+        candidate = Path(os.path.abspath(os.path.normpath(str(path))))
+        results_root = Path(os.path.abspath(str(self.results_dir)))
+        if candidate == results_root or not candidate.is_relative_to(results_root):
+            raise ValueError(
+                "Refusing to access a file outside the OmniGen results directory"
+            )
+        if results_root.is_symlink():
+            raise ValueError("Refusing to access a symlinked results directory")
+        cursor = results_root
+        for part in candidate.relative_to(results_root).parts[:-1]:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                raise ValueError("Refusing to access a symlinked result path")
+        if candidate.is_symlink():
+            raise ValueError("Refusing to replace or delete a result symlink")
+        if candidate.exists() and candidate.is_dir():
+            raise ValueError("Refusing to replace or delete a result directory")
+        return candidate
+
+    @staticmethod
+    def _transaction_id_from_dir(transaction_dir: Path) -> str:
+        for prefix in (".delete-", ".replace-"):
+            if transaction_dir.name.startswith(prefix):
+                return transaction_dir.name[len(prefix) :]
+        return ""
+
+    def _create_file_transaction_unlocked(
+        self,
+        operation: str,
+        record_ids: list[str],
+        original_paths: list[Path],
+        intended_final_path: Path | None = None,
+    ) -> tuple[Path, dict]:
+        transaction_id = str(uuid.uuid4())
+        transaction_dir = self.trash_dir / f".{operation}-{transaction_id}"
+        transaction_dir.mkdir()
+        mappings = []
+        for index, original_path in enumerate(original_paths):
+            mappings.append(
+                {
+                    "original_path": str(original_path),
+                    "staged_path": str(
+                        transaction_dir / f"old-{index}-{uuid.uuid4().hex}"
+                    ),
+                }
+            )
+        commit_marker = (
+            {
+                "scope": "history",
+                "field": "file_transactions",
+                "value": transaction_id,
+            }
+            if operation == "delete"
+            else {
+                "scope": "record",
+                "record_id": record_ids[0],
+                "field": "file_transaction_id",
+                "value": transaction_id,
+            }
+        )
+        manifest = {
+            "version": 1,
+            "operation": operation,
+            "transaction_id": transaction_id,
+            "record_ids": list(record_ids),
+            "mappings": mappings,
+            "intended_final_path": str(intended_final_path or ""),
+            "commit_marker": commit_marker,
+        }
+        self._atomic_write_json(transaction_dir / "manifest.json", manifest)
+        return transaction_dir, manifest
+
+    def _read_transaction_manifest_unlocked(
+        self, transaction_dir: Path
+    ) -> dict | None:
+        try:
+            with (transaction_dir / "manifest.json").open(
+                "r", encoding="utf-8"
+            ) as handle:
+                manifest = json.load(handle)
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return None
+        if (
+            not isinstance(manifest, dict)
+            or manifest.get("operation") not in {"delete", "replace"}
+            or not isinstance(manifest.get("mappings"), list)
+            or not str(manifest.get("transaction_id") or "")
+        ):
+            return None
+        return manifest
+
+    @staticmethod
+    def _transaction_committed(manifest: dict, history: dict) -> bool:
+        marker = manifest.get("commit_marker") or {}
+        transaction_id = str(manifest.get("transaction_id") or "")
+        if marker.get("scope") == "history":
+            return transaction_id in (history.get("file_transactions") or [])
+        if marker.get("scope") == "record":
+            record_id = marker.get("record_id")
+            return any(
+                record.get("id") == record_id
+                and record.get("file_transaction_id") == transaction_id
+                for record in history.get("records") or []
+            )
+        return False
+
+    def _purge_transaction_unlocked(self, transaction_dir: Path) -> bool:
+        manifest_path = transaction_dir / "manifest.json"
+        try:
+            entries = list(transaction_dir.iterdir())
+        except OSError:
+            return False
+        cleanup_ok = True
+        for entry in entries:
+            if entry == manifest_path:
+                continue
+            try:
+                if entry.is_symlink() or not entry.is_dir():
+                    entry.unlink()
+                else:
+                    cleanup_ok = False
+            except OSError:
+                cleanup_ok = False
+        if not cleanup_ok:
+            return False
+        try:
+            manifest_path.unlink(missing_ok=True)
+        except OSError:
+            return False
+        try:
+            transaction_dir.rmdir()
+        except OSError:
+            return False
+        return True
+
+    def _clear_transaction_marker_unlocked(self, manifest: dict) -> bool:
+        try:
+            history = self._read_history_unlocked()
+            transaction_id = str(manifest.get("transaction_id") or "")
+            operation = manifest.get("operation")
+            changed = False
+            if operation == "delete":
+                markers = list(history.get("file_transactions") or [])
+                remaining = [marker for marker in markers if marker != transaction_id]
+                if remaining != markers:
+                    changed = True
+                    if remaining:
+                        history["file_transactions"] = remaining
+                    else:
+                        history.pop("file_transactions", None)
+            else:
+                record_ids = set(manifest.get("record_ids") or [])
+                for record in history.get("records") or []:
+                    if (
+                        record.get("id") in record_ids
+                        and record.get("file_transaction_id") == transaction_id
+                    ):
+                        record.pop("file_transaction_id", None)
+                        record.pop("cleanup_pending", None)
+                        record["updated_at"] = self._utc_timestamp()
+                        changed = True
+            if changed:
+                self._atomic_write_json(self.history_path, history)
+            return True
+        except OSError:
+            return False
+
+    def _restore_uncommitted_transaction_unlocked(
+        self, transaction_dir: Path, manifest: dict
+    ) -> bool:
+        mappings = []
+        for item in manifest.get("mappings") or []:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid file transaction mapping")
+            original_path = self._validate_lexical_result_file(
+                item.get("original_path")
+            )
+            staged_path = Path(
+                os.path.abspath(os.path.normpath(str(item.get("staged_path") or "")))
+            )
+            transaction_root = Path(os.path.abspath(str(transaction_dir)))
+            if (
+                staged_path == transaction_root
+                or not staged_path.is_relative_to(transaction_root)
+                or staged_path.is_symlink()
+            ):
+                raise ValueError("Invalid staged transaction path")
+            mappings.append((original_path, staged_path))
+
+        if manifest.get("operation") == "replace":
+            final_path = self._validate_lexical_result_file(
+                manifest.get("intended_final_path")
+            )
+            final_mapping = next(
+                (
+                    staged_path
+                    for original_path, staged_path in mappings
+                    if original_path == final_path
+                ),
+                None,
+            )
+            if final_path.exists():
+                old_was_staged = final_mapping is None or final_mapping.exists()
+                if old_was_staged:
+                    discarded_path = transaction_dir / (
+                        f"uncommitted-new-{uuid.uuid4().hex}"
+                    )
+                    os.replace(final_path, discarded_path)
+
+        for original_path, staged_path in reversed(mappings):
+            if not staged_path.exists():
+                continue
+            if original_path.exists() or original_path.is_symlink():
+                raise OSError(f"Cannot restore occupied result path: {original_path}")
+            os.replace(staged_path, original_path)
+        return self._purge_transaction_unlocked(transaction_dir)
+
+    def _clear_orphan_transaction_markers_unlocked(
+        self, present_transaction_ids: set[str]
+    ) -> None:
+        try:
+            history = self._read_history_unlocked()
+            changed = False
+            markers = list(history.get("file_transactions") or [])
+            remaining = [
+                marker for marker in markers if marker in present_transaction_ids
+            ]
+            if remaining != markers:
+                changed = True
+                if remaining:
+                    history["file_transactions"] = remaining
+                else:
+                    history.pop("file_transactions", None)
+            for record in history.get("records") or []:
+                marker = str(record.get("file_transaction_id") or "")
+                if marker and marker not in present_transaction_ids:
+                    record.pop("file_transaction_id", None)
+                    record.pop("cleanup_pending", None)
+                    record["updated_at"] = self._utc_timestamp()
+                    changed = True
+            if changed:
+                self._atomic_write_json(self.history_path, history)
+        except OSError:
+            pass
+
+    def _recover_file_transactions_unlocked(self) -> None:
+        try:
+            transaction_dirs = [
+                entry
+                for entry in self.trash_dir.iterdir()
+                if entry.is_dir() and not entry.is_symlink()
+            ]
+        except OSError:
+            return
+        for transaction_dir in transaction_dirs:
+            manifest = self._read_transaction_manifest_unlocked(transaction_dir)
+            if manifest is None:
+                try:
+                    transaction_dir.rmdir()
+                except OSError:
+                    pass
+                continue
+            history = self._read_history_unlocked()
+            if self._transaction_committed(manifest, history):
+                cleaned = self._purge_transaction_unlocked(transaction_dir)
+                if cleaned:
+                    self._clear_transaction_marker_unlocked(manifest)
+            else:
+                self._restore_uncommitted_transaction_unlocked(
+                    transaction_dir, manifest
+                )
+
+        present_transaction_ids = set()
+        try:
+            for transaction_dir in self.trash_dir.iterdir():
+                if transaction_dir.is_dir():
+                    transaction_id = self._transaction_id_from_dir(transaction_dir)
+                    if transaction_id:
+                        present_transaction_ids.add(transaction_id)
+        except OSError:
+            return
+        self._clear_orphan_transaction_markers_unlocked(present_transaction_ids)
+
     def list_history(self) -> list[dict]:
         with self._lock:
             records = self._read_history_unlocked()["records"]
@@ -236,74 +544,77 @@ class OmniGenService:
         self, record_ids: list[str], *, delete_files: bool = False
     ) -> dict:
         with self._lock:
-            self._cleanup_trash_unlocked()
-            history = self._read_history_unlocked()
-            selected_ids = set(record_ids)
-            selected = [
-                record
-                for record in history["records"]
-                if record.get("id") in selected_ids
-            ]
-            resolved_paths = []
-            if delete_files:
-                results_root = self.results_dir.resolve()
-                for record in selected:
-                    local_path = str(record.get("local_path") or "").strip()
-                    if not local_path:
-                        continue
-                    resolved_path = Path(local_path).resolve()
-                    if not resolved_path.is_relative_to(results_root):
-                        raise ValueError(
-                            "Refusing to delete a file outside the OmniGen results directory"
-                        )
-                    if resolved_path.exists() and resolved_path.is_dir():
-                        raise ValueError(
-                            "Refusing to delete a directory from OmniGen history"
-                        )
-                    if resolved_path not in resolved_paths:
-                        resolved_paths.append(resolved_path)
+            with self._file_transaction_lock():
+                self._recover_file_transactions_unlocked()
+                history = self._read_history_unlocked()
+                selected_ids = set(record_ids)
+                selected = [
+                    record
+                    for record in history["records"]
+                    if record.get("id") in selected_ids
+                ]
+                result_paths = []
+                if delete_files:
+                    for record in selected:
+                        local_path = str(record.get("local_path") or "").strip()
+                        if not local_path:
+                            continue
+                        result_path = self._validate_lexical_result_file(local_path)
+                        if result_path not in result_paths:
+                            result_paths.append(result_path)
 
-            remaining_records = [
-                record
-                for record in history["records"]
-                if record.get("id") not in selected_ids
-            ]
-            if delete_files:
-                existing_paths = [path for path in resolved_paths if path.exists()]
-                transaction_dir = None
-                staged_paths = []
-                try:
-                    if existing_paths:
-                        transaction_dir = self._new_trash_transaction_unlocked(
-                            ".delete-"
+                remaining_records = [
+                    record
+                    for record in history["records"]
+                    if record.get("id") not in selected_ids
+                ]
+                existing_paths = [path for path in result_paths if path.exists()]
+                cleanup_pending = False
+                if delete_files and existing_paths:
+                    transaction_dir, manifest = (
+                        self._create_file_transaction_unlocked(
+                            "delete",
+                            [record["id"] for record in selected],
+                            existing_paths,
                         )
-                        for index, original_path in enumerate(existing_paths):
-                            staged_path = transaction_dir / (
-                                f"{index}-{uuid.uuid4().hex}"
-                            )
-                            os.replace(original_path, staged_path)
-                            staged_paths.append((original_path, staged_path))
-                    self._atomic_write_json(
-                        self.history_path, {"records": remaining_records}
                     )
-                except Exception:
-                    for original_path, staged_path in reversed(staged_paths):
-                        if staged_path.exists():
-                            os.replace(staged_path, original_path)
-                    if transaction_dir is not None:
-                        self._cleanup_trash_transaction_unlocked(transaction_dir)
-                    raise
+                    try:
+                        for mapping in manifest["mappings"]:
+                            os.replace(
+                                mapping["original_path"], mapping["staged_path"]
+                            )
+                        committed_history = copy.deepcopy(history)
+                        committed_history["records"] = remaining_records
+                        markers = list(
+                            committed_history.get("file_transactions") or []
+                        )
+                        markers.append(manifest["transaction_id"])
+                        committed_history["file_transactions"] = markers
+                        self._atomic_write_json(
+                            self.history_path, committed_history
+                        )
+                    except Exception:
+                        self._restore_uncommitted_transaction_unlocked(
+                            transaction_dir, manifest
+                        )
+                        raise
+                    cleaned = self._purge_transaction_unlocked(transaction_dir)
+                    marker_cleared = (
+                        cleaned
+                        and self._clear_transaction_marker_unlocked(manifest)
+                    )
+                    cleanup_pending = not (cleaned and marker_cleared)
                 else:
-                    if transaction_dir is not None:
-                        self._cleanup_trash_transaction_unlocked(transaction_dir)
-            else:
-                self._atomic_write_json(
-                    self.history_path, {"records": remaining_records}
-                )
-            return {
-                "deleted_ids": [record["id"] for record in selected],
-                "files_deleted": delete_files,
-            }
+                    committed_history = copy.deepcopy(history)
+                    committed_history["records"] = remaining_records
+                    self._atomic_write_json(
+                        self.history_path, committed_history
+                    )
+                return {
+                    "deleted_ids": [record["id"] for record in selected],
+                    "files_deleted": delete_files,
+                    "cleanup_pending": cleanup_pending,
+                }
 
     @staticmethod
     def _validate_result_url(result_url) -> str:
@@ -391,72 +702,71 @@ class OmniGenService:
                 raise ValueError(
                     f"Downloaded image format is not supported: {image_format or 'unknown'}"
                 )
-            final_path = self.results_dir / f"{stable_record_id}{extension}"
+            final_path = self._validate_lexical_result_file(
+                self.results_dir / f"{stable_record_id}{extension}"
+            )
             with self._lock:
-                self._cleanup_trash_unlocked()
-                record = self.find_record(record_id)
-                transaction_dir = self._new_trash_transaction_unlocked(
-                    ".download-"
-                )
-                staged_paths = []
-                final_installed = False
-                try:
+                with self._file_transaction_lock():
+                    self._recover_file_transactions_unlocked()
+                    record = self.find_record(record_id)
                     paths_to_stage = []
                     if final_path.exists():
-                        if final_path.is_dir():
-                            raise ValueError(
-                                "Refusing to replace a result directory"
-                            )
-                        paths_to_stage.append(final_path.resolve())
-
+                        paths_to_stage.append(final_path)
                     previous_local_path = str(
                         record.get("local_path") or ""
                     ).strip()
                     if previous_local_path:
-                        previous_path = Path(previous_local_path).resolve()
+                        previous_path = self._validate_lexical_result_file(
+                            previous_local_path
+                        )
                         if (
-                            previous_path.is_relative_to(self.results_dir.resolve())
-                            and previous_path.exists()
-                            and not previous_path.is_dir()
+                            previous_path.exists()
                             and previous_path not in paths_to_stage
                         ):
                             paths_to_stage.append(previous_path)
 
-                    for index, original_path in enumerate(paths_to_stage):
-                        staged_path = transaction_dir / (
-                            f"old-{index}-{uuid.uuid4().hex}"
+                    transaction_dir, manifest = (
+                        self._create_file_transaction_unlocked(
+                            "replace",
+                            [record_id],
+                            paths_to_stage,
+                            final_path,
                         )
-                        os.replace(original_path, staged_path)
-                        staged_paths.append((original_path, staged_path))
-
-                    os.replace(temporary_path, final_path)
-                    temporary_path = None
-                    final_installed = True
-                    updated = self.update_record(
-                        record_id,
-                        remote_url=response_url,
-                        local_path=str(final_path.resolve()),
-                        local_url=f"/work/omnigen/results/{final_path.name}",
-                        width=width,
-                        height=height,
-                        bytes=len(image_bytes),
-                        status="succeeded",
-                        progress=100,
-                        error="",
                     )
-                except Exception:
-                    if final_installed and final_path.exists():
-                        failed_path = transaction_dir / (
-                            f"new-{uuid.uuid4().hex}"
+                    try:
+                        for mapping in manifest["mappings"]:
+                            os.replace(
+                                mapping["original_path"],
+                                mapping["staged_path"],
+                            )
+                        os.replace(temporary_path, final_path)
+                        temporary_path = None
+                        updated = self.update_record(
+                            record_id,
+                            remote_url=response_url,
+                            local_path=str(final_path),
+                            local_url=f"/work/omnigen/results/{final_path.name}",
+                            width=width,
+                            height=height,
+                            bytes=len(image_bytes),
+                            status="succeeded",
+                            progress=100,
+                            error="",
+                            file_transaction_id=manifest["transaction_id"],
+                            cleanup_pending=True,
                         )
-                        os.replace(final_path, failed_path)
-                    for original_path, staged_path in reversed(staged_paths):
-                        if staged_path.exists():
-                            os.replace(staged_path, original_path)
-                    self._cleanup_trash_transaction_unlocked(transaction_dir)
-                    raise
-                else:
-                    self._cleanup_trash_transaction_unlocked(transaction_dir)
+                    except Exception:
+                        self._restore_uncommitted_transaction_unlocked(
+                            transaction_dir, manifest
+                        )
+                        raise
+                    cleaned = self._purge_transaction_unlocked(transaction_dir)
+                    marker_cleared = (
+                        cleaned
+                        and self._clear_transaction_marker_unlocked(manifest)
+                    )
+                    if cleaned and marker_cleared:
+                        return self.find_record(record_id)
                     return updated
         except ValueError:
             raise
