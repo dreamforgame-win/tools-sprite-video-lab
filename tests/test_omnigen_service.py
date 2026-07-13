@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from omnigen_service import OmniGenService, parse_mcp_tool_payload, redact_secret
+from omnigen_service import (
+    OmniGenError,
+    OmniGenService,
+    parse_mcp_tool_payload,
+    redact_secret,
+)
 
 
 class FakeResponse:
@@ -18,8 +23,8 @@ class FakeResponse:
     def __exit__(self, exc_type, exc_value, traceback):
         return False
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        return self._body if size < 0 else self._body[:size]
 
 
 class LocalProfileTests(unittest.TestCase):
@@ -85,6 +90,23 @@ class LocalProfileTests(unittest.TestCase):
             self.assertNotIn("secret-token", serialized)
             self.assertIn("[REDACTED]", serialized)
 
+    def test_public_profile_tolerates_malformed_settings_sections(self):
+        malformed_settings = (
+            {"profile": [], "omnigen": "invalid"},
+            {"profile": {}, "omnigen": {"model_count": "many"}},
+        )
+        for settings in malformed_settings:
+            with self.subTest(settings=settings), tempfile.TemporaryDirectory() as directory:
+                settings_path = Path(directory) / "settings.json"
+                settings_path.write_text(json.dumps(settings), encoding="utf-8")
+                service = OmniGenService(Path(directory))
+
+                profile = service.public_profile()
+
+                self.assertEqual(profile["name"], "游客")
+                self.assertFalse(profile["mcp"]["configured"])
+                self.assertEqual(profile["mcp"]["model_count"], 0)
+
 
 class McpPayloadTests(unittest.TestCase):
     def test_parses_structured_content(self):
@@ -135,6 +157,123 @@ class McpPayloadTests(unittest.TestCase):
                 payload = service._request_jsonrpc("initialize", {}, "secret-token")
 
         self.assertEqual(payload["result"], {})
+
+    def test_request_parses_multiline_event_stream_event(self):
+        response = FakeResponse(
+            "data: {\"jsonrpc\":\"2.0\",\n"
+            "data: \"id\":1,\"result\":{\"ready\":true}}\n\n",
+            "text/event-stream",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            with mock.patch("urllib.request.urlopen", return_value=response):
+                payload = service._request_jsonrpc("initialize", {}, "secret-token")
+
+        self.assertEqual(payload["result"], {"ready": True})
+
+    def test_request_redacts_json_construction_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            with mock.patch(
+                "omnigen_service.json.dumps",
+                side_effect=TypeError("cannot encode secret-token"),
+            ):
+                with self.assertRaises(OmniGenError) as raised:
+                    service._request_jsonrpc("initialize", {}, "secret-token")
+
+        self.assertEqual(str(raised.exception), "cannot encode [REDACTED]")
+
+    def test_request_rejects_oversized_response(self):
+        response = FakeResponse("x" * (8 * 1024 * 1024 + 1), "application/json")
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            with mock.patch("urllib.request.urlopen", return_value=response):
+                with self.assertRaises(OmniGenError) as raised:
+                    service._request_jsonrpc("initialize", {}, "secret-token")
+
+        self.assertIn("response exceeded", str(raised.exception).lower())
+
+
+class McpClientTests(unittest.TestCase):
+    def test_call_tool_sends_initialize_notification_then_tool_call(self):
+        responses = iter(
+            (
+                FakeResponse(
+                    '{"jsonrpc":"2.0","id":1,"result":{}}',
+                    "application/json",
+                ),
+                FakeResponse("", "application/json"),
+                FakeResponse(
+                    '{"jsonrpc":"2.0","id":1,"result":'
+                    '{"structuredContent":{"status":"succeeded"}}}',
+                    "application/json",
+                ),
+            )
+        )
+        requests = []
+
+        def open_request(request, timeout):
+            requests.append((json.loads(request.data), timeout))
+            return next(responses)
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.set_token("secret-token")
+            with mock.patch("urllib.request.urlopen", side_effect=open_request):
+                result = service.call_tool("generate_image", {"prompt": "pixel art"})
+
+        self.assertEqual(result, {"status": "succeeded"})
+        self.assertEqual(
+            [payload for payload, _timeout in requests],
+            [
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2024-11-05",
+                        "capabilities": {},
+                        "clientInfo": {
+                            "name": "sprite-video-lab",
+                            "version": "1.0",
+                        },
+                    },
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                    "params": {},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "generate_image",
+                        "arguments": {"prompt": "pixel art"},
+                    },
+                },
+            ],
+        )
+        self.assertEqual([timeout for _payload, timeout in requests], [60, 60, 60])
+
+    def test_call_tool_redacts_transport_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.set_token("secret-token")
+            with mock.patch.object(
+                service,
+                "_request_jsonrpc",
+                side_effect=(
+                    {"result": {}},
+                    {},
+                    OmniGenError("request failed for secret-token"),
+                ),
+            ):
+                with self.assertRaises(OmniGenError) as raised:
+                    service.call_tool("generate_image", {})
+
+        self.assertEqual(str(raised.exception), "request failed for [REDACTED]")
 
 
 if __name__ == "__main__":

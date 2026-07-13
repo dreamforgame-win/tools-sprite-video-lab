@@ -11,6 +11,7 @@ OMNIGEN_ENDPOINT = "https://omnigen.dianchu.cc/api/v1/mcp"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 DEFAULT_PROFILE_NAME = "游客"
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled"}
+MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
 def redact_secret(message: str, secret: str) -> str:
@@ -92,17 +93,25 @@ class OmniGenService:
     def public_profile(self) -> dict:
         with self._lock:
             settings = self._read_settings()
-            profile = settings.get("profile") or {}
-            omnigen = settings.get("omnigen") or {}
+            profile = settings.get("profile")
+            if not isinstance(profile, dict):
+                profile = {}
+            omnigen = settings.get("omnigen")
+            if not isinstance(omnigen, dict):
+                omnigen = {}
             name = str(profile.get("name") or "").strip() or DEFAULT_PROFILE_NAME
             token = str(omnigen.get("token") or "")
             last_error = omnigen.get("last_error")
+            try:
+                model_count = int(omnigen.get("model_count") or 0)
+            except (TypeError, ValueError, OverflowError):
+                model_count = 0
             return {
                 "name": name,
                 "mcp": {
                     "configured": bool(token),
                     "validated": bool(omnigen.get("validated", False)),
-                    "model_count": int(omnigen.get("model_count") or 0),
+                    "model_count": model_count,
                     "last_error": (
                         redact_secret(last_error, token)
                         if last_error is not None
@@ -153,32 +162,46 @@ class OmniGenService:
     def _token(self) -> str:
         with self._lock:
             settings = self._read_settings()
-            omnigen = settings.get("omnigen") or {}
+            omnigen = settings.get("omnigen")
+            if not isinstance(omnigen, dict):
+                return ""
             return str(omnigen.get("token") or "")
 
-    def _request_jsonrpc(self, method: str, params: dict, token: str) -> dict:
-        request_payload = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": method,
-            "params": params,
-        }
-        request = urllib.request.Request(
-            self.endpoint,
-            data=json.dumps(request_payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
-                "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
-            },
-            method="POST",
-        )
-
+    def _request_jsonrpc(
+        self,
+        method: str,
+        params: dict,
+        token: str,
+        *,
+        notification: bool = False,
+    ) -> dict:
         try:
+            request_payload = {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            }
+            if not notification:
+                request_payload["id"] = 1
+            request = urllib.request.Request(
+                self.endpoint,
+                data=json.dumps(request_payload).encode("utf-8"),
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json, text/event-stream",
+                    "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
+                },
+                method="POST",
+            )
             with urllib.request.urlopen(request, timeout=60) as response:
                 content_type = response.headers.get("Content-Type", "")
-                body = response.read().decode("utf-8")
+                raw_body = response.read(MAX_MCP_RESPONSE_BYTES + 1)
+            if len(raw_body) > MAX_MCP_RESPONSE_BYTES:
+                raise ValueError("OmniGen response exceeded 8 MB limit")
+            body = raw_body.decode("utf-8")
+            if notification and not body.strip():
+                return {}
             if "text/event-stream" in content_type.lower():
                 payload = self._parse_event_stream(body)
             else:
@@ -196,19 +219,38 @@ class OmniGenService:
             return payload
         except OmniGenError as exc:
             raise OmniGenError(redact_secret(exc, token)) from None
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError, UnicodeError,
-                json.JSONDecodeError, ValueError) as exc:
+        except (
+            urllib.error.HTTPError,
+            urllib.error.URLError,
+            OSError,
+            UnicodeError,
+            TypeError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
             raise OmniGenError(redact_secret(exc, token)) from None
 
     @staticmethod
     def _parse_event_stream(body: str) -> dict:
+        data_lines = []
         for line in body.splitlines():
+            if not line:
+                if data_lines:
+                    payload = json.loads("\n".join(data_lines))
+                    data_lines = []
+                    if isinstance(payload, dict) and (
+                        "result" in payload or "error" in payload
+                    ):
+                        return payload
+                continue
             if not line.startswith("data:"):
                 continue
-            data = line[5:].strip()
-            if not data:
-                continue
-            payload = json.loads(data)
+            data = line[5:]
+            if data.startswith(" "):
+                data = data[1:]
+            data_lines.append(data)
+        if data_lines:
+            payload = json.loads("\n".join(data_lines))
             if isinstance(payload, dict) and ("result" in payload or "error" in payload):
                 return payload
         raise ValueError("OmniGen event stream contained no JSON-RPC response")
@@ -229,6 +271,12 @@ class OmniGenService:
                     },
                 },
                 token,
+            )
+            self._request_jsonrpc(
+                "notifications/initialized",
+                {},
+                token,
+                notification=True,
             )
             payload = self._request_jsonrpc(
                 "tools/call",
