@@ -63,30 +63,75 @@ class OmniGenError(RuntimeError):
 
 class OmniGenService:
     def __init__(self, work_dir: Path, endpoint: str = OMNIGEN_ENDPOINT):
-        self.work_dir = Path(work_dir).resolve()
-        self.settings_path = self.work_dir / "settings.json"
-        self.history_path = self.work_dir / "omnigen" / "history.json"
-        self.results_dir = self.work_dir / "omnigen" / "results"
-        self.trash_dir = self.work_dir / "omnigen" / ".trash"
-        self.transaction_lock_path = (
-            self.work_dir / "omnigen" / ".transactions.lock"
+        lexical_work_dir = Path(
+            os.path.abspath(os.path.normpath(str(work_dir)))
         )
+        self._reject_link_or_junction(
+            lexical_work_dir, "OmniGen work directory"
+        )
+        self.work_dir = lexical_work_dir.resolve()
+        self.omnigen_dir = self.work_dir / "omnigen"
+        self.settings_path = self.work_dir / "settings.json"
+        self.history_path = self.omnigen_dir / "history.json"
+        self.results_dir = self.omnigen_dir / "results"
+        self.trash_dir = self.omnigen_dir / ".trash"
+        self.transaction_lock_path = self.omnigen_dir / ".transactions.lock"
         self.profile_dir = self.work_dir / "profile"
         self.endpoint = endpoint
         self._lock = threading.RLock()
 
-        self.results_dir.mkdir(parents=True, exist_ok=True)
-        self.trash_dir.mkdir(parents=True, exist_ok=True)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        for path, label in (
+            (self.omnigen_dir, "OmniGen data directory"),
+            (self.results_dir, "OmniGen results directory"),
+            (self.trash_dir, "OmniGen trash directory"),
+        ):
+            self._reject_link_or_junction(path, label)
+            path.mkdir(exist_ok=True)
+            self._reject_link_or_junction(path, label)
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        self._resolved_work_dir = self.work_dir.resolve()
+        self._validate_managed_roots()
         with self._lock:
             with self._file_transaction_lock():
                 self._recover_file_transactions_unlocked()
+
+    @staticmethod
+    def _is_junction(path: Path) -> bool:
+        return bool(
+            callable(getattr(path, "is_junction", None))
+            and path.is_junction()
+        )
+
+    @classmethod
+    def _reject_link_or_junction(cls, path: Path, label: str) -> None:
+        path = Path(path)
+        if path.is_symlink():
+            raise ValueError(f"Refusing to access a symlinked {label}")
+        if cls._is_junction(path):
+            raise ValueError(f"Refusing to access a junction {label}")
+
+    def _validate_managed_roots(self) -> None:
+        for path, label in (
+            (self.work_dir, "OmniGen work directory"),
+            (self.omnigen_dir, "OmniGen data directory"),
+            (self.results_dir, "OmniGen results directory"),
+            (self.trash_dir, "OmniGen trash directory"),
+        ):
+            self._reject_link_or_junction(path, label)
+            resolved = path.resolve()
+            if resolved != self._resolved_work_dir and not resolved.is_relative_to(
+                self._resolved_work_dir
+            ):
+                raise ValueError(
+                    f"Refusing to access {label} outside the work directory"
+                )
 
     @contextmanager
     def _file_transaction_lock(
         self, timeout: float = FILE_TRANSACTION_LOCK_TIMEOUT_SECONDS
     ):
-        self.transaction_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        self._validate_managed_roots()
         deadline = time.monotonic() + max(0.0, float(timeout))
 
         def wait_for_retry() -> None:
@@ -200,23 +245,50 @@ class OmniGenService:
         os.replace(self.history_path, corrupt_path)
 
     def _validate_lexical_result_file(self, path) -> Path:
+        self._validate_managed_roots()
         candidate = Path(os.path.abspath(os.path.normpath(str(path))))
         results_root = Path(os.path.abspath(str(self.results_dir)))
         if candidate == results_root or not candidate.is_relative_to(results_root):
             raise ValueError(
                 "Refusing to access a file outside the OmniGen results directory"
             )
-        if results_root.is_symlink():
-            raise ValueError("Refusing to access a symlinked results directory")
         cursor = results_root
         for part in candidate.relative_to(results_root).parts[:-1]:
             cursor = cursor / part
-            if cursor.is_symlink():
-                raise ValueError("Refusing to access a symlinked result path")
-        if candidate.is_symlink():
-            raise ValueError("Refusing to replace or delete a result symlink")
+            self._reject_link_or_junction(cursor, "result path")
+        self._reject_link_or_junction(candidate, "result path")
+        resolved_results_root = results_root.resolve()
+        resolved_parent = candidate.parent.resolve()
+        if resolved_parent != resolved_results_root and not (
+            resolved_parent.is_relative_to(resolved_results_root)
+        ):
+            raise ValueError(
+                "Refusing to access a result path outside the results directory"
+            )
         if candidate.exists() and candidate.is_dir():
             raise ValueError("Refusing to replace or delete a result directory")
+        return candidate
+
+    def _validate_lexical_trash_path(self, path) -> Path:
+        self._validate_managed_roots()
+        candidate = Path(os.path.abspath(os.path.normpath(str(path))))
+        trash_root = Path(os.path.abspath(str(self.trash_dir)))
+        if candidate == trash_root or not candidate.is_relative_to(trash_root):
+            raise ValueError(
+                "Refusing to access a path outside the OmniGen trash directory"
+            )
+        cursor = trash_root
+        for part in candidate.relative_to(trash_root).parts:
+            cursor = cursor / part
+            self._reject_link_or_junction(cursor, "trash path")
+        resolved_trash_root = trash_root.resolve()
+        resolved_parent = candidate.parent.resolve()
+        if resolved_parent != resolved_trash_root and not (
+            resolved_parent.is_relative_to(resolved_trash_root)
+        ):
+            raise ValueError(
+                "Refusing to access a trash path outside the trash directory"
+            )
         return candidate
 
     @staticmethod
@@ -236,6 +308,7 @@ class OmniGenService:
         transaction_id = str(uuid.uuid4())
         transaction_dir = self.trash_dir / f".{operation}-{transaction_id}"
         transaction_dir.mkdir()
+        self._validate_lexical_trash_path(transaction_dir)
         mappings = []
         for index, original_path in enumerate(original_paths):
             mappings.append(
@@ -275,10 +348,11 @@ class OmniGenService:
     def _read_transaction_manifest_unlocked(
         self, transaction_dir: Path
     ) -> dict | None:
+        manifest_path = transaction_dir / "manifest.json"
+        if manifest_path.is_symlink() or self._is_junction(manifest_path):
+            return None
         try:
-            with (transaction_dir / "manifest.json").open(
-                "r", encoding="utf-8"
-            ) as handle:
+            with manifest_path.open("r", encoding="utf-8") as handle:
                 manifest = json.load(handle)
         except (OSError, UnicodeError, json.JSONDecodeError):
             return None
@@ -307,6 +381,10 @@ class OmniGenService:
         return False
 
     def _purge_transaction_unlocked(self, transaction_dir: Path) -> bool:
+        try:
+            transaction_dir = self._validate_lexical_trash_path(transaction_dir)
+        except ValueError:
+            return False
         manifest_path = transaction_dir / "manifest.json"
         try:
             entries = list(transaction_dir.iterdir())
@@ -317,7 +395,9 @@ class OmniGenService:
             if entry == manifest_path:
                 continue
             try:
-                if entry.is_symlink() or not entry.is_dir():
+                if self._is_junction(entry):
+                    cleanup_ok = False
+                elif entry.is_symlink() or not entry.is_dir():
                     entry.unlink()
                 else:
                     cleanup_ok = False
@@ -370,6 +450,7 @@ class OmniGenService:
     def _restore_uncommitted_transaction_unlocked(
         self, transaction_dir: Path, manifest: dict
     ) -> bool:
+        transaction_dir = self._validate_lexical_trash_path(transaction_dir)
         mappings = []
         for item in manifest.get("mappings") or []:
             if not isinstance(item, dict):
@@ -377,14 +458,15 @@ class OmniGenService:
             original_path = self._validate_lexical_result_file(
                 item.get("original_path")
             )
-            staged_path = Path(
-                os.path.abspath(os.path.normpath(str(item.get("staged_path") or "")))
+            staged_path = self._validate_lexical_trash_path(
+                item.get("staged_path") or ""
             )
             transaction_root = Path(os.path.abspath(str(transaction_dir)))
             if (
                 staged_path == transaction_root
                 or not staged_path.is_relative_to(transaction_root)
                 or staged_path.is_symlink()
+                or self._is_junction(staged_path)
             ):
                 raise ValueError("Invalid staged transaction path")
             mappings.append((original_path, staged_path))
@@ -412,7 +494,11 @@ class OmniGenService:
         for original_path, staged_path in reversed(mappings):
             if not staged_path.exists():
                 continue
-            if original_path.exists() or original_path.is_symlink():
+            if (
+                original_path.exists()
+                or original_path.is_symlink()
+                or self._is_junction(original_path)
+            ):
                 raise OSError(f"Cannot restore occupied result path: {original_path}")
             os.replace(staged_path, original_path)
         return self._purge_transaction_unlocked(transaction_dir)
@@ -450,7 +536,9 @@ class OmniGenService:
             transaction_dirs = [
                 entry
                 for entry in self.trash_dir.iterdir()
-                if entry.is_dir() and not entry.is_symlink()
+                if entry.is_dir()
+                and not entry.is_symlink()
+                and not self._is_junction(entry)
             ]
         except OSError:
             return
@@ -475,7 +563,11 @@ class OmniGenService:
         present_transaction_ids = set()
         try:
             for transaction_dir in self.trash_dir.iterdir():
-                if transaction_dir.is_dir():
+                if (
+                    transaction_dir.is_dir()
+                    and not transaction_dir.is_symlink()
+                    and not self._is_junction(transaction_dir)
+                ):
                     transaction_id = self._transaction_id_from_dir(transaction_dir)
                     if transaction_id:
                         present_transaction_ids.add(transaction_id)
@@ -483,62 +575,80 @@ class OmniGenService:
             return
         self._clear_orphan_transaction_markers_unlocked(present_transaction_ids)
 
+    def _list_history_unlocked(self) -> list[dict]:
+        records = self._read_history_unlocked()["records"]
+        records = sorted(
+            records,
+            key=lambda record: str(record.get("created_at") or ""),
+            reverse=True,
+        )
+        return copy.deepcopy(records)
+
     def list_history(self) -> list[dict]:
         with self._lock:
-            records = self._read_history_unlocked()["records"]
-            records = sorted(
-                records,
-                key=lambda record: str(record.get("created_at") or ""),
-                reverse=True,
-            )
-            return copy.deepcopy(records)
+            with self._file_transaction_lock():
+                return self._list_history_unlocked()
+
+    def _create_record_unlocked(
+        self, prompt: str, model: str, params: dict
+    ) -> dict:
+        timestamp = self._utc_timestamp()
+        record = {
+            "id": str(uuid.uuid4()),
+            "media_type": "image",
+            "prompt": str(prompt),
+            "model": str(model),
+            "params": copy.deepcopy(params),
+            "task_id": "",
+            "status": "submitting",
+            "progress": 0,
+            "remote_url": "",
+            "local_path": "",
+            "local_url": "",
+            "width": 0,
+            "height": 0,
+            "bytes": 0,
+            "error": "",
+            "created_at": timestamp,
+            "updated_at": timestamp,
+        }
+        history = self._read_history_unlocked()
+        history["records"].insert(0, record)
+        self._atomic_write_json(self.history_path, history)
+        return copy.deepcopy(record)
 
     def create_record(self, prompt: str, model: str, params: dict) -> dict:
         with self._lock:
-            timestamp = self._utc_timestamp()
-            record = {
-                "id": str(uuid.uuid4()),
-                "media_type": "image",
-                "prompt": str(prompt),
-                "model": str(model),
-                "params": copy.deepcopy(params),
-                "task_id": "",
-                "status": "submitting",
-                "progress": 0,
-                "remote_url": "",
-                "local_path": "",
-                "local_url": "",
-                "width": 0,
-                "height": 0,
-                "bytes": 0,
-                "error": "",
-                "created_at": timestamp,
-                "updated_at": timestamp,
-            }
-            history = self._read_history_unlocked()
-            history["records"].insert(0, record)
-            self._atomic_write_json(self.history_path, history)
-            return copy.deepcopy(record)
+            with self._file_transaction_lock():
+                return self._create_record_unlocked(prompt, model, params)
+
+    def _find_record_unlocked(self, record_id: str) -> dict:
+        for record in self._read_history_unlocked()["records"]:
+            if record.get("id") == record_id:
+                return copy.deepcopy(record)
+        raise ValueError(f"History record not found: {record_id}")
 
     def find_record(self, record_id: str) -> dict:
         with self._lock:
-            for record in self._read_history_unlocked()["records"]:
-                if record.get("id") == record_id:
-                    return copy.deepcopy(record)
+            with self._file_transaction_lock():
+                return self._find_record_unlocked(record_id)
+
+    def _update_record_unlocked(self, record_id: str, **changes) -> dict:
+        history = self._read_history_unlocked()
+        for record in history["records"]:
+            if record.get("id") != record_id:
+                continue
+            record.update(copy.deepcopy(changes))
+            record["id"] = record_id
+            record["updated_at"] = self._utc_timestamp()
+            self._atomic_write_json(self.history_path, history)
+            return copy.deepcopy(record)
         raise ValueError(f"History record not found: {record_id}")
 
     def update_record(self, record_id: str, **changes) -> dict:
         with self._lock:
-            history = self._read_history_unlocked()
-            for record in history["records"]:
-                if record.get("id") != record_id:
-                    continue
-                record.update(copy.deepcopy(changes))
-                record["id"] = record_id
-                record["updated_at"] = self._utc_timestamp()
-                self._atomic_write_json(self.history_path, history)
-                return copy.deepcopy(record)
-        raise ValueError(f"History record not found: {record_id}")
+            with self._file_transaction_lock():
+                return self._update_record_unlocked(record_id, **changes)
 
     def delete_records(
         self, record_ids: list[str], *, delete_files: bool = False
@@ -708,7 +818,7 @@ class OmniGenService:
             with self._lock:
                 with self._file_transaction_lock():
                     self._recover_file_transactions_unlocked()
-                    record = self.find_record(record_id)
+                    record = self._find_record_unlocked(record_id)
                     paths_to_stage = []
                     if final_path.exists():
                         paths_to_stage.append(final_path)
@@ -741,7 +851,7 @@ class OmniGenService:
                             )
                         os.replace(temporary_path, final_path)
                         temporary_path = None
-                        updated = self.update_record(
+                        updated = self._update_record_unlocked(
                             record_id,
                             remote_url=response_url,
                             local_path=str(final_path),
@@ -766,7 +876,7 @@ class OmniGenService:
                         and self._clear_transaction_marker_unlocked(manifest)
                     )
                     if cleaned and marker_cleared:
-                        return self.find_record(record_id)
+                        return self._find_record_unlocked(record_id)
                     return updated
         except ValueError:
             raise

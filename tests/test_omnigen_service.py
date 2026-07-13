@@ -2,6 +2,7 @@ import http.client
 import io
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import time
@@ -405,6 +406,84 @@ class HistoryStoreTests(unittest.TestCase):
             self.assertEqual(updated["status"], "running")
             self.assertEqual(reloaded["task_id"], "task-1")
             self.assertGreaterEqual(updated["updated_at"], record["updated_at"])
+
+    def test_stale_writer_cannot_resurrect_cross_service_delete(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service_a = OmniGenService(root)
+            service_b = OmniGenService(root)
+            local_file = service_a.results_dir / "result.png"
+            local_file.write_bytes(b"image")
+            record = service_a.create_record("prompt", "model-a", {})
+            service_a.update_record(record["id"], local_path=str(local_file))
+            read_complete = threading.Event()
+            resume_writer = threading.Event()
+            delete_complete = threading.Event()
+            errors = []
+            real_read_history = service_a._read_history_unlocked
+
+            def read_then_pause():
+                history = real_read_history()
+                if not read_complete.is_set():
+                    read_complete.set()
+                    if not resume_writer.wait(timeout=2):
+                        raise TimeoutError("stale writer test did not resume")
+                return history
+
+            def update_from_service_a():
+                try:
+                    service_a.update_record(record["id"], progress=50)
+                except Exception as exc:
+                    errors.append(exc)
+
+            def delete_from_service_b():
+                try:
+                    service_b.delete_records(
+                        [record["id"]], delete_files=True
+                    )
+                except Exception as exc:
+                    errors.append(exc)
+                finally:
+                    delete_complete.set()
+
+            update_thread = threading.Thread(
+                target=update_from_service_a, daemon=True
+            )
+            delete_thread = threading.Thread(
+                target=delete_from_service_b, daemon=True
+            )
+            try:
+                with mock.patch.object(
+                    service_a,
+                    "_read_history_unlocked",
+                    side_effect=read_then_pause,
+                ), mock.patch.object(
+                    service_b,
+                    "_purge_transaction_unlocked",
+                    return_value=False,
+                ):
+                    update_thread.start()
+                    self.assertTrue(read_complete.wait(timeout=2))
+                    delete_thread.start()
+                    self.assertFalse(delete_complete.wait(timeout=0.2))
+                    resume_writer.set()
+                    update_thread.join(timeout=3)
+                    delete_thread.join(timeout=3)
+            finally:
+                resume_writer.set()
+                if update_thread.ident is not None:
+                    update_thread.join(timeout=1)
+                if delete_thread.ident is not None:
+                    delete_thread.join(timeout=1)
+
+            self.assertFalse(update_thread.is_alive())
+            self.assertFalse(delete_thread.is_alive())
+            self.assertEqual(errors, [])
+            stored = json.loads(
+                service_a.history_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(stored["records"], [])
+            self.assertEqual(len(stored.get("file_transactions") or []), 1)
 
     def test_list_history_returns_newest_first_copies(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1045,6 +1124,51 @@ class DownloadResultTests(unittest.TestCase):
             self.assertEqual(external.read_bytes(), b"external")
             self.assertEqual(service.find_record(record["id"])["local_path"], "")
 
+    def test_delete_rejects_windows_junction_result_parent(self):
+        if os.name != "nt":
+            self.skipTest("Windows directory junctions are unavailable")
+        if not hasattr(Path("."), "is_junction"):
+            self.skipTest("pathlib junction detection is unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            service = OmniGenService(root / "work")
+            external = root / "external"
+            external.mkdir()
+            external_file = external / "result.png"
+            external_file.write_bytes(b"external")
+            junction = service.results_dir / "linked"
+            created = subprocess.run(
+                [
+                    "cmd.exe",
+                    "/d",
+                    "/c",
+                    "mklink",
+                    "/J",
+                    str(junction),
+                    str(external),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            self.assertEqual(
+                created.returncode,
+                0,
+                created.stdout + created.stderr,
+            )
+            self.assertTrue(junction.is_junction())
+            record = service.create_record("prompt", "model-a", {})
+            service.update_record(
+                record["id"], local_path=str(junction / external_file.name)
+            )
+
+            with self.assertRaisesRegex(ValueError, "junction"):
+                service.delete_records([record["id"]], delete_files=True)
+
+            self.assertEqual(external_file.read_bytes(), b"external")
+            self.assertEqual(service.find_record(record["id"])["id"], record["id"])
+
     def test_downloads_verified_png_to_stable_name_and_persists_metadata(self):
         image_data = make_image_bytes("PNG", (3, 2))
         response = BinaryResponse(image_data)
@@ -1162,7 +1286,7 @@ class DownloadResultTests(unittest.TestCase):
             with mock.patch(
                 "urllib.request.urlopen", return_value=jpeg_response
             ), mock.patch.object(
-                service, "update_record", side_effect=fail_persistence
+                service, "_update_record_unlocked", side_effect=fail_persistence
             ):
                 with self.assertRaisesRegex(ValueError, "history write failed"):
                     service.download_result(
@@ -1262,7 +1386,9 @@ class DownloadResultTests(unittest.TestCase):
             with mock.patch(
                 "urllib.request.urlopen", return_value=response
             ), mock.patch.object(
-                service, "update_record", side_effect=ValueError("history write failed")
+                service,
+                "_update_record_unlocked",
+                side_effect=ValueError("history write failed"),
             ):
                 with self.assertRaisesRegex(ValueError, "history write failed"):
                     service.download_result(
@@ -1281,7 +1407,9 @@ class DownloadResultTests(unittest.TestCase):
             with mock.patch(
                 "urllib.request.urlopen", return_value=response
             ), mock.patch.object(
-                service, "update_record", side_effect=ValueError("history write failed")
+                service,
+                "_update_record_unlocked",
+                side_effect=ValueError("history write failed"),
             ):
                 with self.assertRaisesRegex(ValueError, "history write failed"):
                     service.download_result(
