@@ -27,10 +27,13 @@ from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
 
+from omnigen_service import OmniGenError, OmniGenService, redact_secret
+
 
 ROOT_DIR = Path(__file__).resolve().parent
 APP_DIR = ROOT_DIR / "app"
 WORK_DIR = ROOT_DIR / "work"
+OMNIGEN_SERVICE = OmniGenService(WORK_DIR)
 UPLOADS_DIR = WORK_DIR / "uploads"
 JOBS_DIR = WORK_DIR / "jobs"
 EXPORTS_DIR = WORK_DIR / "exports"
@@ -243,27 +246,6 @@ def output_path_payload() -> dict:
         "is_default": not raw or path == default_path,
         "default_path": str(default_path),
     }
-
-
-def one_click_login_payload() -> dict:
-    settings = load_app_settings()
-    auth = settings.get("local_auth")
-    if not isinstance(auth, dict):
-        auth = {}
-
-    now = datetime.now().astimezone().isoformat(timespec="seconds")
-    user_id = str(auth.get("user_id") or f"svl-{uuid.uuid4().hex[:8]}")
-    login_count = safe_int(auth.get("login_count"), 0) + 1
-    payload = {
-        "user_id": user_id,
-        "display_name": "本地创作者",
-        "provider": "local-one-click",
-        "login_count": login_count,
-        "last_login_at": now,
-    }
-    settings["local_auth"] = payload
-    save_app_settings(settings)
-    return payload
 
 
 def set_output_path(raw_path: str) -> dict:
@@ -6807,8 +6789,45 @@ class AppHandler(BaseHTTPRequestHandler):
     def send_error_json(self, message: str, status: int = HTTPStatus.BAD_REQUEST) -> None:
         self.send_json({"ok": False, "error": message}, status=status)
 
+    @staticmethod
+    def safe_omnigen_error(error: Exception) -> str:
+        return redact_secret(error, OMNIGEN_SERVICE._token())
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path in {
+            "/api/local-profile",
+            "/api/omnigen/models",
+            "/api/omnigen/history",
+            "/api/omnigen/task",
+        }:
+            try:
+                if parsed.path == "/api/local-profile":
+                    self.send_json(
+                        {"ok": True, "profile": OMNIGEN_SERVICE.public_profile()}
+                    )
+                    return
+                if parsed.path == "/api/omnigen/models":
+                    self.send_json(
+                        {"ok": True, "models": OMNIGEN_SERVICE.list_image_models()}
+                    )
+                    return
+                if parsed.path == "/api/omnigen/history":
+                    self.send_json(
+                        {"ok": True, "history": OMNIGEN_SERVICE.list_history()}
+                    )
+                    return
+                record_id = (parse_qs(parsed.query).get("id") or [""])[0]
+                self.send_json(
+                    {
+                        "ok": True,
+                        "record": OMNIGEN_SERVICE.refresh_task(record_id),
+                    }
+                )
+                return
+            except (OmniGenError, ValueError) as exc:
+                self.send_error_json(self.safe_omnigen_error(exc))
+                return
         if parsed.path == "/api/app-version":
             self.send_json(
                 {
@@ -6874,8 +6893,69 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         progress_id_for_error = ""
         try:
-            if parsed.path == "/api/one-click-login":
-                self.send_json({"ok": True, "auth": one_click_login_payload()})
+            if parsed.path == "/api/local-profile":
+                payload = self.read_json_body()
+                profile = OMNIGEN_SERVICE.update_profile(
+                    payload.get("name"),
+                    avatar_data_url=payload.get("avatar_data_url"),
+                )
+                self.send_json({"ok": True, "profile": profile})
+                return
+            if parsed.path == "/api/omnigen/token":
+                payload = self.read_json_body()
+                profile = OMNIGEN_SERVICE.set_token(payload.get("token"))
+                self.send_json({"ok": True, "profile": profile})
+                return
+            if parsed.path == "/api/omnigen/test":
+                profile = OMNIGEN_SERVICE.test_connection()
+                self.send_json({"ok": True, "profile": profile})
+                return
+            if parsed.path == "/api/omnigen/generate":
+                payload = self.read_json_body()
+                record = OMNIGEN_SERVICE.submit_image(
+                    payload.get("prompt"),
+                    payload.get("model"),
+                    payload.get("params"),
+                )
+                self.send_json({"ok": True, "record": record})
+                return
+            if parsed.path == "/api/omnigen/history/delete":
+                payload = self.read_json_body()
+                record_ids = payload.get("ids")
+                if not isinstance(record_ids, list):
+                    raise ValueError("History ids must be an array")
+                result = OMNIGEN_SERVICE.delete_records(
+                    record_ids,
+                    delete_files=bool(payload.get("delete_files", False)),
+                )
+                self.send_json({"ok": True, "result": result})
+                return
+            if parsed.path == "/api/omnigen/history/refresh":
+                errors = []
+                for record in OMNIGEN_SERVICE.list_history():
+                    if record.get("status") not in {
+                        "submitting",
+                        "queued",
+                        "running",
+                    }:
+                        continue
+                    record_id = str(record.get("id") or "")
+                    try:
+                        OMNIGEN_SERVICE.refresh_task(record_id)
+                    except Exception as exc:
+                        errors.append(
+                            {
+                                "id": record_id,
+                                "error": self.safe_omnigen_error(exc),
+                            }
+                        )
+                self.send_json(
+                    {
+                        "ok": True,
+                        "history": OMNIGEN_SERVICE.list_history(),
+                        "errors": errors,
+                    }
+                )
                 return
             if parsed.path == "/api/download-default-birefnet":
                 result = download_default_birefnet_model()
@@ -7323,6 +7403,9 @@ class AppHandler(BaseHTTPRequestHandler):
                 open_path_in_file_browser(target)
                 self.send_json({"ok": True})
                 return
+        except OmniGenError as exc:
+            self.send_error_json(self.safe_omnigen_error(exc))
+            return
         except FileNotFoundError as exc:
             if progress_id_for_error:
                 set_process_progress(progress_id_for_error, 0, 1, "error", done=True, error=str(exc))
@@ -7334,6 +7417,17 @@ class AppHandler(BaseHTTPRequestHandler):
             self.send_error_json(str(exc), status=HTTPStatus.BAD_REQUEST)
             return
 
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/api/omnigen/token":
+            try:
+                profile = OMNIGEN_SERVICE.clear_token()
+                self.send_json({"ok": True, "profile": profile})
+            except OmniGenError as exc:
+                self.send_error_json(self.safe_omnigen_error(exc))
+            return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def read_json_body(self) -> dict:

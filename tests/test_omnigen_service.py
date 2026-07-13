@@ -1,3 +1,4 @@
+import base64
 import http.client
 import io
 import json
@@ -18,6 +19,7 @@ from omnigen_service import (
     parse_mcp_tool_payload,
     redact_secret,
 )
+import server as server_module
 
 
 class FakeResponse:
@@ -347,6 +349,469 @@ class McpClientTests(unittest.TestCase):
                     service.call_tool("generate_image", {})
 
         self.assertEqual(str(raised.exception), "request failed for [REDACTED]")
+
+
+class OmniGenOperationsTests(unittest.TestCase):
+    def test_connection_updates_only_omnigen_validation_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings_path = Path(directory) / "settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    {
+                        "export_root": "D:/exports",
+                        "profile": {"name": "Creator"},
+                        "omnigen": {"token": "secret-token", "custom": "keep"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            service = OmniGenService(Path(directory))
+            models_payload = {
+                "models": [
+                    {"id": "image-a", "modality": "image"},
+                    {"id": "video-a", "modality": "video"},
+                ]
+            }
+
+            with mock.patch.object(
+                service, "call_tool", return_value=models_payload
+            ) as call_tool:
+                profile = service.test_connection()
+
+            call_tool.assert_called_once_with(
+                "list_generation_models", {"modality": "image"}
+            )
+            stored = json.loads(settings_path.read_text(encoding="utf-8"))
+            self.assertEqual(stored["export_root"], "D:/exports")
+            self.assertEqual(stored["profile"], {"name": "Creator"})
+            self.assertEqual(stored["omnigen"]["token"], "secret-token")
+            self.assertEqual(stored["omnigen"]["custom"], "keep")
+            self.assertTrue(stored["omnigen"]["validated"])
+            self.assertEqual(stored["omnigen"]["model_count"], 1)
+            self.assertIsNone(stored["omnigen"]["last_error"])
+            self.assertNotIn("secret-token", json.dumps(profile))
+
+    def test_connection_failure_persists_redacted_error_and_raises(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.set_token("secret-token")
+            settings = json.loads(service.settings_path.read_text(encoding="utf-8"))
+            settings["omnigen"]["model_count"] = 4
+            service.settings_path.write_text(json.dumps(settings), encoding="utf-8")
+
+            with mock.patch.object(
+                service,
+                "call_tool",
+                side_effect=OmniGenError("rejected secret-token"),
+            ):
+                with self.assertRaises(OmniGenError) as raised:
+                    service.test_connection()
+
+            settings = json.loads(service.settings_path.read_text(encoding="utf-8"))
+            self.assertFalse(settings["omnigen"]["validated"])
+            self.assertEqual(settings["omnigen"]["model_count"], 0)
+            self.assertEqual(
+                settings["omnigen"]["last_error"], "rejected [REDACTED]"
+            )
+            self.assertNotIn("secret-token", str(raised.exception))
+            self.assertNotIn("secret-token", json.dumps(service.public_profile()))
+
+    def test_list_image_models_normalizes_supported_provider_envelopes(self):
+        model = {
+            "id": "image-a",
+            "name": "Image A",
+            "modality": "image",
+            "pricing": {"credits": 2},
+            "capabilities": {"seed": True},
+            "supported_aspect_ratios": ["1:1", "16:9"],
+            "resolutions": ["1024x1024"],
+        }
+        for envelope in ("models", "items", "data"):
+            with self.subTest(envelope=envelope), tempfile.TemporaryDirectory() as directory:
+                service = OmniGenService(Path(directory))
+                with mock.patch.object(
+                    service,
+                    "call_tool",
+                    return_value={
+                        envelope: [model, {"id": "video-a", "modality": "video"}]
+                    },
+                ) as call_tool:
+                    models = service.list_image_models()
+
+                call_tool.assert_called_once_with(
+                    "list_generation_models", {"modality": "image"}
+                )
+                self.assertEqual(
+                    models,
+                    [
+                        {
+                            "id": "image-a",
+                            "display_name": "Image A",
+                            "modality": "image",
+                            "pricing": {"credits": 2},
+                            "capabilities": {"seed": True},
+                            "supported_aspect_ratios": ["1:1", "16:9"],
+                            "supported_resolutions": ["1024x1024"],
+                        }
+                    ],
+                )
+
+    def test_submit_image_updates_the_persisted_record_after_remote_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+
+            def submit(_name, _arguments):
+                history_during_call = service.list_history()
+                self.assertEqual(len(history_during_call), 1)
+                self.assertEqual(history_during_call[0]["status"], "submitting")
+                return {"task_id": "task-1", "status": "running"}
+
+            with mock.patch.object(service, "call_tool", side_effect=submit) as call_tool:
+                record = service.submit_image(
+                    "pixel hero", "image-a", {"aspect_ratio": "1:1"}
+                )
+
+            call_tool.assert_called_once_with(
+                "generate_image",
+                {
+                    "model": "image-a",
+                    "prompt": "pixel hero",
+                    "params": {"aspect_ratio": "1:1"},
+                },
+            )
+            self.assertEqual(record["task_id"], "task-1")
+            self.assertEqual(record["status"], "running")
+            history = service.list_history()
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["id"], record["id"])
+
+    def test_submit_image_failure_marks_the_same_record_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.set_token("secret-token")
+
+            with mock.patch.object(
+                service,
+                "call_tool",
+                side_effect=OmniGenError("failed with secret-token"),
+            ):
+                with self.assertRaises(OmniGenError) as raised:
+                    service.submit_image("pixel hero", "image-a", {})
+
+            history = service.list_history()
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["status"], "failed")
+            self.assertEqual(history[0]["error"], "failed with [REDACTED]")
+            self.assertNotIn("secret-token", str(raised.exception))
+
+    def test_submit_image_validates_before_creating_history(self):
+        invalid_values = (
+            ("", "image-a", {}),
+            ("prompt", "", {}),
+            ("prompt", "image-a", []),
+        )
+        for prompt, model, params in invalid_values:
+            with self.subTest(prompt=prompt, model=model, params=params), tempfile.TemporaryDirectory() as directory:
+                service = OmniGenService(Path(directory))
+
+                with self.assertRaises(ValueError):
+                    service.submit_image(prompt, model, params)
+
+                self.assertEqual(service.list_history(), [])
+
+
+class ProfileAvatarTests(unittest.TestCase):
+    @staticmethod
+    def data_url(image_format="PNG", size=(512, 128), mode="RGBA"):
+        output = io.BytesIO()
+        Image.new(mode, size, (12, 34, 56, 128)).save(
+            output, format=image_format
+        )
+        mime = {
+            "PNG": "image/png",
+            "JPEG": "image/jpeg",
+            "WEBP": "image/webp",
+        }[image_format]
+        return f"data:{mime};base64,{base64.b64encode(output.getvalue()).decode('ascii')}"
+
+    def test_valid_avatar_is_resized_atomically_and_exposed_in_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+
+            profile = service.update_profile(
+                "Creator", avatar_data_url=self.data_url()
+            )
+
+            avatar_path = service.profile_dir / "avatar.png"
+            self.assertTrue(avatar_path.is_file())
+            with Image.open(avatar_path) as avatar:
+                self.assertEqual(avatar.format, "PNG")
+                self.assertEqual(avatar.size, (256, 64))
+                self.assertEqual(avatar.mode, "RGBA")
+            self.assertEqual(profile["avatar_url"], "/work/profile/avatar.png")
+            self.assertEqual(
+                service.public_profile()["avatar_url"],
+                "/work/profile/avatar.png",
+            )
+            self.assertEqual(list(service.profile_dir.glob(".*.tmp")), [])
+
+    def test_small_avatar_is_not_enlarged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+
+            service.update_profile(
+                "Creator", avatar_data_url=self.data_url(size=(32, 16))
+            )
+
+            with Image.open(service.profile_dir / "avatar.png") as avatar:
+                self.assertEqual(avatar.size, (32, 16))
+
+    def test_invalid_avatar_payloads_are_rejected_without_changing_profile(self):
+        invalid_payloads = {
+            "unsupported type": "data:image/gif;base64,R0lGODlh",
+            "malformed base64": "data:image/png;base64,not!base64",
+            "nonimage": (
+                "data:image/png;base64,"
+                + base64.b64encode(b"not an image").decode("ascii")
+            ),
+            "oversize": (
+                "data:image/png;base64,"
+                + base64.b64encode(b"x" * (5 * 1024 * 1024 + 1)).decode("ascii")
+            ),
+        }
+        for label, payload in invalid_payloads.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                service = OmniGenService(Path(directory))
+                original = service.update_profile("Original")
+
+                with self.assertRaises(ValueError):
+                    service.update_profile("Changed", avatar_data_url=payload)
+
+                self.assertEqual(service.public_profile(), original)
+                self.assertFalse((service.profile_dir / "avatar.png").exists())
+
+    def test_omitted_or_empty_avatar_preserves_existing_avatar(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service.update_profile("Creator", avatar_data_url=self.data_url())
+            original_bytes = (service.profile_dir / "avatar.png").read_bytes()
+
+            service.update_profile("Renamed")
+            profile = service.update_profile("Renamed again", avatar_data_url="")
+
+            self.assertEqual(
+                (service.profile_dir / "avatar.png").read_bytes(), original_bytes
+            )
+            self.assertEqual(profile["avatar_url"], "/work/profile/avatar.png")
+
+
+class ServerApiTests(unittest.TestCase):
+    def setUp(self):
+        self.service = mock.Mock()
+        self.service._token.return_value = "secret-token"
+        self.service.public_profile.return_value = {
+            "name": "Creator",
+            "avatar_url": "",
+            "mcp": {"configured": True},
+        }
+        self.service.list_image_models.return_value = [{"id": "image-a"}]
+        self.service.list_history.return_value = [{"id": "record-1"}]
+        self.service.refresh_task.return_value = {
+            "id": "record-1",
+            "status": "running",
+        }
+        self.service.update_profile.return_value = (
+            self.service.public_profile.return_value
+        )
+        self.service.set_token.return_value = self.service.public_profile.return_value
+        self.service.clear_token.return_value = (
+            self.service.public_profile.return_value
+        )
+        self.service.test_connection.return_value = (
+            self.service.public_profile.return_value
+        )
+        self.service.submit_image.return_value = {
+            "id": "record-1",
+            "status": "queued",
+        }
+        self.service.delete_records.return_value = {"deleted_ids": ["record-1"]}
+        self.patch = mock.patch.object(
+            server_module, "OMNIGEN_SERVICE", self.service, create=True
+        )
+        self.patch.start()
+        self.httpd = server_module.ThreadingHTTPServer(
+            ("127.0.0.1", 0), server_module.AppHandler
+        )
+        self.httpd.daemon_threads = True
+        self.httpd.block_on_close = False
+        self.thread = threading.Thread(
+            target=self.httpd.serve_forever,
+            kwargs={"poll_interval": 0.05},
+            daemon=True,
+        )
+        self.thread.start()
+
+    def tearDown(self):
+        shutdown_thread = threading.Thread(
+            target=self.httpd.shutdown, daemon=True
+        )
+        shutdown_thread.start()
+        shutdown_thread.join(timeout=2)
+        self.httpd.server_close()
+        self.thread.join(timeout=2)
+        self.patch.stop()
+        self.assertFalse(shutdown_thread.is_alive(), "HTTP shutdown timed out")
+        self.assertFalse(self.thread.is_alive(), "HTTP server thread did not exit")
+
+    def request(self, method, path, payload=None):
+        connection = http.client.HTTPConnection(
+            "127.0.0.1", self.httpd.server_address[1], timeout=2
+        )
+        body = None if payload is None else json.dumps(payload)
+        headers = {"Content-Type": "application/json"} if body is not None else {}
+        try:
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            raw = response.read()
+            content_type = response.getheader("Content-Type", "")
+        finally:
+            connection.close()
+        parsed = json.loads(raw) if content_type.startswith("application/json") else None
+        return response.status, parsed
+
+    def test_get_routes_expose_profile_models_history_and_task(self):
+        cases = (
+            (
+                "/api/local-profile",
+                "profile",
+                self.service.public_profile.return_value,
+            ),
+            (
+                "/api/omnigen/models",
+                "models",
+                self.service.list_image_models.return_value,
+            ),
+            (
+                "/api/omnigen/history",
+                "history",
+                self.service.list_history.return_value,
+            ),
+            (
+                "/api/omnigen/task?id=record-1",
+                "record",
+                self.service.refresh_task.return_value,
+            ),
+        )
+        for path, key, expected in cases:
+            with self.subTest(path=path):
+                status, payload = self.request("GET", path)
+                self.assertEqual(status, 200)
+                self.assertTrue(payload["ok"])
+                self.assertEqual(payload[key], expected)
+        self.service.refresh_task.assert_called_once_with("record-1")
+
+    def test_post_and_delete_routes_delegate_structured_payloads(self):
+        cases = (
+            (
+                "/api/local-profile",
+                {
+                    "name": "Renamed",
+                    "avatar_data_url": "data:image/png;base64,AA==",
+                },
+                "profile",
+            ),
+            ("/api/omnigen/token", {"token": "new-token"}, "profile"),
+            ("/api/omnigen/test", {}, "profile"),
+            (
+                "/api/omnigen/generate",
+                {
+                    "prompt": "hero",
+                    "model": "image-a",
+                    "params": {"seed": 7},
+                },
+                "record",
+            ),
+            (
+                "/api/omnigen/history/delete",
+                {"ids": ["record-1"], "delete_files": True},
+                "result",
+            ),
+        )
+        for path, request_payload, response_key in cases:
+            with self.subTest(path=path):
+                status, response_payload = self.request(
+                    "POST", path, request_payload
+                )
+                self.assertEqual(status, 200)
+                self.assertTrue(response_payload["ok"])
+                self.assertIn(response_key, response_payload)
+
+        self.service.update_profile.assert_called_once_with(
+            "Renamed", avatar_data_url="data:image/png;base64,AA=="
+        )
+        self.service.set_token.assert_called_once_with("new-token")
+        self.service.test_connection.assert_called_once_with()
+        self.service.submit_image.assert_called_once_with(
+            "hero", "image-a", {"seed": 7}
+        )
+        self.service.delete_records.assert_called_once_with(
+            ["record-1"], delete_files=True
+        )
+
+        status, payload = self.request("DELETE", "/api/omnigen/token")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["profile"], self.service.clear_token.return_value)
+        self.service.clear_token.assert_called_once_with()
+
+    def test_refresh_history_continues_after_safe_per_record_errors(self):
+        records = [
+            {"id": "submitting", "status": "submitting"},
+            {"id": "queued", "status": "queued"},
+            {"id": "running", "status": "running"},
+            {"id": "done", "status": "succeeded"},
+        ]
+        updated = [
+            {"id": "submitting", "status": "submitting"},
+            {"id": "queued", "status": "failed"},
+            {"id": "running", "status": "succeeded"},
+            {"id": "done", "status": "succeeded"},
+        ]
+        self.service.list_history.side_effect = [records, updated]
+
+        def refresh(record_id):
+            if record_id == "queued":
+                raise OmniGenError("failed secret-token")
+            return {"id": record_id}
+
+        self.service.refresh_task.side_effect = refresh
+
+        status, payload = self.request(
+            "POST", "/api/omnigen/history/refresh", {}
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["history"], updated)
+        self.assertEqual(
+            payload["errors"],
+            [{"id": "queued", "error": "failed [REDACTED]"}],
+        )
+        self.assertEqual(
+            [call.args[0] for call in self.service.refresh_task.call_args_list],
+            ["submitting", "queued", "running"],
+        )
+        self.assertNotIn("secret-token", json.dumps(payload))
+
+    def test_removed_and_unknown_routes_remain_404_and_errors_are_redacted(self):
+        status, _payload = self.request("POST", "/api/one-click-login", {})
+        self.assertEqual(status, 404)
+
+        self.service.test_connection.side_effect = OmniGenError(
+            "token secret-token rejected"
+        )
+        status, payload = self.request("POST", "/api/omnigen/test", {})
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "token [REDACTED] rejected")
 
 
 class HistoryStoreTests(unittest.TestCase):

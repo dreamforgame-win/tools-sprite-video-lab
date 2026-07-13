@@ -1,5 +1,8 @@
+import base64
+import binascii
 import copy
 import http.client
+import io
 import json
 import os
 import tempfile
@@ -22,6 +25,9 @@ DEFAULT_PROFILE_NAME = "游客"
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled"}
 MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_AVATAR_BYTES = 5 * 1024 * 1024
+AVATAR_SIZE = (256, 256)
+AVATAR_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
 FILE_TRANSACTION_LOCK_TIMEOUT_SECONDS = 5.0
 IMAGE_EXTENSIONS = {
     "PNG": ".png",
@@ -1063,6 +1069,7 @@ class OmniGenService:
                 model_count = 0
             return {
                 "name": name,
+                "avatar_url": str(profile.get("avatar_url") or ""),
                 "mcp": {
                     "configured": bool(token),
                     "validated": bool(omnigen.get("validated", False)),
@@ -1075,16 +1082,224 @@ class OmniGenService:
                 },
             }
 
-    def update_profile(self, name: str) -> dict:
+    def _save_avatar(self, avatar_data_url: str) -> str:
+        header, separator, encoded = str(avatar_data_url or "").partition(",")
+        if separator != "," or not header.startswith("data:"):
+            raise ValueError("Avatar must be a valid image data URL")
+        metadata = header[5:].split(";")
+        mime_type = metadata[0].strip().lower()
+        if mime_type not in AVATAR_MIME_TYPES or "base64" not in {
+            item.strip().lower() for item in metadata[1:]
+        }:
+            raise ValueError("Avatar must be a base64 PNG, JPEG, or WebP image")
+        try:
+            avatar_bytes = base64.b64decode(encoded, validate=True)
+        except (binascii.Error, ValueError):
+            raise ValueError("Avatar contains malformed base64 data") from None
+        if len(avatar_bytes) > MAX_AVATAR_BYTES:
+            raise ValueError("Avatar exceeds the 5 MB limit")
+
+        try:
+            with Image.open(io.BytesIO(avatar_bytes)) as image:
+                image.verify()
+            with Image.open(io.BytesIO(avatar_bytes)) as image:
+                image.load()
+                converted = image.convert(
+                    "RGBA" if "A" in image.getbands() else "RGB"
+                )
+        except (
+            UnidentifiedImageError,
+            Image.DecompressionBombError,
+            OSError,
+            SyntaxError,
+            ValueError,
+        ):
+            raise ValueError("Avatar is not a valid image") from None
+
+        converted.thumbnail(AVATAR_SIZE, Image.Resampling.LANCZOS)
+        avatar_path = self.profile_dir / "avatar.png"
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=self.profile_dir,
+                prefix=".avatar.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                converted.save(handle, format="PNG")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, avatar_path)
+            temporary_path = None
+        except OSError as exc:
+            raise ValueError(f"Unable to save avatar: {exc}") from None
+        finally:
+            converted.close()
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        return "/work/profile/avatar.png"
+
+    def update_profile(
+        self, name: str, avatar_data_url: str | None = None
+    ) -> dict:
         with self._lock:
             settings = self._read_settings()
             profile = settings.get("profile")
             if not isinstance(profile, dict):
                 profile = {}
+            if str(avatar_data_url or "").strip():
+                profile["avatar_url"] = self._save_avatar(avatar_data_url)
             profile["name"] = str(name or "").strip() or DEFAULT_PROFILE_NAME
             settings["profile"] = profile
             self._write_settings(settings)
             return self.public_profile()
+
+    @staticmethod
+    def _model_array(payload: dict) -> list:
+        if not isinstance(payload, dict):
+            return []
+        for key in ("models", "items", "data"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                nested = OmniGenService._model_array(value)
+                if nested:
+                    return nested
+        return []
+
+    @staticmethod
+    def _normalize_image_models(payload: dict) -> list[dict]:
+        normalized = []
+        for model in OmniGenService._model_array(payload):
+            if not isinstance(model, dict):
+                continue
+            raw_modality = model.get("modality")
+            if raw_modality:
+                modalities = (
+                    [str(item).strip().lower() for item in raw_modality]
+                    if isinstance(raw_modality, (list, tuple, set))
+                    else [str(raw_modality).strip().lower()]
+                )
+                if "image" not in modalities:
+                    continue
+                modality = "image"
+            else:
+                modality = "image"
+            model_id = str(
+                model.get("id")
+                or model.get("model_id")
+                or model.get("model")
+                or model.get("name")
+                or ""
+            ).strip()
+            if not model_id:
+                continue
+            capabilities = model.get("capabilities")
+            if not isinstance(capabilities, dict):
+                capabilities = {}
+
+            def first_value(*keys):
+                for source in (model, capabilities):
+                    for key in keys:
+                        if key in source:
+                            return copy.deepcopy(source[key])
+                return []
+
+            normalized.append(
+                {
+                    "id": model_id,
+                    "display_name": str(
+                        model.get("display_name")
+                        or model.get("displayName")
+                        or model.get("name")
+                        or model_id
+                    ),
+                    "modality": modality,
+                    "pricing": copy.deepcopy(model.get("pricing") or {}),
+                    "capabilities": copy.deepcopy(capabilities),
+                    "supported_aspect_ratios": first_value(
+                        "supported_aspect_ratios", "aspect_ratios", "aspectRatios"
+                    ),
+                    "supported_resolutions": first_value(
+                        "supported_resolutions", "resolutions", "sizes"
+                    ),
+                }
+            )
+        return normalized
+
+    def list_image_models(self) -> list[dict]:
+        payload = self.call_tool(
+            "list_generation_models", {"modality": "image"}
+        )
+        return self._normalize_image_models(payload)
+
+    def test_connection(self) -> dict:
+        try:
+            models = self.list_image_models()
+        except OmniGenError as exc:
+            safe_error = redact_secret(exc, self._token())
+            with self._lock:
+                settings = self._read_settings()
+                omnigen = settings.get("omnigen")
+                if not isinstance(omnigen, dict):
+                    omnigen = {}
+                omnigen["validated"] = False
+                omnigen["model_count"] = 0
+                omnigen["last_error"] = safe_error
+                settings["omnigen"] = omnigen
+                self._write_settings(settings)
+            raise OmniGenError(safe_error) from None
+
+        with self._lock:
+            settings = self._read_settings()
+            omnigen = settings.get("omnigen")
+            if not isinstance(omnigen, dict):
+                omnigen = {}
+            omnigen["validated"] = True
+            omnigen["model_count"] = len(models)
+            omnigen["last_error"] = None
+            settings["omnigen"] = omnigen
+            self._write_settings(settings)
+        return self.public_profile()
+
+    def submit_image(self, prompt: str, model: str, params: dict) -> dict:
+        prompt = str(prompt or "").strip()
+        model = str(model or "").strip()
+        if not prompt:
+            raise ValueError("Image prompt is required")
+        if not model:
+            raise ValueError("Image model is required")
+        if not isinstance(params, dict):
+            raise ValueError("Image params must be an object")
+
+        record = self.create_record(prompt, model, params)
+        try:
+            payload = self.call_tool(
+                "generate_image",
+                {"model": model, "prompt": prompt, "params": params},
+            )
+            task = payload.get("task") if isinstance(payload, dict) else None
+            if not isinstance(task, dict):
+                task = payload if isinstance(payload, dict) else {}
+            task_id = str(task.get("task_id") or task.get("id") or "").strip()
+            if not task_id:
+                raise OmniGenError("OmniGen returned no generation task ID")
+            status = self._normalize_task_status(
+                task.get("status") or task.get("state") or "queued"
+            )
+            status = "running" if status == "running" else "queued"
+            return self.update_record(
+                record["id"], task_id=task_id, status=status, error=""
+            )
+        except OmniGenError as exc:
+            safe_error = redact_secret(exc, self._token())
+            self.update_record(
+                record["id"], status="failed", error=safe_error
+            )
+            raise OmniGenError(safe_error) from None
 
     def set_token(self, token: str) -> dict:
         with self._lock:
