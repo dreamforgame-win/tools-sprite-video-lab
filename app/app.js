@@ -5,7 +5,25 @@ const DEFAULT_IMAGE_NAMING_SIZE_PRESETS = [
 ];
 
 const state = {
-  auth: null,
+  localProfile: {
+    name: "游客",
+    avatar_url: "",
+    mcp: { configured: false, validated: false, model_count: 0, last_error: "" },
+  },
+  localProfileAvatarDataUrl: "",
+  aiCreation: {
+    view: "image",
+    loaded: false,
+    loading: false,
+    models: [],
+    history: [],
+    selectedModel: "",
+    selectedIds: new Set(),
+    pollingIds: new Set(),
+    pollTimers: new Map(),
+    filters: { media: "all", status: "all", query: "" },
+    deleteIds: [],
+  },
   activeModule: "video",
   activeImagePage: "full",
   activeImageTool: "import",
@@ -187,7 +205,6 @@ const state = {
 
 const els = {};
 const STORAGE_KEY = "sprite-video-lab-session-v2";
-const AUTH_STORAGE_KEY = "sprite-video-lab-auth-v1";
 const RUNTIME_MODEL_PROMPT_KEY = "sprite-forge-lab-runtime-model-prompt-v1";
 const PRODUCT_TITLE = "\u7075\u5E27\u5DE5\u574A";
 const PRODUCT_SUBTITLE = "Sprite Forge Lab";
@@ -303,8 +320,8 @@ document.addEventListener("DOMContentLoaded", () => {
   setActiveImageTool(state.activeImageTool, { announce: false });
   renderImageWorkflow();
   mergeSegmentRangeControls();
-  restoreAuthFromStorage();
-  updateAuthUI();
+  renderLocalProfile();
+  void loadLocalProfile();
   updatePreviewBackground(state.preview.background, false);
   updateExtractPreviewBackground(state.extractPreview.background, false);
   updateProcessPreviewBackground(state.processPreviewBackground.mode, state.processPreviewBackground.color, false, "video");
@@ -349,12 +366,43 @@ function bindElements() {
     "appTitle",
     "moduleVideoButton",
     "moduleVideoProcessButton",
+    "moduleAiCreationButton",
     "moduleImageButton",
     "moduleResourceButton",
     "moduleModelButton",
     "sourceStrip",
     "videoModule",
     "videoProcessModule",
+    "aiCreationModule",
+    "aiImageViewButton",
+    "aiHistoryViewButton",
+    "aiCreatePanel",
+    "aiConnectionBadge",
+    "aiTokenNotice",
+    "aiOpenProfileButton",
+    "aiPromptInput",
+    "aiModelSelect",
+    "aiAspectRatioSelect",
+    "aiResolutionSelect",
+    "aiModelMeta",
+    "aiGenerateButton",
+    "aiImageWorkspace",
+    "aiHistoryWorkspace",
+    "aiResultSummary",
+    "aiResultGrid",
+    "aiRefreshHistoryButton",
+    "aiHistoryMediaFilter",
+    "aiHistoryStatusFilter",
+    "aiHistorySearchInput",
+    "aiHistorySelectVisibleButton",
+    "aiHistoryClearSelectionButton",
+    "aiHistoryGrid",
+    "aiHistorySelectionBar",
+    "aiHistorySelectionCount",
+    "aiHistoryAddToImageButton",
+    "aiHistoryDeleteButton",
+    "aiTaskCount",
+    "aiTaskList",
     "videoProcessImportToolButton",
     "videoProcessPreviewToolButton",
     "videoProcessCompressToolButton",
@@ -542,10 +590,36 @@ function bindElements() {
     "saveOutputPathButton",
     "uploadDropzone",
     "uploadInput",
-    "accountPanel",
+    "localProfileButton",
     "accountName",
-    "loginButton",
-    "logoutButton",
+    "localProfileAvatar",
+    "localProfileAvatarFallback",
+    "localProfileMcpStatus",
+    "localProfileDialog",
+    "localProfileCloseButton",
+    "localProfileAvatarPreview",
+    "localProfileAvatarPreviewFallback",
+    "localProfileAvatarInput",
+    "localProfileNameInput",
+    "localProfileTokenInput",
+    "localProfileConnectionStatus",
+    "localProfileClearTokenButton",
+    "localProfileTestButton",
+    "localProfileSaveButton",
+    "aiPreviewDialog",
+    "aiPreviewDialogTitle",
+    "aiPreviewCloseButton",
+    "aiPreviewImage",
+    "aiPreviewCaption",
+    "aiDeleteDialog",
+    "aiDeleteCloseButton",
+    "aiDeleteSummary",
+    "aiDeleteInitialActions",
+    "aiDeleteRecordOnlyButton",
+    "aiDeleteWithFilesButton",
+    "aiDeleteConfirmFiles",
+    "aiDeleteBackButton",
+    "aiDeleteConfirmFilesButton",
     "videoName",
     "videoSize",
     "videoFps",
@@ -1143,16 +1217,20 @@ function setProcessPreview(preview, scope = activeMatteScope()) {
 }
 
 function setActiveModule(moduleName, { announce = true } = {}) {
-  const nextModule = moduleName === "image" ? "image" : moduleName === "videoProcess" ? "videoProcess" : moduleName === "resource" ? "resource" : moduleName === "model" ? "model" : "video";
+  const nextModule = ["video", "videoProcess", "aiCreation", "image", "resource", "model"].includes(moduleName) ? moduleName : "video";
   state.activeModule = nextModule;
   const isImage = nextModule === "image";
   const isVideoProcess = nextModule === "videoProcess";
+  const isAiCreation = nextModule === "aiCreation";
   const isResource = nextModule === "resource";
   const isModel = nextModule === "model";
-  const isFixedWorkbench = nextModule === "video" || isVideoProcess || isImage;
-  els.videoModule.hidden = isImage || isVideoProcess || isResource || isModel;
+  const isFixedWorkbench = nextModule === "video" || isVideoProcess || isAiCreation || isImage;
+  els.videoModule.hidden = nextModule !== "video";
   if (els.videoProcessModule) {
     els.videoProcessModule.hidden = !isVideoProcess;
+  }
+  if (els.aiCreationModule) {
+    els.aiCreationModule.hidden = !isAiCreation;
   }
   els.imageModule.hidden = !isImage;
   if (els.resourceModule) {
@@ -1163,11 +1241,13 @@ function setActiveModule(moduleName, { announce = true } = {}) {
   }
   els.moduleVideoButton.classList.toggle("active", nextModule === "video");
   els.moduleVideoProcessButton?.classList.toggle("active", isVideoProcess);
+  els.moduleAiCreationButton?.classList.toggle("active", isAiCreation);
   els.moduleImageButton.classList.toggle("active", isImage);
   els.moduleResourceButton?.classList.toggle("active", isResource);
   els.moduleModelButton?.classList.toggle("active", isModel);
   els.moduleVideoButton.setAttribute("aria-pressed", String(nextModule === "video"));
   els.moduleVideoProcessButton?.setAttribute("aria-pressed", String(isVideoProcess));
+  els.moduleAiCreationButton?.setAttribute("aria-pressed", String(isAiCreation));
   els.moduleImageButton.setAttribute("aria-pressed", String(isImage));
   els.moduleResourceButton?.setAttribute("aria-pressed", String(isResource));
   els.moduleModelButton?.setAttribute("aria-pressed", String(isModel));
@@ -1176,17 +1256,20 @@ function setActiveModule(moduleName, { announce = true } = {}) {
   document.documentElement.classList.toggle("resource-scroll-locked", isResource || isModel);
   document.body.classList.toggle("resource-scroll-locked", isResource || isModel);
   els.appEyebrow.textContent = PRODUCT_SUBTITLE;
-  els.appTitle.textContent = isResource ? "\u8D44\u6E90\u7BA1\u7406" : isModel ? "\u6A21\u578B\u7BA1\u7406" : PRODUCT_TITLE;
-  document.title = isResource ? `\u8D44\u6E90\u7BA1\u7406 - ${PRODUCT_TITLE}` : isModel ? `\u6A21\u578B\u7BA1\u7406 - ${PRODUCT_TITLE}` : PRODUCT_TITLE;
+  els.appTitle.textContent = isAiCreation ? "AI 创作" : isResource ? "\u8D44\u6E90\u7BA1\u7406" : isModel ? "\u6A21\u578B\u7BA1\u7406" : PRODUCT_TITLE;
+  document.title = isAiCreation ? `AI 创作 - ${PRODUCT_TITLE}` : isResource ? `\u8D44\u6E90\u7BA1\u7406 - ${PRODUCT_TITLE}` : isModel ? `\u6A21\u578B\u7BA1\u7406 - ${PRODUCT_TITLE}` : PRODUCT_TITLE;
   if (isFixedWorkbench || isResource || isModel) {
     window.scrollTo({ top: 0, behavior: "auto" });
   }
   if (announce) {
-    setStatus(isModel ? "\u5DF2\u5207\u6362\u5230\u6A21\u578B\u7BA1\u7406\u3002" : isResource ? "\u5DF2\u5207\u6362\u5230\u8D44\u6E90\u7BA1\u7406\u3002" : isImage ? "\u5DF2\u5207\u6362\u5230\u56FE\u7247\u5904\u7406\u5165\u53E3\u3002" : isVideoProcess ? "\u5DF2\u5207\u6362\u5230\u89C6\u9891\u5904\u7406\u3002" : "\u5DF2\u5207\u6362\u5230\u89C6\u9891\u8F6C\u5E8F\u5217\u5E27\u3002", "success");
+    setStatus(isAiCreation ? "已切换到 AI 创作。" : isModel ? "\u5DF2\u5207\u6362\u5230\u6A21\u578B\u7BA1\u7406\u3002" : isResource ? "\u5DF2\u5207\u6362\u5230\u8D44\u6E90\u7BA1\u7406\u3002" : isImage ? "\u5DF2\u5207\u6362\u5230\u56FE\u7247\u5904\u7406\u5165\u53E3\u3002" : isVideoProcess ? "\u5DF2\u5207\u6362\u5230\u89C6\u9891\u5904\u7406\u3002" : "\u5DF2\u5207\u6362\u5230\u89C6\u9891\u8F6C\u5E8F\u5217\u5E27\u3002", "success");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
   if (isImage) {
     void refreshImagePasteButtonAvailability();
+  }
+  if (isAiCreation) {
+    void ensureAiCreationLoaded();
   }
   renderVideoProcessModule();
   renderResourceManager();
@@ -3402,6 +3485,7 @@ function setMagicResizeMode(mode, { clearExisting = true } = {}) {
 function bindEvents() {
   els.moduleVideoButton.addEventListener("click", () => setActiveModule("video"));
   els.moduleVideoProcessButton?.addEventListener("click", () => setActiveModule("videoProcess"));
+  els.moduleAiCreationButton?.addEventListener("click", () => setActiveModule("aiCreation"));
   els.moduleImageButton.addEventListener("click", () => setActiveModule("image"));
   els.moduleResourceButton?.addEventListener("click", () => setActiveModule("resource"));
   els.moduleModelButton?.addEventListener("click", () => setActiveModule("model"));
@@ -4084,6 +4168,18 @@ function bindEvents() {
       cancelImageNamingFormatBrush();
       return;
     }
+    if (!els.localProfileDialog?.hidden) {
+      closeLocalProfileDialog();
+      return;
+    }
+    if (!els.aiPreviewDialog?.hidden) {
+      closeAiPreviewDialog();
+      return;
+    }
+    if (!els.aiDeleteDialog?.hidden) {
+      closeAiDeleteDialog();
+      return;
+    }
     if (!els.resourceProjectEditDialog?.hidden) {
       closeResourceProjectEditDialog();
       return;
@@ -4104,8 +4200,37 @@ function bindEvents() {
   els.imageExportResultButton?.addEventListener("click", () => void exportImageMatteResult());
   els.imageExportToResourceButton?.addEventListener("click", () => openResourceExportProjectDialog("matte"));
   els.imageStartSplitButton?.addEventListener("click", startImageSplitFlow);
-  els.loginButton?.addEventListener("click", handleOneClickLogin);
-  els.logoutButton?.addEventListener("click", handleLogout);
+  els.localProfileButton?.addEventListener("click", openLocalProfileDialog);
+  els.aiOpenProfileButton?.addEventListener("click", openLocalProfileDialog);
+  els.localProfileCloseButton?.addEventListener("click", closeLocalProfileDialog);
+  els.localProfileSaveButton?.addEventListener("click", () => void saveLocalProfile());
+  els.localProfileTestButton?.addEventListener("click", () => void testOmniGenConnection());
+  els.localProfileClearTokenButton?.addEventListener("click", () => void clearOmniGenToken());
+  els.localProfileAvatarInput?.addEventListener("change", handleLocalProfileAvatarChange);
+  els.aiImageViewButton?.addEventListener("click", () => setAiCreationView("image"));
+  els.aiHistoryViewButton?.addEventListener("click", () => setAiCreationView("history"));
+  els.aiModelSelect?.addEventListener("change", () => {
+    state.aiCreation.selectedModel = els.aiModelSelect.value;
+    renderOmniGenCapabilityControls();
+  });
+  els.aiPromptInput?.addEventListener("input", updateAiGenerateAvailability);
+  els.aiGenerateButton?.addEventListener("click", () => void submitAiImageGeneration());
+  els.aiRefreshHistoryButton?.addEventListener("click", () => void loadAiHistory({ refreshRemote: true }));
+  els.aiHistoryMediaFilter?.addEventListener("change", syncAiHistoryFilters);
+  els.aiHistoryStatusFilter?.addEventListener("change", syncAiHistoryFilters);
+  els.aiHistorySearchInput?.addEventListener("input", syncAiHistoryFilters);
+  els.aiHistorySelectVisibleButton?.addEventListener("click", selectVisibleAiHistory);
+  els.aiHistoryClearSelectionButton?.addEventListener("click", clearAiHistorySelection);
+  els.aiHistoryAddToImageButton?.addEventListener("click", () => void addSelectedAiRecordsToImageProcessing());
+  els.aiHistoryDeleteButton?.addEventListener("click", () => openAiDeleteDialog(Array.from(state.aiCreation.selectedIds)));
+  els.aiResultGrid?.addEventListener("click", handleAiCardAction);
+  els.aiHistoryGrid?.addEventListener("click", handleAiCardAction);
+  els.aiPreviewCloseButton?.addEventListener("click", closeAiPreviewDialog);
+  els.aiDeleteCloseButton?.addEventListener("click", closeAiDeleteDialog);
+  els.aiDeleteRecordOnlyButton?.addEventListener("click", () => void deleteAiHistoryRecords(false));
+  els.aiDeleteWithFilesButton?.addEventListener("click", showAiDeleteFileConfirmation);
+  els.aiDeleteBackButton?.addEventListener("click", hideAiDeleteFileConfirmation);
+  els.aiDeleteConfirmFilesButton?.addEventListener("click", () => void deleteAiHistoryRecords(true));
   els.importPathButton.addEventListener("click", importFromPath);
   els.saveOutputPathButton?.addEventListener("click", selectOutputPath);
   els.uploadInput.addEventListener("change", handleUploadInputChange);
@@ -14950,50 +15075,637 @@ function syncManualColorLabel(scope = activeMatteScope()) {
   controls.manualKeyLabel.textContent = (controls.manualKeyInput.value || "#00ff00").toUpperCase();
 }
 
-function restoreAuthFromStorage() {
-  try {
-    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-    state.auth = raw ? JSON.parse(raw) : null;
-  } catch (error) {
-    console.warn("restoreAuthFromStorage failed", error);
-    state.auth = null;
-  }
+function profileInitial(name = state.localProfile?.name) {
+  return Array.from(String(name || "游客").trim() || "游客")[0] || "游";
 }
 
-function persistAuth() {
+function renderLocalProfile() {
+  const profile = state.localProfile || {};
+  const name = String(profile.name || "游客");
+  const avatarUrl = String(profile.avatar_url || "");
+  const mcp = profile.mcp || {};
+  els.accountName.textContent = name;
+  els.localProfileAvatarFallback.textContent = profileInitial(name);
+  if (avatarUrl) {
+    els.localProfileAvatar.src = `${avatarUrl}?ts=${Date.now()}`;
+    els.localProfileAvatar.hidden = false;
+    els.localProfileAvatarFallback.hidden = true;
+  } else {
+    els.localProfileAvatar.removeAttribute("src");
+    els.localProfileAvatar.hidden = true;
+    els.localProfileAvatarFallback.hidden = false;
+  }
+  els.localProfileMcpStatus.textContent = mcp.validated
+    ? `MCP 可用 · ${Number(mcp.model_count || 0)} 模型`
+    : mcp.configured
+      ? "MCP 待验证"
+      : "MCP 未配置";
+  els.localProfileMcpStatus.classList.toggle("ready", Boolean(mcp.validated));
+  renderAiConnectionState();
+}
+
+async function loadLocalProfile() {
   try {
-    if (state.auth) {
-      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(state.auth));
-    } else {
-      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    window.localStorage.removeItem("sprite-video-lab-auth-v1");
+    const data = await apiJson(`/api/local-profile?ts=${Date.now()}`);
+    state.localProfile = data.profile || state.localProfile;
+    renderLocalProfile();
+    if (state.activeModule === "aiCreation" && state.localProfile.mcp?.configured) {
+      await ensureAiCreationLoaded({ force: true });
     }
   } catch (error) {
-    console.warn("persistAuth failed", error);
+    setStatus(`读取本地资料失败：${error.message}`, "error");
   }
 }
 
-function updateAuthUI() {
-  const loggedIn = Boolean(state.auth);
-  els.accountName.textContent = loggedIn ? state.auth.display_name || "本地创作者" : "未登录";
-  els.loginButton.hidden = loggedIn;
-  els.logoutButton.hidden = !loggedIn;
+function openLocalProfileDialog() {
+  const profile = state.localProfile || {};
+  els.localProfileNameInput.value = profile.name || "游客";
+  els.localProfileTokenInput.value = "";
+  state.localProfileAvatarDataUrl = "";
+  const avatarUrl = String(profile.avatar_url || "");
+  if (avatarUrl) {
+    els.localProfileAvatarPreview.src = `${avatarUrl}?ts=${Date.now()}`;
+    els.localProfileAvatarPreview.hidden = false;
+    els.localProfileAvatarPreviewFallback.hidden = true;
+  } else {
+    els.localProfileAvatarPreview.removeAttribute("src");
+    els.localProfileAvatarPreview.hidden = true;
+    els.localProfileAvatarPreviewFallback.hidden = false;
+    els.localProfileAvatarPreviewFallback.textContent = profileInitial(profile.name);
+  }
+  const mcp = profile.mcp || {};
+  els.localProfileConnectionStatus.textContent = mcp.validated
+    ? `连接正常，可用图片模型 ${Number(mcp.model_count || 0)} 个`
+    : mcp.last_error || (mcp.configured ? "Token 已配置，尚未验证" : "尚未配置 Token");
+  els.localProfileClearTokenButton.disabled = !mcp.configured;
+  els.localProfileDialog.hidden = false;
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => els.localProfileNameInput.focus(), 0);
 }
 
-async function handleOneClickLogin() {
-  await withBusy(els.loginButton, async () => {
-    const data = await apiJson("/api/one-click-login", { method: "POST" });
-    state.auth = data.auth;
-    persistAuth();
-    updateAuthUI();
-    setStatus("已登录：" + (state.auth.display_name || "本地创作者"), "success");
+function closeLocalProfileDialog() {
+  els.localProfileDialog.hidden = true;
+  els.localProfileTokenInput.value = "";
+  els.localProfileAvatarInput.value = "";
+  state.localProfileAvatarDataUrl = "";
+  document.body.classList.remove("modal-open");
+}
+
+function handleLocalProfileAvatarChange() {
+  const file = els.localProfileAvatarInput.files?.[0];
+  if (!file) {
+    state.localProfileAvatarDataUrl = "";
+    return;
+  }
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    els.localProfileAvatarInput.value = "";
+    setStatus("头像仅支持 5 MB 内的 PNG、JPEG 或 WebP。", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.localProfileAvatarDataUrl = String(reader.result || "");
+    els.localProfileAvatarPreview.src = state.localProfileAvatarDataUrl;
+    els.localProfileAvatarPreview.hidden = false;
+    els.localProfileAvatarPreviewFallback.hidden = true;
+  };
+  reader.onerror = () => setStatus("头像读取失败。", "error");
+  reader.readAsDataURL(file);
+}
+
+async function saveLocalProfile() {
+  await withBusy(els.localProfileSaveButton, async () => {
+    try {
+      const profileData = await apiJson("/api/local-profile", {
+        method: "POST",
+        body: {
+          name: els.localProfileNameInput.value.trim() || "游客",
+          avatar_data_url: state.localProfileAvatarDataUrl || "",
+        },
+      });
+      state.localProfile = profileData.profile || state.localProfile;
+      const token = els.localProfileTokenInput.value.trim();
+      if (token) {
+        const tokenData = await apiJson("/api/omnigen/token", { method: "POST", body: { token } });
+        state.localProfile = tokenData.profile || state.localProfile;
+      }
+      renderLocalProfile();
+      closeLocalProfileDialog();
+      setStatus("本地资料已保存。", "success");
+      if (state.activeModule === "aiCreation") {
+        await ensureAiCreationLoaded({ force: true });
+      }
+    } catch (error) {
+      setStatus(`保存本地资料失败：${error.message}`, "error");
+    }
   });
 }
 
-function handleLogout() {
-  state.auth = null;
-  persistAuth();
-  updateAuthUI();
-  setStatus("Logged out.");
+async function testOmniGenConnection() {
+  await withBusy(els.localProfileTestButton, async () => {
+    try {
+      const token = els.localProfileTokenInput.value.trim();
+      if (token) {
+        const tokenData = await apiJson("/api/omnigen/token", { method: "POST", body: { token } });
+        state.localProfile = tokenData.profile || state.localProfile;
+        els.localProfileTokenInput.value = "";
+      }
+      els.localProfileConnectionStatus.textContent = "正在连接 OmniGen MCP...";
+      const data = await apiJson("/api/omnigen/test", { method: "POST" });
+      state.localProfile = data.profile || state.localProfile;
+      renderLocalProfile();
+      els.localProfileConnectionStatus.textContent = `连接正常，可用图片模型 ${Number(state.localProfile.mcp?.model_count || 0)} 个`;
+      els.localProfileClearTokenButton.disabled = false;
+      setStatus("OmniGen MCP 连接正常。", "success");
+      state.aiCreation.loaded = false;
+      if (state.activeModule === "aiCreation") {
+        await ensureAiCreationLoaded({ force: true });
+      }
+    } catch (error) {
+      await loadLocalProfile();
+      els.localProfileConnectionStatus.textContent = state.localProfile.mcp?.last_error || error.message;
+      setStatus(`OmniGen MCP 连接失败：${error.message}`, "error");
+    }
+  });
+}
+
+async function clearOmniGenToken() {
+  if (!window.confirm("清除本机保存的 OmniGen MCP Token？")) {
+    return;
+  }
+  await withBusy(els.localProfileClearTokenButton, async () => {
+    try {
+      const data = await apiJson("/api/omnigen/token", { method: "DELETE" });
+      state.localProfile = data.profile || state.localProfile;
+      state.aiCreation.models = [];
+      state.aiCreation.loaded = false;
+      renderLocalProfile();
+      els.localProfileConnectionStatus.textContent = "Token 已清除";
+      els.localProfileClearTokenButton.disabled = true;
+      setStatus("OmniGen MCP Token 已从本机清除。", "success");
+    } catch (error) {
+      setStatus(`清除 Token 失败：${error.message}`, "error");
+    }
+  });
+}
+
+function renderAiConnectionState() {
+  if (!els.aiConnectionBadge) {
+    return;
+  }
+  const mcp = state.localProfile?.mcp || {};
+  els.aiConnectionBadge.className = `ai-state-chip ${mcp.validated ? "ready" : "warning"}`;
+  els.aiConnectionBadge.textContent = mcp.validated ? "MCP 可用" : mcp.configured ? "待验证" : "未配置";
+  els.aiTokenNotice.hidden = Boolean(mcp.validated);
+  const noticeText = els.aiTokenNotice.querySelector("span");
+  if (noticeText) {
+    noticeText.textContent = mcp.configured
+      ? "请先在本地资料中测试 OmniGen MCP 连接。"
+      : "配置 OmniGen MCP Token 后可开始生成。";
+  }
+  updateAiGenerateAvailability();
+}
+
+async function ensureAiCreationLoaded({ force = false } = {}) {
+  if (state.aiCreation.loading || (state.aiCreation.loaded && !force)) {
+    renderAiCreation();
+    return;
+  }
+  state.aiCreation.loading = true;
+  renderAiCreation();
+  try {
+    await loadAiHistory();
+    if (state.localProfile?.mcp?.configured) {
+      await loadOmniGenModels();
+    }
+    state.aiCreation.loaded = true;
+  } finally {
+    state.aiCreation.loading = false;
+    renderAiCreation();
+  }
+}
+
+function setAiCreationView(view) {
+  state.aiCreation.view = view === "history" ? "history" : "image";
+  renderAiCreation();
+}
+
+function renderAiCreation() {
+  if (!els.aiCreationModule) {
+    return;
+  }
+  const isHistory = state.aiCreation.view === "history";
+  els.aiImageViewButton.classList.toggle("active", !isHistory);
+  els.aiImageViewButton.setAttribute("aria-pressed", String(!isHistory));
+  els.aiHistoryViewButton.classList.toggle("active", isHistory);
+  els.aiHistoryViewButton.setAttribute("aria-pressed", String(isHistory));
+  els.aiCreatePanel.hidden = isHistory;
+  els.aiImageWorkspace.hidden = isHistory;
+  els.aiHistoryWorkspace.hidden = !isHistory;
+  els.aiCreationModule.classList.toggle("history-active", isHistory);
+  renderAiConnectionState();
+  renderAiResultGrid();
+  renderAiTaskQueue();
+  renderAiHistory();
+}
+
+async function loadOmniGenModels() {
+  try {
+    const data = await apiJson(`/api/omnigen/models?ts=${Date.now()}`);
+    state.aiCreation.models = Array.isArray(data.models) ? data.models : [];
+    const existing = state.aiCreation.models.some((model) => model.id === state.aiCreation.selectedModel);
+    if (!existing) {
+      state.aiCreation.selectedModel = state.aiCreation.models.find((model) => /low/i.test(model.id))?.id || state.aiCreation.models[0]?.id || "";
+    }
+    renderOmniGenModelOptions();
+  } catch (error) {
+    state.aiCreation.models = [];
+    renderOmniGenModelOptions();
+    setStatus(`读取图片模型失败：${error.message}`, "error");
+  }
+}
+
+function renderOmniGenModelOptions() {
+  const models = state.aiCreation.models;
+  els.aiModelSelect.innerHTML = models.length
+    ? models.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.display_name || model.id)}</option>`).join("")
+    : '<option value="">暂无可用模型</option>';
+  els.aiModelSelect.disabled = !models.length;
+  els.aiModelSelect.value = state.aiCreation.selectedModel;
+  renderOmniGenCapabilityControls();
+}
+
+function selectedOmniGenModel() {
+  return state.aiCreation.models.find((model) => model.id === state.aiCreation.selectedModel) || null;
+}
+
+function normalizedCapabilityOptions(value, fallback) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item)).filter(Boolean);
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value);
+  }
+  return [...fallback];
+}
+
+function fillAiSelect(select, values, preferred) {
+  const options = Array.from(new Set(values));
+  select.innerHTML = options.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
+  select.value = options.includes(preferred) ? preferred : options[0] || "";
+  select.disabled = !options.length;
+}
+
+function renderOmniGenCapabilityControls() {
+  const model = selectedOmniGenModel();
+  const currentAspect = els.aiAspectRatioSelect.value || "1:1";
+  const currentResolution = els.aiResolutionSelect.value || "1K";
+  const ratios = normalizedCapabilityOptions(model?.supported_aspect_ratios, ["1:1"]);
+  const resolutions = normalizedCapabilityOptions(model?.supported_resolutions, ["1K"]);
+  fillAiSelect(els.aiAspectRatioSelect, ratios, currentAspect);
+  fillAiSelect(els.aiResolutionSelect, resolutions, currentResolution);
+  const pricing = model?.pricing;
+  const pricingText = pricing && typeof pricing === "object"
+    ? Object.entries(pricing).map(([key, value]) => `${key}: ${value}`).join(" · ")
+    : String(pricing || "");
+  els.aiModelMeta.textContent = model ? `${model.display_name || model.id}${pricingText ? ` · ${pricingText}` : ""}` : "选择模型后显示可用参数";
+  updateAiGenerateAvailability();
+}
+
+function updateAiGenerateAvailability() {
+  if (!els.aiGenerateButton) {
+    return;
+  }
+  els.aiGenerateButton.disabled = !state.localProfile?.mcp?.validated || !state.aiCreation.selectedModel || !els.aiPromptInput.value.trim() || state.aiCreation.loading;
+}
+
+async function submitAiImageGeneration(record = null) {
+  const prompt = record?.prompt || els.aiPromptInput.value.trim();
+  const model = record?.model || state.aiCreation.selectedModel;
+  const params = record?.params || {
+    aspect_ratio: els.aiAspectRatioSelect.value,
+    resolution: els.aiResolutionSelect.value,
+  };
+  if (!prompt || !model) {
+    setStatus("请填写提示词并选择模型。", "error");
+    return;
+  }
+  await withBusy(els.aiGenerateButton, async () => {
+    try {
+      const data = await apiJson("/api/omnigen/generate", { method: "POST", body: { prompt, model, params } });
+      upsertAiHistoryRecord(data.record);
+      renderAiCreation();
+      pollAiGenerationRecord(data.record.id);
+      setStatus("图片生成任务已提交。", "success");
+    } catch (error) {
+      await loadAiHistory();
+      setStatus(`图片生成失败：${error.message}`, "error");
+    }
+  });
+}
+
+function upsertAiHistoryRecord(record) {
+  if (!record?.id) {
+    return;
+  }
+  const index = state.aiCreation.history.findIndex((item) => item.id === record.id);
+  if (index >= 0) {
+    state.aiCreation.history[index] = record;
+  } else {
+    state.aiCreation.history.unshift(record);
+  }
+}
+
+async function loadAiHistory({ refreshRemote = false } = {}) {
+  try {
+    if (refreshRemote) {
+      await apiJson("/api/omnigen/history/refresh", { method: "POST" });
+    }
+    const data = await apiJson(`/api/omnigen/history?ts=${Date.now()}`);
+    state.aiCreation.history = Array.isArray(data.history) ? data.history : [];
+    const availableIds = new Set(state.aiCreation.history.map((record) => record.id));
+    state.aiCreation.selectedIds = new Set(Array.from(state.aiCreation.selectedIds).filter((id) => availableIds.has(id)));
+    state.aiCreation.history.filter(isActiveAiRecord).forEach((record) => pollAiGenerationRecord(record.id));
+    renderAiCreation();
+  } catch (error) {
+    setStatus(`读取生成历史失败：${error.message}`, "error");
+  }
+}
+
+function isActiveAiRecord(record) {
+  return ["submitting", "queued", "running"].includes(String(record?.status || ""));
+}
+
+function pollAiGenerationRecord(recordId, delay = 2000) {
+  if (!recordId || state.aiCreation.pollingIds.has(recordId)) {
+    return;
+  }
+  state.aiCreation.pollingIds.add(recordId);
+  const run = async () => {
+    try {
+      const data = await apiJson(`/api/omnigen/task?id=${encodeURIComponent(recordId)}&ts=${Date.now()}`);
+      upsertAiHistoryRecord(data.record);
+      renderAiCreation();
+      if (isActiveAiRecord(data.record)) {
+        state.aiCreation.pollTimers.set(recordId, window.setTimeout(run, 2000));
+      } else {
+        state.aiCreation.pollingIds.delete(recordId);
+        state.aiCreation.pollTimers.delete(recordId);
+      }
+    } catch (error) {
+      state.aiCreation.pollTimers.set(recordId, window.setTimeout(run, 5000));
+    }
+  };
+  state.aiCreation.pollTimers.set(recordId, window.setTimeout(run, delay));
+}
+
+function stopAiPollingRecord(recordId) {
+  const timerId = state.aiCreation.pollTimers.get(recordId);
+  if (timerId) window.clearTimeout(timerId);
+  state.aiCreation.pollTimers.delete(recordId);
+  state.aiCreation.pollingIds.delete(recordId);
+}
+
+function aiStatusLabel(record) {
+  const labels = {
+    submitting: "提交中",
+    queued: "等待中",
+    running: "生成中",
+    succeeded: "已完成",
+    failed: "失败",
+    canceled: "已取消",
+    download_failed: "下载失败",
+  };
+  return labels[record?.status] || record?.status || "未知";
+}
+
+function aiStatusTone(record) {
+  if (record?.status === "succeeded") return "success";
+  if (["failed", "canceled", "download_failed"].includes(record?.status)) return "error";
+  return "running";
+}
+
+function aiRecordDate(record) {
+  const date = new Date(record?.created_at || "");
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function aiRecordCard(record, { selectable = false } = {}) {
+  const succeeded = record.status === "succeeded" && record.local_url;
+  const selected = state.aiCreation.selectedIds.has(record.id);
+  const thumb = succeeded
+    ? `<button class="ai-card-preview" type="button" data-ai-action="preview" data-ai-id="${escapeHtml(record.id)}" aria-label="预览生成图片"><img src="${escapeHtml(record.local_url)}" alt="${escapeHtml(record.prompt || "生成图片")}"></button>`
+    : `<div class="ai-card-placeholder"><span>${escapeHtml(aiStatusLabel(record))}</span><b>${Math.max(0, Number(record.progress || 0))}%</b></div>`;
+  const select = selectable && succeeded
+    ? `<button class="ai-card-select ${selected ? "selected" : ""}" type="button" data-ai-action="select" data-ai-id="${escapeHtml(record.id)}" aria-pressed="${String(selected)}">${selected ? "✓" : ""}</button>`
+    : "";
+  const retry = record.status === "download_failed"
+    ? `<button class="ghost-button tiny" type="button" data-ai-action="retry-download" data-ai-id="${escapeHtml(record.id)}">重试下载</button>`
+    : ["failed", "canceled"].includes(record.status)
+      ? `<button class="ghost-button tiny" type="button" data-ai-action="regenerate" data-ai-id="${escapeHtml(record.id)}">重新生成</button>`
+      : "";
+  return `
+    <article class="ai-result-card ${selected ? "selected" : ""}">
+      <div class="ai-card-media">${thumb}${select}<span class="ai-card-status ${aiStatusTone(record)}">${escapeHtml(aiStatusLabel(record))}</span></div>
+      <div class="ai-card-body">
+        <strong title="${escapeHtml(record.prompt || "")}">${escapeHtml(record.prompt || "未命名任务")}</strong>
+        <small>${escapeHtml(record.model || "-")} · ${escapeHtml(aiRecordDate(record))}</small>
+        ${record.error ? `<p title="${escapeHtml(record.error)}">${escapeHtml(record.error)}</p>` : ""}
+        <div class="ai-card-actions">
+          ${succeeded ? `<button class="primary-button tiny" type="button" data-ai-action="process" data-ai-id="${escapeHtml(record.id)}">加入图片处理</button>` : ""}
+          ${retry}
+          ${record.local_path ? `<button class="ghost-button tiny" type="button" data-ai-action="open" data-ai-id="${escapeHtml(record.id)}">打开位置</button>` : ""}
+          <button class="ghost-button tiny" type="button" data-ai-action="delete" data-ai-id="${escapeHtml(record.id)}">删除</button>
+        </div>
+      </div>
+    </article>`;
+}
+
+function renderAiResultGrid() {
+  if (!els.aiResultGrid) return;
+  const records = state.aiCreation.history.slice(0, 8);
+  els.aiResultSummary.textContent = records.length ? `最近 ${records.length} 项` : "暂无结果";
+  els.aiResultGrid.innerHTML = records.length
+    ? records.map((record) => aiRecordCard(record)).join("")
+    : '<div class="ai-empty-state">生成结果会显示在这里</div>';
+}
+
+function renderAiTaskQueue() {
+  if (!els.aiTaskList) return;
+  const records = state.aiCreation.history.filter((record) => isActiveAiRecord(record) || ["download_failed", "failed"].includes(record.status)).slice(0, 12);
+  els.aiTaskCount.textContent = String(records.length);
+  els.aiTaskList.innerHTML = records.length
+    ? records.map((record) => `
+      <button class="ai-task-item" type="button" data-ai-action="focus" data-ai-id="${escapeHtml(record.id)}">
+        <span><strong>${escapeHtml(record.prompt || "生成任务")}</strong><small>${escapeHtml(record.model || "-")}</small></span>
+        <em class="${aiStatusTone(record)}">${escapeHtml(aiStatusLabel(record))}</em>
+      </button>`).join("")
+    : '<div class="ai-empty-state compact">暂无任务</div>';
+  els.aiTaskList.querySelectorAll("[data-ai-action]").forEach((button) => button.addEventListener("click", handleAiCardAction));
+}
+
+function syncAiHistoryFilters() {
+  state.aiCreation.filters.media = els.aiHistoryMediaFilter.value;
+  state.aiCreation.filters.status = els.aiHistoryStatusFilter.value;
+  state.aiCreation.filters.query = els.aiHistorySearchInput.value.trim().toLowerCase();
+  renderAiHistory();
+}
+
+function filteredAiHistory() {
+  const filters = state.aiCreation.filters;
+  return state.aiCreation.history.filter((record) => {
+    if (filters.media !== "all" && record.media_type !== filters.media) return false;
+    if (filters.status === "active" && !isActiveAiRecord(record)) return false;
+    if (filters.status === "succeeded" && record.status !== "succeeded") return false;
+    if (filters.status === "failed" && !["failed", "canceled", "download_failed"].includes(record.status)) return false;
+    if (filters.query && !`${record.prompt || ""} ${record.model || ""}`.toLowerCase().includes(filters.query)) return false;
+    return true;
+  });
+}
+
+function renderAiHistory() {
+  if (!els.aiHistoryGrid) return;
+  const records = filteredAiHistory();
+  els.aiHistoryGrid.innerHTML = records.length
+    ? records.map((record) => aiRecordCard(record, { selectable: true })).join("")
+    : '<div class="ai-empty-state">没有符合筛选条件的历史</div>';
+  const selectedCount = state.aiCreation.selectedIds.size;
+  els.aiHistorySelectionBar.hidden = selectedCount === 0;
+  els.aiHistorySelectionCount.textContent = `已选 ${selectedCount} 项`;
+}
+
+function selectVisibleAiHistory() {
+  filteredAiHistory().filter((record) => record.status === "succeeded" && record.local_url).forEach((record) => state.aiCreation.selectedIds.add(record.id));
+  renderAiHistory();
+}
+
+function clearAiHistorySelection() {
+  state.aiCreation.selectedIds.clear();
+  renderAiHistory();
+}
+
+function aiRecordById(recordId) {
+  return state.aiCreation.history.find((record) => record.id === recordId) || null;
+}
+
+function handleAiCardAction(event) {
+  const target = event.currentTarget?.dataset?.aiAction ? event.currentTarget : event.target?.closest?.("[data-ai-action]");
+  const action = target?.dataset?.aiAction;
+  const record = aiRecordById(target?.dataset?.aiId || "");
+  if (!action || !record) return;
+  if (action === "select") {
+    if (state.aiCreation.selectedIds.has(record.id)) state.aiCreation.selectedIds.delete(record.id);
+    else state.aiCreation.selectedIds.add(record.id);
+    renderAiHistory();
+  } else if (action === "preview" && record.local_url) {
+    openAiPreviewDialog(record);
+  } else if (action === "process") {
+    void addAiRecordsToImageProcessing([record.id]);
+  } else if (action === "open" && record.local_path) {
+    void openPath(record.local_path);
+  } else if (action === "delete") {
+    openAiDeleteDialog([record.id]);
+  } else if (action === "regenerate") {
+    void submitAiImageGeneration(record);
+  } else if (action === "retry-download") {
+    pollAiGenerationRecord(record.id, 0);
+  } else if (action === "focus") {
+    setAiCreationView("history");
+    els.aiHistorySearchInput.value = record.prompt || "";
+    syncAiHistoryFilters();
+  }
+}
+
+function openAiPreviewDialog(record) {
+  els.aiPreviewImage.src = record.local_url;
+  els.aiPreviewDialogTitle.textContent = record.prompt || "生成结果";
+  els.aiPreviewCaption.textContent = `${record.model || "-"} · ${record.width || "-"} x ${record.height || "-"}`;
+  els.aiPreviewDialog.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeAiPreviewDialog() {
+  els.aiPreviewDialog.hidden = true;
+  els.aiPreviewImage.removeAttribute("src");
+  document.body.classList.remove("modal-open");
+}
+
+async function addSelectedAiRecordsToImageProcessing() {
+  await addAiRecordsToImageProcessing(Array.from(state.aiCreation.selectedIds));
+}
+
+async function addAiRecordsToImageProcessing(recordIds) {
+  const records = recordIds.map(aiRecordById).filter((record) => record?.status === "succeeded" && record.local_url);
+  if (!records.length) {
+    setStatus("所选记录没有可加入处理的本地图片。", "error");
+    return;
+  }
+  try {
+    const files = await Promise.all(records.map(async (record, index) => {
+      const response = await fetch(record.local_url, { cache: "no-store" });
+      if (!response.ok) throw new Error(`无法读取第 ${index + 1} 张生成图片`);
+      const blob = await response.blob();
+      const extension = PathExtensionFallback(record.local_path || record.local_url);
+      const name = imageImportFileName((record.local_path || "").split(/[\\/]/).pop() || `ai_${index + 1}.${extension}`, extension);
+      return new File([blob], name, { type: blob.type || `image/${extension}` });
+    }));
+    await uploadImageFiles(files);
+    records.forEach((record) => state.aiCreation.selectedIds.delete(record.id));
+    setActiveModule("image", { announce: false });
+    setActiveImagePage("full", { announce: false, persist: false });
+    setActiveImageTool("import", { announce: false });
+    renderImageWorkflow();
+    setStatus(`已将 ${files.length} 张生成图片追加到图片处理。`, "success");
+  } catch (error) {
+    setStatus(`加入图片处理失败：${error.message}`, "error");
+  }
+}
+
+function openAiDeleteDialog(recordIds) {
+  state.aiCreation.deleteIds = Array.from(new Set(recordIds)).filter((id) => aiRecordById(id));
+  if (!state.aiCreation.deleteIds.length) return;
+  els.aiDeleteSummary.textContent = `将删除 ${state.aiCreation.deleteIds.length} 条生成历史。`;
+  hideAiDeleteFileConfirmation();
+  els.aiDeleteDialog.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeAiDeleteDialog() {
+  els.aiDeleteDialog.hidden = true;
+  state.aiCreation.deleteIds = [];
+  document.body.classList.remove("modal-open");
+}
+
+function showAiDeleteFileConfirmation() {
+  els.aiDeleteInitialActions.hidden = true;
+  els.aiDeleteConfirmFiles.hidden = false;
+}
+
+function hideAiDeleteFileConfirmation() {
+  els.aiDeleteInitialActions.hidden = false;
+  els.aiDeleteConfirmFiles.hidden = true;
+}
+
+async function deleteAiHistoryRecords(deleteFiles) {
+  const ids = [...state.aiCreation.deleteIds];
+  const button = deleteFiles ? els.aiDeleteConfirmFilesButton : els.aiDeleteRecordOnlyButton;
+  await withBusy(button, async () => {
+    try {
+      const data = await apiJson("/api/omnigen/history/delete", { method: "POST", body: { ids, delete_files: deleteFiles } });
+      const deletedIds = new Set(data.result?.deleted_ids || ids);
+      state.aiCreation.history = state.aiCreation.history.filter((record) => !deletedIds.has(record.id));
+      deletedIds.forEach((id) => {
+        state.aiCreation.selectedIds.delete(id);
+        stopAiPollingRecord(id);
+      });
+      closeAiDeleteDialog();
+      renderAiCreation();
+      setStatus(deleteFiles ? "历史记录和本地文件已删除。" : "历史记录已删除，本地文件已保留。", "success");
+    } catch (error) {
+      setStatus(`删除生成历史失败：${error.message}`, "error");
+    }
+  });
 }
 
 function runtimeCheckReady(runtime, key) {

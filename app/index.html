@@ -20,18 +20,22 @@
       <nav class="module-switch" aria-label="工具模块">
         <button id="moduleVideoButton" class="module-switch-button active" type="button" data-module="video">视频转序列帧</button>
         <button id="moduleVideoProcessButton" class="module-switch-button" type="button" data-module="videoProcess">视频处理</button>
+        <button id="moduleAiCreationButton" class="module-switch-button" type="button" data-module="aiCreation">AI 创作</button>
         <button id="moduleImageButton" class="module-switch-button" type="button" data-module="image">图片处理</button>
         <button id="moduleResourceButton" class="module-switch-button" type="button" data-module="resource">资源管理</button>
         <button id="moduleModelButton" class="module-switch-button" type="button" data-module="model">模型管理</button>
       </nav>
-      <div class="account-panel" id="accountPanel" aria-label="账户入口">
-        <div>
-          <span>账户</span>
-          <strong id="accountName">未登录</strong>
-        </div>
-        <button id="loginButton" class="primary-button account-button" type="button">一键登录</button>
-        <button id="logoutButton" class="ghost-button account-button" type="button" hidden>退出</button>
-      </div>
+      <button class="account-panel" id="localProfileButton" type="button" aria-label="编辑本地资料">
+        <span class="local-profile-avatar-shell" aria-hidden="true">
+          <img id="localProfileAvatar" alt="" hidden>
+          <b id="localProfileAvatarFallback">游</b>
+        </span>
+        <span class="local-profile-copy">
+          <small>本地资料</small>
+          <strong id="accountName">游客</strong>
+          <em id="localProfileMcpStatus">MCP 未配置</em>
+        </span>
+      </button>
     </header>
 
     <div id="videoModule" class="workspace module-view" data-module-view="video">
@@ -818,6 +822,122 @@
       </main>
     </div>
 
+    <section id="aiCreationModule" class="ai-creation-module module-view" data-module-view="aiCreation" hidden>
+      <aside class="ai-media-rail" aria-label="AI 创作媒体类型">
+        <button id="aiImageViewButton" class="ai-media-button active" type="button" data-ai-view="image" aria-pressed="true">
+          <span class="ai-media-icon" aria-hidden="true">图</span>
+          <span>图片</span>
+        </button>
+        <button class="ai-media-button" type="button" disabled title="视频生成待接入">
+          <span class="ai-media-icon" aria-hidden="true">影</span>
+          <span>视频</span>
+          <small>待接入</small>
+        </button>
+        <button id="aiHistoryViewButton" class="ai-media-button" type="button" data-ai-view="history" aria-pressed="false">
+          <span class="ai-media-icon" aria-hidden="true">史</span>
+          <span>历史</span>
+        </button>
+      </aside>
+
+      <section id="aiCreatePanel" class="ai-create-panel" aria-labelledby="aiCreateTitle">
+        <div class="ai-panel-head">
+          <div>
+            <p class="section-kicker">Image generation</p>
+            <h2 id="aiCreateTitle">图片生成</h2>
+          </div>
+          <span id="aiConnectionBadge" class="ai-state-chip warning">未配置</span>
+        </div>
+        <div id="aiTokenNotice" class="ai-token-notice">
+          <span>配置 OmniGen MCP Token 后可开始生成。</span>
+          <button id="aiOpenProfileButton" class="ghost-button tiny" type="button">配置</button>
+        </div>
+        <label class="ai-field ai-prompt-field">
+          <span>提示词</span>
+          <textarea id="aiPromptInput" rows="7" placeholder="描述画面主体、风格、构图和背景"></textarea>
+        </label>
+        <label class="ai-field">
+          <span>模型</span>
+          <select id="aiModelSelect" disabled>
+            <option value="">等待模型列表</option>
+          </select>
+        </label>
+        <div class="ai-field-grid">
+          <label class="ai-field">
+            <span>宽高比</span>
+            <select id="aiAspectRatioSelect" disabled><option value="1:1">1:1</option></select>
+          </label>
+          <label class="ai-field">
+            <span>分辨率</span>
+            <select id="aiResolutionSelect" disabled><option value="1K">1K</option></select>
+          </label>
+        </div>
+        <div id="aiModelMeta" class="ai-model-meta">选择模型后显示可用参数</div>
+        <button id="aiGenerateButton" class="primary-button large ai-generate-button" type="button" disabled>生成图片</button>
+      </section>
+
+      <main class="ai-canvas-panel">
+        <section id="aiImageWorkspace" class="ai-image-workspace">
+          <div class="ai-canvas-head">
+            <div>
+              <p class="section-kicker">Generation canvas</p>
+              <h2>生成画布</h2>
+            </div>
+            <span id="aiResultSummary">暂无结果</span>
+          </div>
+          <div id="aiResultGrid" class="ai-result-grid">
+            <div class="ai-empty-state">生成结果会显示在这里</div>
+          </div>
+        </section>
+
+        <section id="aiHistoryWorkspace" class="ai-history-workspace" hidden>
+          <div class="ai-canvas-head">
+            <div>
+              <p class="section-kicker">Local generation history</p>
+              <h2>生成历史</h2>
+            </div>
+            <button id="aiRefreshHistoryButton" class="ghost-button tiny" type="button">刷新</button>
+          </div>
+          <div class="ai-history-toolbar">
+            <select id="aiHistoryMediaFilter" aria-label="媒体类型筛选">
+              <option value="all">全部类型</option>
+              <option value="image">图片</option>
+              <option value="video" disabled>视频（待接入）</option>
+            </select>
+            <select id="aiHistoryStatusFilter" aria-label="状态筛选">
+              <option value="all">全部状态</option>
+              <option value="active">进行中</option>
+              <option value="succeeded">已完成</option>
+              <option value="failed">失败</option>
+            </select>
+            <input id="aiHistorySearchInput" type="search" placeholder="搜索提示词或模型" aria-label="搜索生成历史">
+            <button id="aiHistorySelectVisibleButton" class="ghost-button tiny" type="button">选择当前结果</button>
+            <button id="aiHistoryClearSelectionButton" class="ghost-button tiny" type="button">清除选择</button>
+          </div>
+          <div id="aiHistoryGrid" class="ai-history-grid">
+            <div class="ai-empty-state">暂无生成历史</div>
+          </div>
+          <div id="aiHistorySelectionBar" class="ai-history-selection-bar" hidden>
+            <strong id="aiHistorySelectionCount">已选 0 项</strong>
+            <button id="aiHistoryAddToImageButton" class="primary-button" type="button">加入图片处理</button>
+            <button id="aiHistoryDeleteButton" class="ghost-button" type="button">删除</button>
+          </div>
+        </section>
+      </main>
+
+      <aside class="ai-task-panel" aria-labelledby="aiTaskTitle">
+        <div class="ai-task-head">
+          <div>
+            <p class="section-kicker">Queue</p>
+            <h2 id="aiTaskTitle">任务队列</h2>
+          </div>
+          <span id="aiTaskCount">0</span>
+        </div>
+        <div id="aiTaskList" class="ai-task-list">
+          <div class="ai-empty-state compact">暂无任务</div>
+        </div>
+      </aside>
+    </section>
+
     <section id="imageModule" class="image-module module-view" data-module-view="image" hidden>
       <aside class="image-subpage-tabs" aria-label="图片处理子页签">
         <button id="imageFullFlowTabButton" class="image-subpage-tab active" type="button" data-image-page="full" aria-pressed="true">
@@ -1572,6 +1692,82 @@
         <div id="modelList" class="model-list" aria-label="模型列表"></div>
       </section>
     </section>
+
+    <div id="localProfileDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="localProfileDialogTitle" hidden>
+      <div class="resource-project-dialog-panel local-profile-dialog-panel">
+        <div class="resource-project-dialog-head">
+          <div>
+            <p class="section-kicker">Local profile</p>
+            <h2 id="localProfileDialogTitle">本地资料</h2>
+          </div>
+          <button id="localProfileCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭本地资料弹窗">×</button>
+        </div>
+        <div class="local-profile-editor">
+          <label class="local-profile-avatar-editor">
+            <span>头像</span>
+            <span class="local-profile-avatar-preview">
+              <img id="localProfileAvatarPreview" alt="头像预览" hidden>
+              <b id="localProfileAvatarPreviewFallback">游</b>
+            </span>
+            <input id="localProfileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp">
+          </label>
+          <label class="ai-field">
+            <span>名称</span>
+            <input id="localProfileNameInput" type="text" maxlength="40" autocomplete="off">
+          </label>
+          <label class="ai-field">
+            <span>OmniGen MCP Token</span>
+            <input id="localProfileTokenInput" type="password" autocomplete="new-password" placeholder="留空表示不修改">
+          </label>
+          <div id="localProfileConnectionStatus" class="local-profile-connection-status">尚未测试连接</div>
+        </div>
+        <div class="resource-project-dialog-actions local-profile-actions">
+          <button id="localProfileClearTokenButton" class="ghost-button danger" type="button">清除 Token</button>
+          <div class="button-row">
+            <button id="localProfileTestButton" class="ghost-button" type="button">测试连接</button>
+            <button id="localProfileSaveButton" class="primary-button" type="button">保存资料</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="aiPreviewDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="aiPreviewDialogTitle" hidden>
+      <div class="resource-project-dialog-panel ai-preview-dialog-panel">
+        <div class="resource-project-dialog-head">
+          <div>
+            <p class="section-kicker">Generation preview</p>
+            <h2 id="aiPreviewDialogTitle">生成结果</h2>
+          </div>
+          <button id="aiPreviewCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭生成结果预览">×</button>
+        </div>
+        <div class="ai-preview-stage"><img id="aiPreviewImage" alt="生成结果大图"></div>
+        <p id="aiPreviewCaption" class="ai-preview-caption"></p>
+      </div>
+    </div>
+
+    <div id="aiDeleteDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="aiDeleteDialogTitle" hidden>
+      <div class="resource-project-dialog-panel ai-delete-dialog-panel">
+        <div class="resource-project-dialog-head">
+          <div>
+            <p class="section-kicker">Delete history</p>
+            <h2 id="aiDeleteDialogTitle">删除生成历史</h2>
+          </div>
+          <button id="aiDeleteCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭删除弹窗">×</button>
+        </div>
+        <p id="aiDeleteSummary">请选择删除方式。</p>
+        <div id="aiDeleteInitialActions" class="ai-delete-actions">
+          <button id="aiDeleteRecordOnlyButton" class="ghost-button" type="button">仅删除记录</button>
+          <button id="aiDeleteWithFilesButton" class="ghost-button danger" type="button">删除记录及本地文件</button>
+        </div>
+        <div id="aiDeleteConfirmFiles" class="ai-delete-confirm" hidden>
+          <strong>本地文件将从 AI 结果目录永久删除。</strong>
+          <div class="button-row">
+            <button id="aiDeleteBackButton" class="ghost-button" type="button">返回</button>
+            <button id="aiDeleteConfirmFilesButton" class="primary-button" type="button">确认删除文件</button>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <div id="resourceProjectEditDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="resourceProjectEditTitle" hidden>
       <div class="resource-project-dialog-panel">
