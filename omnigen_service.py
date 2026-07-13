@@ -1,10 +1,16 @@
+import copy
 import json
 import os
 import tempfile
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
+
+from PIL import Image, UnidentifiedImageError
 
 
 OMNIGEN_ENDPOINT = "https://omnigen.dianchu.cc/api/v1/mcp"
@@ -12,6 +18,17 @@ MCP_PROTOCOL_VERSION = "2024-11-05"
 DEFAULT_PROFILE_NAME = "游客"
 TERMINAL_TASK_STATUSES = {"succeeded", "failed", "canceled"}
 MAX_MCP_RESPONSE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
+IMAGE_EXTENSIONS = {
+    "PNG": ".png",
+    "JPEG": ".jpg",
+    "WEBP": ".webp",
+    "BMP": ".bmp",
+}
+DOWNLOAD_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 SpriteVideoLab/1.0"
+)
 
 
 def redact_secret(message: str, secret: str) -> str:
@@ -89,6 +106,344 @@ class OmniGenService:
 
     def _write_settings(self, settings: dict) -> None:
         self._atomic_write_json(self.settings_path, settings)
+
+    @staticmethod
+    def _utc_timestamp() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    def _read_history_unlocked(self) -> dict:
+        try:
+            with self.history_path.open("r", encoding="utf-8") as handle:
+                history = json.load(handle)
+            if not isinstance(history, dict) or not isinstance(
+                history.get("records"), list
+            ):
+                raise ValueError("invalid history structure")
+            return history
+        except FileNotFoundError:
+            return {"records": []}
+        except (json.JSONDecodeError, OSError, ValueError):
+            if self.history_path.exists():
+                timestamp = datetime.now(timezone.utc).strftime(
+                    "%Y%m%dT%H%M%S%fZ"
+                )
+                corrupt_path = self.history_path.with_name(
+                    f"history.corrupt-{timestamp}.json"
+                )
+                try:
+                    os.replace(self.history_path, corrupt_path)
+                except OSError:
+                    pass
+            return {"records": []}
+
+    def list_history(self) -> list[dict]:
+        with self._lock:
+            records = self._read_history_unlocked()["records"]
+            records = sorted(
+                records,
+                key=lambda record: str(record.get("created_at") or ""),
+                reverse=True,
+            )
+            return copy.deepcopy(records)
+
+    def create_record(self, prompt: str, model: str, params: dict) -> dict:
+        with self._lock:
+            timestamp = self._utc_timestamp()
+            record = {
+                "id": str(uuid.uuid4()),
+                "media_type": "image",
+                "prompt": str(prompt),
+                "model": str(model),
+                "params": copy.deepcopy(params),
+                "task_id": "",
+                "status": "submitting",
+                "progress": 0,
+                "remote_url": "",
+                "local_path": "",
+                "local_url": "",
+                "width": 0,
+                "height": 0,
+                "bytes": 0,
+                "error": "",
+                "created_at": timestamp,
+                "updated_at": timestamp,
+            }
+            history = self._read_history_unlocked()
+            history["records"].insert(0, record)
+            self._atomic_write_json(self.history_path, history)
+            return copy.deepcopy(record)
+
+    def find_record(self, record_id: str) -> dict:
+        with self._lock:
+            for record in self._read_history_unlocked()["records"]:
+                if record.get("id") == record_id:
+                    return copy.deepcopy(record)
+        raise ValueError(f"History record not found: {record_id}")
+
+    def update_record(self, record_id: str, **changes) -> dict:
+        with self._lock:
+            history = self._read_history_unlocked()
+            for record in history["records"]:
+                if record.get("id") != record_id:
+                    continue
+                record.update(copy.deepcopy(changes))
+                record["id"] = record_id
+                record["updated_at"] = self._utc_timestamp()
+                self._atomic_write_json(self.history_path, history)
+                return copy.deepcopy(record)
+        raise ValueError(f"History record not found: {record_id}")
+
+    def delete_records(
+        self, record_ids: list[str], *, delete_files: bool = False
+    ) -> dict:
+        with self._lock:
+            history = self._read_history_unlocked()
+            selected_ids = set(record_ids)
+            selected = [
+                record
+                for record in history["records"]
+                if record.get("id") in selected_ids
+            ]
+            resolved_paths = []
+            if delete_files:
+                results_root = self.results_dir.resolve()
+                for record in selected:
+                    local_path = str(record.get("local_path") or "").strip()
+                    if not local_path:
+                        continue
+                    resolved_path = Path(local_path).resolve()
+                    if not resolved_path.is_relative_to(results_root):
+                        raise ValueError(
+                            "Refusing to delete a file outside the OmniGen results directory"
+                        )
+                    resolved_paths.append(resolved_path)
+
+                for resolved_path in resolved_paths:
+                    if resolved_path.exists() and not resolved_path.is_dir():
+                        resolved_path.unlink()
+
+            history["records"] = [
+                record
+                for record in history["records"]
+                if record.get("id") not in selected_ids
+            ]
+            self._atomic_write_json(self.history_path, history)
+            return {
+                "deleted_ids": [record["id"] for record in selected],
+                "files_deleted": delete_files,
+            }
+
+    def download_result(self, record_id: str, result_url: str) -> dict:
+        parsed_url = urllib.parse.urlparse(str(result_url))
+        if parsed_url.scheme.lower() not in {"http", "https"}:
+            raise ValueError("Result URL must use HTTP or HTTPS")
+        self.find_record(record_id)
+        try:
+            stable_record_id = str(uuid.UUID(str(record_id)))
+        except ValueError:
+            raise ValueError("History record ID is not a valid UUID") from None
+
+        request = urllib.request.Request(
+            str(result_url),
+            headers={
+                "User-Agent": DOWNLOAD_USER_AGENT,
+                "Accept": "image/png,image/jpeg,image/webp,image/bmp,*/*;q=0.1",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                image_bytes = response.read(MAX_IMAGE_RESPONSE_BYTES + 1)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError) as exc:
+            raise OmniGenError(f"Unable to download generated image: {exc}") from None
+        if len(image_bytes) > MAX_IMAGE_RESPONSE_BYTES:
+            raise OmniGenError("Generated image exceeded 32 MB limit")
+
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=self.results_dir,
+                prefix=f".{stable_record_id}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(image_bytes)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            try:
+                with Image.open(temporary_path) as image:
+                    image_format = str(image.format or "").upper()
+                    width, height = image.size
+                    image.verify()
+            except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+                raise ValueError("Downloaded result is not a valid image") from None
+
+            extension = IMAGE_EXTENSIONS.get(image_format)
+            if extension is None:
+                raise ValueError(
+                    f"Downloaded image format is not supported: {image_format or 'unknown'}"
+                )
+            final_path = self.results_dir / f"{stable_record_id}{extension}"
+            os.replace(temporary_path, final_path)
+            temporary_path = None
+            return self.update_record(
+                record_id,
+                remote_url=str(result_url),
+                local_path=str(final_path.resolve()),
+                local_url=f"/work/omnigen/results/{final_path.name}",
+                width=width,
+                height=height,
+                bytes=len(image_bytes),
+                status="succeeded",
+                progress=100,
+                error="",
+            )
+        except ValueError:
+            raise
+        except OSError as exc:
+            raise OmniGenError(f"Unable to save generated image: {exc}") from None
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _normalize_task_status(status) -> str:
+        normalized = (
+            str(status or "")
+            .strip()
+            .lower()
+            .replace("-", "_")
+            .replace(" ", "_")
+        )
+        aliases = {
+            "success": "succeeded",
+            "successful": "succeeded",
+            "completed": "succeeded",
+            "complete": "succeeded",
+            "done": "succeeded",
+            "failure": "failed",
+            "error": "failed",
+            "errored": "failed",
+            "cancelled": "canceled",
+            "processing": "running",
+            "in_progress": "running",
+        }
+        return aliases.get(normalized, normalized or "running")
+
+    @staticmethod
+    def _normalize_task_progress(progress, fallback):
+        if progress is None or isinstance(progress, bool):
+            return fallback
+        try:
+            if isinstance(progress, str):
+                progress = progress.strip().removesuffix("%").strip()
+            numeric = float(progress)
+        except (TypeError, ValueError, OverflowError):
+            return fallback
+        numeric = max(0.0, min(100.0, numeric))
+        return int(numeric) if numeric.is_integer() else numeric
+
+    @staticmethod
+    def _task_error_text(error) -> str:
+        if error is None:
+            return ""
+        if isinstance(error, dict):
+            for key in ("message", "error", "detail"):
+                if key in error:
+                    return OmniGenService._task_error_text(error[key])
+            return json.dumps(error, ensure_ascii=False, sort_keys=True)
+        if isinstance(error, list):
+            return "; ".join(
+                part for part in map(OmniGenService._task_error_text, error) if part
+            )
+        return str(error)
+
+    @staticmethod
+    def _first_http_result_url(payload) -> str:
+        result_keys = ("result", "results", "output", "outputs", "url", "urls")
+
+        def find(value):
+            if isinstance(value, str):
+                parsed = urllib.parse.urlparse(value)
+                return value if parsed.scheme.lower() in {"http", "https"} else ""
+            if isinstance(value, list):
+                for item in value:
+                    found = find(item)
+                    if found:
+                        return found
+                return ""
+            if isinstance(value, dict):
+                for key in result_keys:
+                    if key not in value:
+                        continue
+                    found = find(value[key])
+                    if found:
+                        return found
+            return ""
+
+        return find(payload)
+
+    def refresh_task(self, record_id: str) -> dict:
+        record = self.find_record(record_id)
+        task_id = str(record.get("task_id") or "").strip()
+        if not task_id:
+            raise ValueError("Generation record has no task_id")
+
+        payload = self.call_tool("get_generation_task", {"task_id": task_id})
+        task_payload = payload.get("task") if isinstance(payload, dict) else None
+        if not isinstance(task_payload, dict):
+            task_payload = payload if isinstance(payload, dict) else {}
+        raw_status = task_payload.get("status", task_payload.get("state"))
+        status = self._normalize_task_status(raw_status or record.get("status"))
+        progress = self._normalize_task_progress(
+            task_payload.get("progress"), record.get("progress", 0)
+        )
+
+        if status in {"failed", "canceled"}:
+            raw_error = task_payload.get("error")
+            if raw_error is None:
+                raw_error = task_payload.get("message")
+            error = self._task_error_text(raw_error)
+            if not error:
+                error = f"Generation task {status}"
+            return self.update_record(
+                record_id,
+                status=status,
+                progress=progress,
+                error=redact_secret(error, self._token()),
+            )
+
+        if status == "succeeded":
+            result_url = self._first_http_result_url(payload)
+            if not result_url:
+                return self.update_record(
+                    record_id,
+                    status="download_failed",
+                    progress=100,
+                    error="Succeeded generation returned no HTTP(S) image URL",
+                )
+            try:
+                return self.download_result(record_id, result_url)
+            except (OmniGenError, ValueError) as exc:
+                return self.update_record(
+                    record_id,
+                    remote_url=result_url,
+                    status="download_failed",
+                    progress=100,
+                    error=redact_secret(exc, self._token()),
+                )
+
+        return self.update_record(
+            record_id,
+            status=status,
+            progress=progress,
+            error="",
+        )
 
     def public_profile(self) -> dict:
         with self._lock:
