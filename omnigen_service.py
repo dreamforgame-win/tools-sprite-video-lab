@@ -216,10 +216,14 @@ class OmniGenService:
                         raise ValueError(
                             "Refusing to delete a file outside the OmniGen results directory"
                         )
+                    if resolved_path.exists() and resolved_path.is_dir():
+                        raise ValueError(
+                            "Refusing to delete a directory from OmniGen history"
+                        )
                     resolved_paths.append(resolved_path)
 
                 for resolved_path in resolved_paths:
-                    if resolved_path.exists() and not resolved_path.is_dir():
+                    if resolved_path.exists():
                         resolved_path.unlink()
 
             history["records"] = [
@@ -286,20 +290,39 @@ class OmniGenService:
                     f"Downloaded image format is not supported: {image_format or 'unknown'}"
                 )
             final_path = self.results_dir / f"{stable_record_id}{extension}"
-            os.replace(temporary_path, final_path)
-            temporary_path = None
-            return self.update_record(
-                record_id,
-                remote_url=str(result_url),
-                local_path=str(final_path.resolve()),
-                local_url=f"/work/omnigen/results/{final_path.name}",
-                width=width,
-                height=height,
-                bytes=len(image_bytes),
-                status="succeeded",
-                progress=100,
-                error="",
-            )
+            backup_path = None
+            final_installed = False
+            try:
+                if final_path.exists():
+                    backup_path = self.results_dir / (
+                        f".{stable_record_id}.{uuid.uuid4().hex}.bak"
+                    )
+                    os.replace(final_path, backup_path)
+                os.replace(temporary_path, final_path)
+                temporary_path = None
+                final_installed = True
+                updated = self.update_record(
+                    record_id,
+                    remote_url=str(result_url),
+                    local_path=str(final_path.resolve()),
+                    local_url=f"/work/omnigen/results/{final_path.name}",
+                    width=width,
+                    height=height,
+                    bytes=len(image_bytes),
+                    status="succeeded",
+                    progress=100,
+                    error="",
+                )
+            except Exception:
+                if backup_path is not None and backup_path.exists():
+                    os.replace(backup_path, final_path)
+                elif final_installed:
+                    final_path.unlink(missing_ok=True)
+                raise
+            else:
+                if backup_path is not None:
+                    backup_path.unlink()
+                return updated
         except ValueError:
             raise
         except OSError as exc:
@@ -419,7 +442,9 @@ class OmniGenService:
             )
 
         if status == "succeeded":
-            result_url = self._first_http_result_url(payload)
+            result_url = self._first_http_result_url(task_payload)
+            if not result_url:
+                result_url = self._first_http_result_url(payload)
             if not result_url:
                 return self.update_record(
                     record_id,
