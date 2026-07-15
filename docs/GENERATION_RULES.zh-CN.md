@@ -8,8 +8,8 @@
 
 - 对外产品名称统一使用“灵帧工坊”或英文名“Sprite Forge Lab”。生成供应商名称只允许出现在对应的内部适配器、兼容接口和接入文档中，不得用作产品名、模块名、页面标题或用户配置项名称。
 - 生成前先阅读本规范，确认要改的是哪一类界面或能力。
-- 当前开发页面固定为 `http://127.0.0.1:8895/app/index.html`，对应代码目录为 `.worktrees/ai-creation-workbench`。除非用户明确要求维护根目录页面，否则 UI、交互、AI 创作、本地资料等开发改动都应落在该 worktree。
-- `http://127.0.0.1:8894/app/index.html` 对应根目录 `server.py` 启动的稳定/参考页面，不作为当前开发验证目标。开始修改前必须核对目标端口和进程命令行，避免把改动落到 8894。
+- 当前开发页面固定为 `http://127.0.0.1:8895/app/index.html`，对应代码目录为项目根目录 `F:\Codex-Program\sprite-video-lab`。除非用户明确要求查看归档，否则 UI、交互、AI 创作、本地资料等开发改动都应落在根目录。
+- `.worktrees/ai-creation-workbench` 和 `http://127.0.0.1:8894/app/index.html` 仅作为迁移归档/参考，不作为当前开发验证目标。开始修改前必须核对目标端口和进程命令行，避免把改动落回旧 worktree 或 8894。
 - 先沿用现有结构、类名、交互模型和视觉语言，不另起一套设计系统。
 - 用户通过截图指出问题时，要判断问题属于“单次 bug”还是“规范缺口”。如果是规范缺口，先补充本文件。
 - 每次交付需要说明改了哪些文件，以及是否需要刷新页面或重启后端。
@@ -206,7 +206,7 @@
 
 每次生成或修改后，至少检查：
 
-- 页面是否能访问：`http://127.0.0.1:8895/app/index.html` 返回 200，并确认该端口进程来自 `.worktrees/ai-creation-workbench\server.py`。
+- 页面是否能访问：`http://127.0.0.1:8895/app/index.html` 返回 200，并确认该端口进程来自根目录 `server.py`。
 - 前端语法：`node --check app\app.js`。
 - 后端语法：改动 `server.py` 时运行 `.venv-ai\Scripts\python.exe -m py_compile server.py`。
 - 样式空白：`git diff --check -- app\index.html app\app.js app\styles.css server.py`。

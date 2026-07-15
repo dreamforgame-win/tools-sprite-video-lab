@@ -8,6 +8,7 @@ venv/
 env/
 
 work/
+_migration_archive/
 .playwright-cli/
 .superpowers/
 .worktrees/
