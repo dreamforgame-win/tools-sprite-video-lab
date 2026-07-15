@@ -214,7 +214,9 @@ class McpPayloadTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             service = OmniGenService(Path(directory))
-            with mock.patch("urllib.request.urlopen", return_value=response):
+            with mock.patch.object(
+                service, "_open_mcp_request", return_value=response
+            ):
                 payload = service._request_jsonrpc("initialize", {}, "secret-token")
 
         self.assertEqual(payload["result"], {"ready": True})
@@ -228,7 +230,9 @@ class McpPayloadTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             service = OmniGenService(Path(directory))
-            with mock.patch("urllib.request.urlopen", return_value=response):
+            with mock.patch.object(
+                service, "_open_mcp_request", return_value=response
+            ):
                 payload = service._request_jsonrpc("initialize", {}, "secret-token")
 
         self.assertEqual(payload["result"], {})
@@ -241,10 +245,28 @@ class McpPayloadTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             service = OmniGenService(Path(directory))
-            with mock.patch("urllib.request.urlopen", return_value=response):
+            with mock.patch.object(
+                service, "_open_mcp_request", return_value=response
+            ):
                 payload = service._request_jsonrpc("initialize", {}, "secret-token")
 
         self.assertEqual(payload["result"], {"ready": True})
+
+    def test_request_accepts_null_notification_response(self):
+        response = FakeResponse("null", "application/json")
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            with mock.patch.object(
+                service, "_open_mcp_request", return_value=response
+            ):
+                payload = service._request_jsonrpc(
+                    "notifications/initialized",
+                    {},
+                    "secret-token",
+                    notification=True,
+                )
+
+        self.assertEqual(payload, {})
 
     def test_request_redacts_json_construction_failure(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -262,11 +284,60 @@ class McpPayloadTests(unittest.TestCase):
         response = FakeResponse("x" * (8 * 1024 * 1024 + 1), "application/json")
         with tempfile.TemporaryDirectory() as directory:
             service = OmniGenService(Path(directory))
-            with mock.patch("urllib.request.urlopen", return_value=response):
+            with mock.patch.object(
+                service, "_open_mcp_request", return_value=response
+            ):
                 with self.assertRaises(OmniGenError) as raised:
                     service._request_jsonrpc("initialize", {}, "secret-token")
 
         self.assertIn("response exceeded", str(raised.exception).lower())
+
+    def test_private_mcp_endpoint_bypasses_environment_proxy(self):
+        response = FakeResponse(
+            '{"jsonrpc":"2.0","id":1,"result":{}}', "application/json"
+        )
+        direct_opener = mock.Mock()
+        direct_opener.open.return_value = response
+        private_address = [(None, None, None, None, ("192.168.5.118", 443))]
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            with mock.patch(
+                "omnigen_service.socket.getaddrinfo", return_value=private_address
+            ), mock.patch(
+                "omnigen_service.urllib.request.build_opener",
+                return_value=direct_opener,
+            ) as build_opener, mock.patch(
+                "omnigen_service.urllib.request.urlopen"
+            ) as urlopen:
+                opened = service._open_mcp_request(mock.sentinel.request, timeout=60)
+
+        self.assertIs(opened, response)
+        proxy_handler = build_opener.call_args.args[0]
+        self.assertEqual(proxy_handler.proxies, {})
+        direct_opener.open.assert_called_once_with(mock.sentinel.request, timeout=60)
+        urlopen.assert_not_called()
+
+    def test_public_mcp_endpoint_keeps_environment_proxy(self):
+        response = FakeResponse(
+            '{"jsonrpc":"2.0","id":1,"result":{}}', "application/json"
+        )
+        public_address = [(None, None, None, None, ("8.8.8.8", 443))]
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            with mock.patch(
+                "omnigen_service.socket.getaddrinfo", return_value=public_address
+            ), mock.patch(
+                "omnigen_service.urllib.request.build_opener"
+            ) as build_opener, mock.patch(
+                "omnigen_service.urllib.request.urlopen", return_value=response
+            ) as urlopen:
+                opened = service._open_mcp_request(mock.sentinel.request, timeout=60)
+
+        self.assertIs(opened, response)
+        urlopen.assert_called_once_with(mock.sentinel.request, timeout=60)
+        build_opener.assert_not_called()
 
 
 class McpClientTests(unittest.TestCase):
@@ -294,7 +365,9 @@ class McpClientTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             service = OmniGenService(Path(directory))
             service.set_token("secret-token")
-            with mock.patch("urllib.request.urlopen", side_effect=open_request):
+            with mock.patch.object(
+                service, "_open_mcp_request", side_effect=open_request
+            ):
                 result = service.call_tool("generate_image", {"prompt": "pixel art"})
 
         self.assertEqual(result, {"status": "succeeded"})
@@ -636,9 +709,15 @@ class ServerApiTests(unittest.TestCase):
         }
         self.service.delete_records.return_value = {"deleted_ids": ["record-1"]}
         self.patch = mock.patch.object(
-            server_module, "OMNIGEN_SERVICE", self.service, create=True
+            server_module, "GENERATION_PROVIDER", self.service, create=True
         )
         self.patch.start()
+        self.project_service_patch = mock.patch.object(
+            server_module,
+            "project_generation_service",
+            return_value=self.service,
+        )
+        self.project_service_patch.start()
         self.httpd = server_module.ThreadingHTTPServer(
             ("127.0.0.1", 0), server_module.AppHandler
         )
@@ -660,6 +739,7 @@ class ServerApiTests(unittest.TestCase):
         self.httpd.server_close()
         self.thread.join(timeout=2)
         self.patch.stop()
+        self.project_service_patch.stop()
         self.assertFalse(shutdown_thread.is_alive(), "HTTP shutdown timed out")
         self.assertFalse(self.thread.is_alive(), "HTTP server thread did not exit")
 
@@ -692,12 +772,12 @@ class ServerApiTests(unittest.TestCase):
                 self.service.list_image_models.return_value,
             ),
             (
-                "/api/omnigen/history",
+                "/api/omnigen/history?project_id=default",
                 "history",
                 self.service.list_history.return_value,
             ),
             (
-                "/api/omnigen/task?id=record-1",
+                "/api/omnigen/task?id=record-1&project_id=default",
                 "record",
                 self.service.refresh_task.return_value,
             ),
@@ -725,6 +805,7 @@ class ServerApiTests(unittest.TestCase):
             (
                 "/api/omnigen/generate",
                 {
+                    "project_id": "default",
                     "prompt": "hero",
                     "model": "image-a",
                     "params": {"seed": 7},
@@ -733,7 +814,7 @@ class ServerApiTests(unittest.TestCase):
             ),
             (
                 "/api/omnigen/history/delete",
-                {"ids": ["record-1"], "delete_files": True},
+                {"project_id": "default", "ids": ["record-1"], "delete_files": True},
                 "result",
             ),
         )
@@ -752,7 +833,15 @@ class ServerApiTests(unittest.TestCase):
         self.service.set_token.assert_called_once_with("new-token")
         self.service.test_connection.assert_called_once_with()
         self.service.submit_image.assert_called_once_with(
-            "hero", "image-a", {"seed": 7}
+            "hero",
+            "image-a",
+            {"seed": 7},
+            context={
+                "project_id": "default",
+                "asset_node_id": "category-other",
+                "workflow_run_id": None,
+                "actor": "user",
+            },
         )
         self.service.delete_records.assert_called_once_with(
             ["record-1"], delete_files=True
@@ -786,7 +875,7 @@ class ServerApiTests(unittest.TestCase):
         self.service.refresh_task.side_effect = refresh
 
         status, payload = self.request(
-            "POST", "/api/omnigen/history/refresh", {}
+            "POST", "/api/omnigen/history/refresh", {"project_id": "default"}
         )
 
         self.assertEqual(status, 200)
@@ -2024,6 +2113,7 @@ class RefreshTaskTests(unittest.TestCase):
     def test_succeeded_provider_image_shapes_download_first_url(self):
         result_url = "https://example.test/provider-result.png"
         payloads = (
+            {"status": "succeeded", "result_url": result_url},
             {"status": "succeeded", "images": [{"url": result_url}]},
             {"status": "succeeded", "output": {"image_url": result_url}},
         )

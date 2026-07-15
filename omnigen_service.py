@@ -2,9 +2,11 @@ import base64
 import binascii
 import copy
 import http.client
+import ipaddress
 import io
 import json
 import os
+import socket
 import tempfile
 import threading
 import time
@@ -68,7 +70,20 @@ class OmniGenError(RuntimeError):
 
 
 class OmniGenService:
-    def __init__(self, work_dir: Path, endpoint: str = OMNIGEN_ENDPOINT):
+    def __init__(
+        self,
+        work_dir: Path,
+        endpoint: str = OMNIGEN_ENDPOINT,
+        *,
+        settings_path: Path | None = None,
+        profile_dir: Path | None = None,
+        omnigen_dir: Path | None = None,
+        history_path: Path | None = None,
+        results_dir: Path | None = None,
+        trash_dir: Path | None = None,
+        transaction_lock_path: Path | None = None,
+        local_url_prefix: str = "/work/omnigen/results",
+    ):
         lexical_work_dir = Path(
             os.path.abspath(os.path.normpath(str(work_dir)))
         )
@@ -76,13 +91,16 @@ class OmniGenService:
             lexical_work_dir, "OmniGen work directory"
         )
         self.work_dir = lexical_work_dir.resolve()
-        self.omnigen_dir = self.work_dir / "omnigen"
-        self.settings_path = self.work_dir / "settings.json"
-        self.history_path = self.omnigen_dir / "history.json"
-        self.results_dir = self.omnigen_dir / "results"
-        self.trash_dir = self.omnigen_dir / ".trash"
-        self.transaction_lock_path = self.omnigen_dir / ".transactions.lock"
-        self.profile_dir = self.work_dir / "profile"
+        self.omnigen_dir = Path(omnigen_dir or (self.work_dir / "omnigen")).resolve()
+        self.settings_path = Path(settings_path or (self.work_dir / "settings.json")).resolve()
+        self.history_path = Path(history_path or (self.omnigen_dir / "history.json")).resolve()
+        self.results_dir = Path(results_dir or (self.omnigen_dir / "results")).resolve()
+        self.trash_dir = Path(trash_dir or (self.omnigen_dir / ".trash")).resolve()
+        self.transaction_lock_path = Path(
+            transaction_lock_path or (self.omnigen_dir / ".transactions.lock")
+        ).resolve()
+        self.profile_dir = Path(profile_dir or (self.work_dir / "profile")).resolve()
+        self.local_url_prefix = str(local_url_prefix or "").rstrip("/")
         self.endpoint = endpoint
         self._lock = threading.RLock()
 
@@ -93,9 +111,12 @@ class OmniGenService:
             (self.trash_dir, "OmniGen trash directory"),
         ):
             self._reject_link_or_junction(path, label)
-            path.mkdir(exist_ok=True)
+            path.mkdir(parents=True, exist_ok=True)
             self._reject_link_or_junction(path, label)
         self.profile_dir.mkdir(parents=True, exist_ok=True)
+        self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+        self.transaction_lock_path.parent.mkdir(parents=True, exist_ok=True)
         self._resolved_work_dir = self.work_dir.resolve()
         self._validate_managed_roots()
         with self._lock:
@@ -596,7 +617,7 @@ class OmniGenService:
                 return self._list_history_unlocked()
 
     def _create_record_unlocked(
-        self, prompt: str, model: str, params: dict
+        self, prompt: str, model: str, params: dict, context: dict | None = None
     ) -> dict:
         timestamp = self._utc_timestamp()
         record = {
@@ -618,15 +639,21 @@ class OmniGenService:
             "created_at": timestamp,
             "updated_at": timestamp,
         }
+        for key in ("project_id", "asset_node_id", "style_direction_id", "workflow_run_id", "actor"):
+            value = (context or {}).get(key)
+            if value is not None and str(value).strip():
+                record[key] = str(value).strip()
         history = self._read_history_unlocked()
         history["records"].insert(0, record)
         self._atomic_write_json(self.history_path, history)
         return copy.deepcopy(record)
 
-    def create_record(self, prompt: str, model: str, params: dict) -> dict:
+    def create_record(
+        self, prompt: str, model: str, params: dict, context: dict | None = None
+    ) -> dict:
         with self._lock:
             with self._file_transaction_lock():
-                return self._create_record_unlocked(prompt, model, params)
+                return self._create_record_unlocked(prompt, model, params, context)
 
     def _find_record_unlocked(self, record_id: str) -> dict:
         for record in self._read_history_unlocked()["records"]:
@@ -861,7 +888,7 @@ class OmniGenService:
                             record_id,
                             remote_url=response_url,
                             local_path=str(final_path),
-                            local_url=f"/work/omnigen/results/{final_path.name}",
+                            local_url=f"{self.local_url_prefix}/{final_path.name}",
                             width=width,
                             height=height,
                             bytes=len(image_bytes),
@@ -950,6 +977,7 @@ class OmniGenService:
     @staticmethod
     def _first_http_result_url(payload) -> str:
         result_keys = (
+            "result_url",
             "result",
             "results",
             "output",
@@ -1265,7 +1293,14 @@ class OmniGenService:
             self._write_settings(settings)
         return self.public_profile()
 
-    def submit_image(self, prompt: str, model: str, params: dict) -> dict:
+    def submit_image(
+        self,
+        prompt: str,
+        model: str,
+        params: dict,
+        *,
+        context: dict | None = None,
+    ) -> dict:
         prompt = str(prompt or "").strip()
         model = str(model or "").strip()
         if not prompt:
@@ -1275,7 +1310,7 @@ class OmniGenService:
         if not isinstance(params, dict):
             raise ValueError("Image params must be an object")
 
-        record = self.create_record(prompt, model, params)
+        record = self.create_record(prompt, model, params, context=context)
         try:
             payload = self.call_tool(
                 "generate_image",
@@ -1337,6 +1372,33 @@ class OmniGenService:
                 return ""
             return str(omnigen.get("token") or "")
 
+    def _mcp_endpoint_uses_private_network(self) -> bool:
+        parsed = urllib.parse.urlsplit(self.endpoint)
+        hostname = parsed.hostname
+        if not hostname:
+            return False
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            addresses = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+        except (OSError, ValueError):
+            return False
+        for address_info in addresses:
+            raw_address = str(address_info[4][0]).split("%", 1)[0]
+            try:
+                address = ipaddress.ip_address(raw_address)
+            except ValueError:
+                continue
+            if address.is_private or address.is_loopback or address.is_link_local:
+                return True
+        return False
+
+    def _open_mcp_request(self, request, *, timeout: int):
+        if self._mcp_endpoint_uses_private_network():
+            # Split-DNS MCP endpoints must not be tunneled through a public proxy.
+            direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            return direct_opener.open(request, timeout=timeout)
+        return urllib.request.urlopen(request, timeout=timeout)
+
     def _request_jsonrpc(
         self,
         method: str,
@@ -1364,7 +1426,7 @@ class OmniGenService:
                 },
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with self._open_mcp_request(request, timeout=60) as response:
                 content_type = response.headers.get("Content-Type", "")
                 raw_body = response.read(MAX_MCP_RESPONSE_BYTES + 1)
             if len(raw_body) > MAX_MCP_RESPONSE_BYTES:
@@ -1376,6 +1438,8 @@ class OmniGenService:
                 payload = self._parse_event_stream(body)
             else:
                 payload = json.loads(body)
+            if notification and payload is None:
+                return {}
             if not isinstance(payload, dict):
                 raise ValueError("OmniGen returned a non-object JSON-RPC response")
             if "error" in payload:

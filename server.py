@@ -28,12 +28,16 @@ from urllib.request import Request, urlopen
 from PIL import Image, ImageChops, ImageFilter
 
 from omnigen_service import OmniGenError, OmniGenService, redact_secret
+from project_service import ProjectError, ProjectService
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 APP_DIR = ROOT_DIR / "app"
 WORK_DIR = ROOT_DIR / "work"
-OMNIGEN_SERVICE = OmniGenService(WORK_DIR)
+GENERATION_PROVIDER = OmniGenService(WORK_DIR)
+PROJECT_SERVICE = ProjectService(WORK_DIR)
+PROJECT_GENERATION_SERVICES: dict[str, OmniGenService] = {}
+PROJECT_GENERATION_SERVICES_LOCK = threading.RLock()
 UPLOADS_DIR = WORK_DIR / "uploads"
 JOBS_DIR = WORK_DIR / "jobs"
 EXPORTS_DIR = WORK_DIR / "exports"
@@ -47,8 +51,95 @@ MAGIC_PREVIEW_LOCK = threading.Lock()
 PROCESS_PROGRESS_LOCK = threading.Lock()
 PROCESS_PROGRESS: dict[str, dict] = {}
 
+
+def project_generation_service(project_id: str) -> OmniGenService:
+    project = PROJECT_SERVICE.get_project(project_id)
+    root = Path(project["root_path"])
+    cache_key = f"{project_id}:{root}"
+    with PROJECT_GENERATION_SERVICES_LOCK:
+        service = PROJECT_GENERATION_SERVICES.get(cache_key)
+        if service is None:
+            paths = PROJECT_SERVICE.project_paths(project_id)
+            service = OmniGenService(
+                root,
+                endpoint=GENERATION_PROVIDER.endpoint,
+                settings_path=GENERATION_PROVIDER.settings_path,
+                profile_dir=GENERATION_PROVIDER.profile_dir,
+                omnigen_dir=paths["marker"] / "generation",
+                history_path=paths["generation_history"],
+                results_dir=paths["production_images"],
+                trash_dir=paths["trash"] / "generation",
+                transaction_lock_path=paths["locks"] / "generation.transactions.lock",
+                local_url_prefix=(
+                    f"/api/v1/projects/{quote(project_id, safe='')}/files/production/images"
+                ),
+            )
+            PROJECT_GENERATION_SERVICES[cache_key] = service
+        return service
+
+
+def required_project_id(value: object) -> str:
+    project_id = str(value or "").strip()
+    if not project_id:
+        raise ProjectError("project_id is required")
+    PROJECT_SERVICE.get_project(project_id)
+    return project_id
+
+
+def migrate_legacy_generation_history_to_default() -> None:
+    project_id = "default"
+    paths = PROJECT_SERVICE.project_paths(project_id)
+    marker = paths["marker"] / "migrations" / "legacy-generation-provider-v1.json"
+    if marker.is_file():
+        return
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    service = project_generation_service(project_id)
+    existing = service.list_history()
+    migrated = []
+    if not existing:
+        for source_record in GENERATION_PROVIDER.list_history():
+            record = dict(source_record)
+            record["project_id"] = project_id
+            source_path_text = str(record.get("local_path") or "").strip()
+            source_path = Path(source_path_text) if source_path_text else None
+            if source_path is not None and source_path.is_file():
+                suffix = source_path.suffix.lower() or ".png"
+                target = paths["production_images"] / f"{record.get('id')}{suffix}"
+                if not target.exists():
+                    shutil.copy2(source_path, target)
+                record["local_path"] = str(target)
+                record["local_url"] = (
+                    f"/api/v1/projects/default/files/production/images/{quote(target.name)}"
+                )
+            elif record.get("status") == "succeeded":
+                record["status"] = "download_failed"
+                record["local_path"] = ""
+                record["local_url"] = ""
+                record["error"] = "Legacy result file is unavailable"
+            migrated.append(record)
+        if migrated:
+            service._atomic_write_json(
+                service.history_path,
+                {"schema_version": 1, "project_id": project_id, "records": migrated},
+            )
+    service._atomic_write_json(
+        marker,
+        {
+            "schema_version": 1,
+            "completed_at": datetime.now().astimezone().isoformat(),
+            "migrated_records": len(migrated),
+        },
+    )
+    if migrated:
+        PROJECT_SERVICE.append_event(
+            project_id,
+            "generation.legacy-history-migrated",
+            actor="system",
+            data={"record_count": len(migrated)},
+        )
+
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 8894
+DEFAULT_PORT = 8895
 PRODUCT_NAME = "Sprite Forge Lab"
 PRODUCT_NAME_ZH = "灵帧工坊"
 DEFAULT_FFMPEG_FALLBACK_ROOT = Path(r"F:\Codex-Program\tools\ffmpeg\bin")
@@ -337,6 +428,39 @@ def choose_resource_folder() -> dict:
     path = Path(selected).expanduser().resolve()
     if not path.is_dir():
         raise ValueError(f"resource folder is not a folder: {path}")
+    return {"path": str(path), "cancelled": False}
+
+
+def choose_project_folder(*, existing_project: bool = False) -> dict:
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except Exception as exc:
+        raise RuntimeError("folder picker is unavailable on this Python runtime") from exc
+
+    initial_dir = Path(PROJECT_SERVICE.default_parent_path())
+    initial_dir.mkdir(parents=True, exist_ok=True)
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        root.attributes("-topmost", True)
+    except tk.TclError:
+        pass
+    try:
+        selected = filedialog.askdirectory(
+            parent=root,
+            title="打开已有项目" if existing_project else "选择项目存储位置",
+            initialdir=str(initial_dir),
+            mustexist=existing_project,
+        )
+    finally:
+        root.destroy()
+
+    if not selected:
+        return {"path": "", "cancelled": True}
+    path = Path(selected).expanduser().resolve()
+    if existing_project and not path.is_dir():
+        raise ValueError(f"project folder is not a folder: {path}")
     return {"path": str(path), "cancelled": False}
 
 
@@ -6790,43 +6914,134 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_json({"ok": False, "error": message}, status=status)
 
     @staticmethod
-    def safe_omnigen_error(error: Exception) -> str:
-        return redact_secret(error, OMNIGEN_SERVICE._token())
+    def safe_generation_error(error: Exception) -> str:
+        return redact_secret(error, GENERATION_PROVIDER._token())
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/v1/projects":
+            try:
+                self.send_json({"ok": True, **PROJECT_SERVICE.list_projects()})
+            except ProjectError as exc:
+                self.send_error_json(str(exc))
+            return
+        if parsed.path.startswith("/api/v1/projects/"):
+            parts = [part for part in parsed.path.split("/") if part]
+            try:
+                if len(parts) == 4:
+                    self.send_json({"ok": True, "project": PROJECT_SERVICE.get_project(parts[3])})
+                    return
+                if len(parts) == 5 and parts[4] == "events":
+                    limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0])
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "events": PROJECT_SERVICE.list_events(parts[3], limit=limit),
+                        }
+                    )
+                    return
+                if len(parts) == 5 and parts[4] == "workflow-runs":
+                    limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0])
+                    self.send_json(
+                        {"ok": True, "workflow_runs": PROJECT_SERVICE.list_workflow_runs(parts[3], limit=limit)}
+                    )
+                    return
+                if len(parts) == 6 and parts[4] == "workflow-runs":
+                    self.send_json(
+                        {"ok": True, "workflow_run": PROJECT_SERVICE.get_workflow_run(parts[3], unquote(parts[5]))}
+                    )
+                    return
+                if len(parts) == 5 and parts[4] == "asset-tree":
+                    self.send_json(
+                        {"ok": True, "asset_tree": PROJECT_SERVICE.list_asset_tree(parts[3])}
+                    )
+                    return
+                if len(parts) == 5 and parts[4] == "dashboard":
+                    self.send_json({"ok": True, "dashboard": PROJECT_SERVICE.project_dashboard(parts[3])})
+                    return
+                if len(parts) == 5 and parts[4] == "styles":
+                    self.send_json({"ok": True, "styles": PROJECT_SERVICE.list_style_directions(parts[3])})
+                    return
+                if len(parts) == 6 and parts[4] == "canvases":
+                    self.send_json({"ok": True, "canvas": PROJECT_SERVICE.load_canvas(parts[3], unquote(parts[5]))})
+                    return
+                if len(parts) == 5 and parts[4] == "generation-results":
+                    self.send_json({"ok": True, "results": PROJECT_SERVICE.list_generation_results(parts[3])})
+                    return
+                if len(parts) == 5 and parts[4] == "library":
+                    assets = PROJECT_SERVICE.list_library_assets(parts[3])
+                    for asset in assets:
+                        relative_path = str(asset.get("relative_path") or "")
+                        asset["url"] = f"/api/v1/projects/{quote(parts[3], safe='')}/files/{quote(relative_path, safe='/')}" if relative_path else ""
+                    self.send_json({"ok": True, "assets": assets})
+                    return
+                if len(parts) == 5 and parts[4] == "trash":
+                    self.send_json({"ok": True, "items": PROJECT_SERVICE.list_trash(parts[3])})
+                    return
+                if len(parts) == 5 and parts[4] == "integration":
+                    self.send_json({"ok": True, "integration": PROJECT_SERVICE.get_integration(parts[3])})
+                    return
+                if len(parts) >= 6 and parts[4] == "files":
+                    relative_path = unquote("/".join(parts[5:]))
+                    target = PROJECT_SERVICE.resolve_project_file(parts[3], relative_path)
+                    if not target.is_file():
+                        self.send_error(HTTPStatus.NOT_FOUND)
+                        return
+                    self.serve_file(
+                        target,
+                        allow_range=target.suffix.lower() in VIDEO_EXTENSIONS,
+                        cache_control="no-store",
+                    )
+                    return
+            except (ProjectError, ValueError) as exc:
+                self.send_error_json(str(exc))
+                return
         if parsed.path in {
             "/api/local-profile",
             "/api/omnigen/models",
             "/api/omnigen/history",
             "/api/omnigen/task",
+            "/api/v1/generation/models",
+            "/api/v1/generation/history",
+            "/api/v1/generation/task",
         }:
             try:
                 if parsed.path == "/api/local-profile":
                     self.send_json(
-                        {"ok": True, "profile": OMNIGEN_SERVICE.public_profile()}
+                        {"ok": True, "profile": GENERATION_PROVIDER.public_profile()}
                     )
                     return
-                if parsed.path == "/api/omnigen/models":
+                if parsed.path in {"/api/omnigen/models", "/api/v1/generation/models"}:
                     self.send_json(
-                        {"ok": True, "models": OMNIGEN_SERVICE.list_image_models()}
+                        {"ok": True, "models": GENERATION_PROVIDER.list_image_models()}
                     )
                     return
-                if parsed.path == "/api/omnigen/history":
+                if parsed.path in {"/api/omnigen/history", "/api/v1/generation/history"}:
+                    project_id = required_project_id(
+                        (parse_qs(parsed.query).get("project_id") or [""])[0]
+                    )
+                    if project_id == "default":
+                        migrate_legacy_generation_history_to_default()
                     self.send_json(
-                        {"ok": True, "history": OMNIGEN_SERVICE.list_history()}
+                        {
+                            "ok": True,
+                            "history": project_generation_service(project_id).list_history(),
+                        }
                     )
                     return
+                project_id = required_project_id(
+                    (parse_qs(parsed.query).get("project_id") or [""])[0]
+                )
                 record_id = (parse_qs(parsed.query).get("id") or [""])[0]
                 self.send_json(
                     {
                         "ok": True,
-                        "record": OMNIGEN_SERVICE.refresh_task(record_id),
+                        "record": project_generation_service(project_id).refresh_task(record_id),
                     }
                 )
                 return
-            except (OmniGenError, ValueError) as exc:
-                self.send_error_json(self.safe_omnigen_error(exc))
+            except (OmniGenError, ProjectError, ValueError) as exc:
+                self.send_error_json(self.safe_generation_error(exc))
                 return
         if parsed.path == "/api/app-version":
             self.send_json(
@@ -6893,46 +7108,228 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         progress_id_for_error = ""
         try:
+            if parsed.path == "/api/v1/projects":
+                payload = self.read_json_body()
+                project = PROJECT_SERVICE.create_project(
+                    display_name=payload.get("display_name"),
+                    slug=payload.get("slug"),
+                    parent_path=payload.get("parent_path"),
+                    project_type=payload.get("project_type"),
+                    aspect_ratio=payload.get("aspect_ratio"),
+                    description=payload.get("description"),
+                    style_tags=payload.get("style_tags"),
+                    create_mode=payload.get("create_mode") or "blank",
+                    template_id=payload.get("template_id") or "",
+                    default_background=payload.get("default_background") or "transparent",
+                    default_image_count=payload.get("default_image_count") or 4,
+                    default_file_format=payload.get("default_file_format") or "png",
+                )
+                self.send_json({"ok": True, "project": project}, status=HTTPStatus.CREATED)
+                return
+            if parsed.path == "/api/v1/projects/open":
+                payload = self.read_json_body()
+                project = PROJECT_SERVICE.open_project(payload.get("root_path"))
+                self.send_json({"ok": True, "project": project})
+                return
+            if parsed.path == "/api/v1/projects/select":
+                payload = self.read_json_body()
+                project = PROJECT_SERVICE.select_project(payload.get("project_id"))
+                self.send_json({"ok": True, "project": project})
+                return
+            if parsed.path == "/api/v1/projects/leave":
+                PROJECT_SERVICE.clear_active_project()
+                self.send_json({"ok": True})
+                return
+            if parsed.path == "/api/v1/projects/pick-parent":
+                result = choose_project_folder(existing_project=False)
+                self.send_json({"ok": True, "folder": result, "cancelled": result["cancelled"]})
+                return
+            if parsed.path == "/api/v1/projects/pick-existing":
+                result = choose_project_folder(existing_project=True)
+                self.send_json({"ok": True, "folder": result, "cancelled": result["cancelled"]})
+                return
+            if parsed.path.startswith("/api/v1/projects/") and parsed.path.endswith("/workflow-runs"):
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) != 5:
+                    raise ProjectError("Invalid workflow run endpoint")
+                payload = self.read_json_body()
+                steps = payload.get("steps")
+                if steps is not None and not isinstance(steps, list):
+                    raise ProjectError("Workflow steps must be an array")
+                workflow = PROJECT_SERVICE.create_workflow_run(
+                    parts[3],
+                    actor=payload.get("actor"),
+                    request_text=payload.get("request"),
+                    steps=steps,
+                    idempotency_key=str(
+                        self.headers.get("Idempotency-Key")
+                        or payload.get("idempotency_key")
+                        or ""
+                    ),
+                )
+                self.send_json({"ok": True, "workflow_run": workflow}, status=HTTPStatus.CREATED)
+                return
+            if parsed.path.startswith("/api/v1/projects/") and parsed.path.endswith("/asset-nodes"):
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) != 5:
+                    raise ProjectError("Invalid asset node endpoint")
+                payload = self.read_json_body()
+                node = PROJECT_SERVICE.create_asset_node(
+                    parts[3],
+                    parent_id=payload.get("parent_id"),
+                    name=payload.get("name"),
+                    node_type=payload.get("type") or "asset",
+                    target_count=payload.get("target_count") or 0,
+                    actor=payload.get("actor") or "user",
+                )
+                self.send_json({"ok": True, "node": node}, status=HTTPStatus.CREATED)
+                return
+            if parsed.path.startswith("/api/v1/projects/"):
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) == 5 and parts[4] == "styles":
+                    payload = self.read_json_body()
+                    direction = PROJECT_SERVICE.create_style_direction(
+                        parts[3], name=payload.get("name"), description=payload.get("description") or "",
+                        tags=payload.get("tags"), group_id=payload.get("group_id") or "", actor=payload.get("actor") or "user",
+                    )
+                    self.send_json({"ok": True, "style": direction}, status=HTTPStatus.CREATED)
+                    return
+                if len(parts) == 6 and parts[4] == "canvases":
+                    payload = self.read_json_body()
+                    canvas = PROJECT_SERVICE.save_canvas(parts[3], unquote(parts[5]), canvas=payload.get("canvas") or payload, actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "canvas": canvas})
+                    return
+                if len(parts) == 6 and parts[4] == "images" and parts[5] == "import":
+                    payload = self.read_json_body()
+                    image = PROJECT_SERVICE.import_project_image(parts[3], data_url=payload.get("data_url"), file_name=payload.get("file_name") or "reference.png", role=payload.get("role") or "reference", actor=payload.get("actor") or "user")
+                    image["url"] = f"/api/v1/projects/{quote(parts[3], safe='')}/files/{quote(image['relative_path'], safe='/')}"
+                    self.send_json({"ok": True, "image": image}, status=HTTPStatus.CREATED)
+                    return
+                if len(parts) == 6 and parts[4] == "generation-results" and parts[5] == "lifecycle":
+                    payload = self.read_json_body()
+                    results = PROJECT_SERVICE.update_generation_lifecycle(parts[3], record_ids=payload.get("record_ids"), lifecycle_status=payload.get("status"), actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "results": results})
+                    return
+                if len(parts) == 6 and parts[4] == "library" and parts[5] == "ingest":
+                    payload = self.read_json_body()
+                    assets = PROJECT_SERVICE.ingest_library_assets(parts[3], record_ids=payload.get("record_ids"), actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "assets": assets}, status=HTTPStatus.CREATED)
+                    return
+                if len(parts) == 6 and parts[4] == "trash" and parts[5] == "restore":
+                    payload = self.read_json_body()
+                    items = PROJECT_SERVICE.restore_trash_items(parts[3], payload.get("item_ids"), actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "items": items})
+                    return
+                if len(parts) == 6 and parts[4] == "trash" and parts[5] == "purge":
+                    payload = self.read_json_body()
+                    result = PROJECT_SERVICE.purge_trash_items(parts[3], payload.get("item_ids"), actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "result": result})
+                    return
+                if len(parts) == 6 and parts[4] == "integration" and parts[5] == "preflight":
+                    payload = self.read_json_body()
+                    result = PROJECT_SERVICE.integration_preflight(parts[3], payload.get("asset_ids"))
+                    self.send_json({"ok": True, "preflight": result})
+                    return
+                if len(parts) == 6 and parts[4] == "integration" and parts[5] == "deploy":
+                    payload = self.read_json_body()
+                    deployment = PROJECT_SERVICE.deploy_library_assets(parts[3], payload.get("asset_ids"), actor=payload.get("actor") or "user", idempotency_key=str(self.headers.get("Idempotency-Key") or payload.get("idempotency_key") or ""))
+                    self.send_json({"ok": True, "deployment": deployment}, status=HTTPStatus.CREATED)
+                    return
+            if parsed.path.startswith("/api/v1/projects/") and parsed.path.endswith("/processing-intakes"):
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) != 5:
+                    raise ProjectError("Invalid processing intake endpoint")
+                payload = self.read_json_body()
+                intake = PROJECT_SERVICE.create_processing_intake(
+                    parts[3],
+                    record_ids=payload.get("record_ids"),
+                    actor=payload.get("actor") or "user",
+                    idempotency_key=str(
+                        self.headers.get("Idempotency-Key")
+                        or payload.get("idempotency_key")
+                        or ""
+                    ),
+                )
+                for source in intake.get("sources", []):
+                    relative_path = str(source.get("working_relative_path") or "")
+                    source["url"] = (
+                        f"/api/v1/projects/{quote(parts[3], safe='')}/files/"
+                        f"{quote(relative_path, safe='/')}"
+                    )
+                self.send_json(
+                    {"ok": True, "processing_intake": intake},
+                    status=HTTPStatus.CREATED,
+                )
+                return
             if parsed.path == "/api/local-profile":
                 payload = self.read_json_body()
-                profile = OMNIGEN_SERVICE.update_profile(
+                profile = GENERATION_PROVIDER.update_profile(
                     payload.get("name"),
                     avatar_data_url=payload.get("avatar_data_url"),
                 )
                 self.send_json({"ok": True, "profile": profile})
                 return
-            if parsed.path == "/api/omnigen/token":
+            if parsed.path in {"/api/omnigen/token", "/api/v1/generation/provider-token"}:
                 payload = self.read_json_body()
-                profile = OMNIGEN_SERVICE.set_token(payload.get("token"))
+                profile = GENERATION_PROVIDER.set_token(payload.get("token"))
                 self.send_json({"ok": True, "profile": profile})
                 return
-            if parsed.path == "/api/omnigen/test":
-                profile = OMNIGEN_SERVICE.test_connection()
+            if parsed.path in {"/api/omnigen/test", "/api/v1/generation/provider-test"}:
+                profile = GENERATION_PROVIDER.test_connection()
                 self.send_json({"ok": True, "profile": profile})
                 return
-            if parsed.path == "/api/omnigen/generate":
+            if parsed.path in {"/api/omnigen/generate", "/api/v1/generation/tasks"}:
                 payload = self.read_json_body()
-                record = OMNIGEN_SERVICE.submit_image(
+                project_id = required_project_id(payload.get("project_id"))
+                asset_node = PROJECT_SERVICE.get_asset_node(
+                    project_id, payload.get("asset_node_id")
+                )
+                service = project_generation_service(project_id)
+                generation_context = {
+                    "project_id": project_id,
+                    "asset_node_id": asset_node["id"],
+                    "workflow_run_id": payload.get("workflow_run_id"),
+                    "actor": payload.get("actor") or "user",
+                }
+                if payload.get("style_direction_id"):
+                    generation_context["style_direction_id"] = payload.get("style_direction_id")
+                record = service.submit_image(
                     payload.get("prompt"),
                     payload.get("model"),
                     payload.get("params"),
+                    context=generation_context,
+                )
+                PROJECT_SERVICE.append_event(
+                    project_id,
+                    "generation.submitted",
+                    actor=str(payload.get("actor") or "user"),
+                    data={
+                        "record_id": record.get("id"),
+                        "asset_node_id": asset_node["id"],
+                        "media_type": "image",
+                        "model": record.get("model"),
+                    },
                 )
                 self.send_json({"ok": True, "record": record})
                 return
-            if parsed.path == "/api/omnigen/history/delete":
+            if parsed.path in {"/api/omnigen/history/delete", "/api/v1/generation/history/delete"}:
                 payload = self.read_json_body()
+                project_id = required_project_id(payload.get("project_id"))
                 record_ids = payload.get("ids")
                 if not isinstance(record_ids, list):
                     raise ValueError("History ids must be an array")
-                result = OMNIGEN_SERVICE.delete_records(
+                result = project_generation_service(project_id).delete_records(
                     record_ids,
                     delete_files=bool(payload.get("delete_files", False)),
                 )
                 self.send_json({"ok": True, "result": result})
                 return
-            if parsed.path == "/api/omnigen/history/refresh":
+            if parsed.path in {"/api/omnigen/history/refresh", "/api/v1/generation/history/refresh"}:
+                payload = self.read_json_body()
+                project_id = required_project_id(payload.get("project_id"))
+                service = project_generation_service(project_id)
                 errors = []
-                for record in OMNIGEN_SERVICE.list_history():
+                for record in service.list_history():
                     if record.get("status") not in {
                         "submitting",
                         "queued",
@@ -6941,18 +7338,18 @@ class AppHandler(BaseHTTPRequestHandler):
                         continue
                     record_id = str(record.get("id") or "")
                     try:
-                        OMNIGEN_SERVICE.refresh_task(record_id)
+                        service.refresh_task(record_id)
                     except Exception as exc:
                         errors.append(
                             {
                                 "id": record_id,
-                                "error": self.safe_omnigen_error(exc),
+                                "error": self.safe_generation_error(exc),
                             }
                         )
                 self.send_json(
                     {
                         "ok": True,
-                        "history": OMNIGEN_SERVICE.list_history(),
+                        "history": service.list_history(),
                         "errors": errors,
                     }
                 )
@@ -7404,7 +7801,10 @@ class AppHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
         except OmniGenError as exc:
-            self.send_error_json(self.safe_omnigen_error(exc))
+            self.send_error_json(self.safe_generation_error(exc))
+            return
+        except ProjectError as exc:
+            self.send_error_json(str(exc))
             return
         except FileNotFoundError as exc:
             if progress_id_for_error:
@@ -7421,12 +7821,99 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         parsed = urlparse(self.path)
-        if parsed.path == "/api/omnigen/token":
+        if parsed.path.startswith("/api/v1/projects/"):
+            parts = [part for part in parsed.path.split("/") if part]
             try:
-                profile = OMNIGEN_SERVICE.clear_token()
+                if len(parts) == 4:
+                    result = PROJECT_SERVICE.delete_project(parts[3])
+                    self.send_json({"ok": True, "result": result})
+                    return
+                if len(parts) == 6 and parts[4] == "styles":
+                    item = PROJECT_SERVICE.trash_style_direction(parts[3], unquote(parts[5]))
+                    self.send_json({"ok": True, "trash_item": item})
+                    return
+                if len(parts) == 6 and parts[4] == "library":
+                    item = PROJECT_SERVICE.trash_library_asset(parts[3], unquote(parts[5]))
+                    self.send_json({"ok": True, "trash_item": item})
+                    return
+            except ProjectError as exc:
+                self.send_error_json(str(exc))
+                return
+        if parsed.path.startswith("/api/v1/projects/") and "/asset-nodes/" in parsed.path:
+            parts = [part for part in parsed.path.split("/") if part]
+            try:
+                if len(parts) != 6 or parts[4] != "asset-nodes":
+                    raise ProjectError("Invalid asset node endpoint")
+                item = PROJECT_SERVICE.trash_asset_node(parts[3], unquote(parts[5]))
+                self.send_json({"ok": True, "trash_item": item})
+            except ProjectError as exc:
+                self.send_error_json(str(exc))
+            return
+        if parsed.path in {"/api/omnigen/token", "/api/v1/generation/provider-token"}:
+            try:
+                profile = GENERATION_PROVIDER.clear_token()
                 self.send_json({"ok": True, "profile": profile})
             except OmniGenError as exc:
-                self.send_error_json(self.safe_omnigen_error(exc))
+                self.send_error_json(self.safe_generation_error(exc))
+            return
+        self.send_error(HTTPStatus.NOT_FOUND)
+
+    def do_PATCH(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/v1/projects/"):
+            parts = [part for part in parsed.path.split("/") if part]
+            try:
+                if len(parts) == 4:
+                    payload = self.read_json_body()
+                    project = PROJECT_SERVICE.update_project(parts[3], changes=payload, actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "project": project})
+                    return
+                if len(parts) == 6 and parts[4] == "styles":
+                    payload = self.read_json_body()
+                    style = PROJECT_SERVICE.update_style_direction(parts[3], unquote(parts[5]), changes=payload, actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "style": style})
+                    return
+                if len(parts) == 6 and parts[4] == "library":
+                    payload = self.read_json_body()
+                    asset = PROJECT_SERVICE.update_library_asset(parts[3], unquote(parts[5]), changes=payload, actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "asset": asset})
+                    return
+                if len(parts) == 5 and parts[4] == "integration":
+                    payload = self.read_json_body()
+                    integration = PROJECT_SERVICE.update_integration(parts[3], target_root=payload.get("target_root") if "target_root" in payload else None, mappings=payload.get("mappings") if "mappings" in payload else None, actor=payload.get("actor") or "user")
+                    self.send_json({"ok": True, "integration": integration})
+                    return
+                if len(parts) == 6 and parts[4] == "workflow-runs":
+                    payload = self.read_json_body()
+                    workflow = PROJECT_SERVICE.update_workflow_run(
+                        parts[3],
+                        unquote(parts[5]),
+                        changes=payload,
+                        actor=payload.get("actor") or "system",
+                    )
+                    self.send_json({"ok": True, "workflow_run": workflow})
+                    return
+            except ProjectError as exc:
+                self.send_error_json(str(exc))
+                return
+        if parsed.path.startswith("/api/v1/projects/") and "/asset-nodes/" in parsed.path:
+            parts = [part for part in parsed.path.split("/") if part]
+            try:
+                if len(parts) != 6 or parts[4] != "asset-nodes":
+                    raise ProjectError("Invalid asset node endpoint")
+                payload = self.read_json_body()
+                node = PROJECT_SERVICE.update_asset_node(
+                    parts[3],
+                    unquote(parts[5]),
+                    name=payload.get("name") if "name" in payload else None,
+                    target_count=(
+                        payload.get("target_count") if "target_count" in payload else None
+                    ),
+                    actor=payload.get("actor") or "user",
+                )
+                self.send_json({"ok": True, "node": node})
+            except ProjectError as exc:
+                self.send_error_json(str(exc))
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
