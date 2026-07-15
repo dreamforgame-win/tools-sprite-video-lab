@@ -5,7 +5,60 @@ const DEFAULT_IMAGE_NAMING_SIZE_PRESETS = [
 ];
 
 const state = {
-  auth: null,
+  projectWorkspace: {
+    projects: [],
+    activeProject: null,
+    defaultParentPath: "",
+    resourceNode: "assets",
+    loading: true,
+  },
+  projectAssets: {
+    activeView: { style: "list", library: "list", production: "list" },
+    styles: [],
+    library: [],
+    trash: [],
+    integration: null,
+    dashboard: null,
+    selectedId: "",
+    selectedIds: new Set(),
+    filters: { query: "", status: "all", category: "all", format: "all", background: "all" },
+    styleGroup: "all",
+    settingsTab: "basic",
+    canvas: null,
+    canvasType: "",
+    canvasSelection: new Set(),
+    canvasUndo: [],
+    canvasRedo: [],
+    canvasDrag: null,
+    canvasTool: "select",
+    canvasSaveTimer: null,
+    canvasHost: null,
+    canvasItems: [],
+  },
+  localProfile: {
+    name: "游客",
+    avatar_url: "",
+    mcp: { configured: false, validated: false, model_count: 0, last_error: "" },
+  },
+  localProfileAvatarDataUrl: "",
+  aiCreation: {
+    view: "image",
+    loaded: false,
+    loading: false,
+    assetTree: [],
+    selectedAssetNodeId: "",
+    expandedNodeIds: new Set(["category-character", "category-scene", "category-ui", "category-icon", "category-effect", "category-other"]),
+    assetTreeQuery: "",
+    models: [],
+    history: [],
+    selectedModel: "",
+    selectedIds: new Set(),
+    pollingIds: new Set(),
+    pollTimers: new Map(),
+    filters: { media: "all", status: "all", query: "" },
+    resultFilters: { status: "all", type: "all", ratio: "all", background: "all", time: "all", sort: "newest" },
+    deleteIds: [],
+  },
   activeModule: "video",
   activeImagePage: "full",
   activeImageTool: "import",
@@ -187,7 +240,7 @@ const state = {
 
 const els = {};
 const STORAGE_KEY = "sprite-video-lab-session-v2";
-const AUTH_STORAGE_KEY = "sprite-video-lab-auth-v1";
+const THEME_STORAGE_KEY = "sprite-video-lab-theme-v1";
 const RUNTIME_MODEL_PROMPT_KEY = "sprite-forge-lab-runtime-model-prompt-v1";
 const PRODUCT_TITLE = "\u7075\u5E27\u5DE5\u574A";
 const PRODUCT_SUBTITLE = "Sprite Forge Lab";
@@ -292,9 +345,11 @@ let resourceExportTargetProjectId = "";
 let imageLightboxEditContext = null;
 let imageNamingFormatBrush = null;
 let imageNineSliceEditorState = null;
+let projectSlugEdited = false;
 
 document.addEventListener("DOMContentLoaded", () => {
   bindElements();
+  initSunnyStageTheme();
   ensureWorkflowPanelOrder();
   createImageProcessPanel();
   bindEvents();
@@ -303,8 +358,8 @@ document.addEventListener("DOMContentLoaded", () => {
   setActiveImageTool(state.activeImageTool, { announce: false });
   renderImageWorkflow();
   mergeSegmentRangeControls();
-  restoreAuthFromStorage();
-  updateAuthUI();
+  renderLocalProfile();
+  void loadLocalProfile();
   updatePreviewBackground(state.preview.background, false);
   updateExtractPreviewBackground(state.extractPreview.background, false);
   updateProcessPreviewBackground(state.processPreviewBackground.mode, state.processPreviewBackground.color, false, "video");
@@ -336,6 +391,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initWorkflowNavigation();
   enforceAutomaticAiSettings(false);
   startHotReloadPolling();
+  void initializeProjectWorkspace();
   window.addEventListener("beforeunload", persistSession);
 });
 
@@ -347,14 +403,126 @@ function bindElements() {
   [
     "appEyebrow",
     "appTitle",
+    "moduleSwitch",
+    "projectLauncher",
+    "projectLauncherGrid",
+    "projectCreateButton",
+    "projectOpenExistingButton",
+    "projectSidebar",
+    "projectBackButton",
+    "projectSidebarName",
+    "projectSidebarPath",
+    "projectDashboard",
+    "projectDashboardTitle",
+    "projectDashboardDescription",
+    "projectDashboardStatus",
+    "projectDashboardProgress",
+    "projectDashboardProgressBar",
+    "projectDashboardCategories",
+    "projectDashboardCover",
+    "projectDashboardType",
+    "projectDashboardRatio",
+    "projectDashboardCreated",
+    "projectDashboardSlug",
+    "projectDashboardPath",
+    "projectActivityList",
+    "projectAssetModule",
+    "projectAssetModuleKicker",
+    "projectAssetModuleTitle",
+    "projectAssetModuleActions",
+    "projectAssetModuleBody",
+    "projectCreateDialog",
+    "projectCreateForm",
+    "projectCreateCloseButton",
+    "projectCreateCancelButton",
+    "projectCreateSubmitButton",
+    "projectNameInput",
+    "projectSlugInput",
+    "projectTypeInput",
+    "projectAspectRatioInput",
+    "projectCustomAspectRatioField",
+    "projectCustomAspectRatioInput",
+    "projectDescriptionInput",
+    "projectStyleTagsInput",
+    "projectCreateModeInput",
+    "projectReferenceImagesField",
+    "projectReferenceImagesInput",
+    "projectTemplateField",
+    "projectTemplateInput",
+    "projectTemplateMoreButton",
+    "projectTemplateHelp",
+    "projectParentPathInput",
+    "projectChooseParentButton",
+    "projectRootPreview",
     "moduleVideoButton",
     "moduleVideoProcessButton",
+    "moduleAiCreationButton",
     "moduleImageButton",
     "moduleResourceButton",
     "moduleModelButton",
+    "themeLightButton",
+    "themeDarkButton",
     "sourceStrip",
     "videoModule",
     "videoProcessModule",
+    "aiCreationModule",
+    "aiAssetTreeCount",
+    "aiAssetNodeAddButton",
+    "aiAssetGroupAddButton",
+    "aiAssetTreeSearchInput",
+    "aiAssetTree",
+    "aiAssetNodeRenameButton",
+    "aiAssetNodeDeleteButton",
+    "aiCurrentNodeTitle",
+    "aiCurrentNodeMeta",
+    "aiChildAssetGrid",
+    "aiCurrentAssetInput",
+    "aiImageViewButton",
+    "aiHistoryViewButton",
+    "aiCreatePanel",
+    "aiConnectionBadge",
+    "aiTokenNotice",
+    "aiOpenProfileButton",
+    "aiPromptInput",
+    "aiAssetDescriptionInput",
+    "aiModelSelect",
+    "aiAspectRatioSelect",
+    "aiResolutionSelect",
+    "aiBackgroundSelect",
+    "aiCountSelect",
+    "aiReferenceImageInput",
+    "aiProjectStyleInput",
+    "aiNegativePromptInput",
+    "aiModelMeta",
+    "aiGenerateButton",
+    "aiImageWorkspace",
+    "aiProductionListViewButton",
+    "aiProductionCanvasViewButton",
+    "aiProductionCanvasWorkspace",
+    "aiProductionCanvasHost",
+    "aiHistoryWorkspace",
+    "aiResultSummary",
+    "aiResultStatusFilter",
+    "aiResultTypeFilter",
+    "aiResultRatioFilter",
+    "aiResultBackgroundFilter",
+    "aiResultTimeFilter",
+    "aiResultSortSelect",
+    "aiResultGrid",
+    "aiRefreshHistoryButton",
+    "aiHistoryMediaFilter",
+    "aiHistoryStatusFilter",
+    "aiHistorySearchInput",
+    "aiHistorySelectVisibleButton",
+    "aiHistoryClearSelectionButton",
+    "aiHistoryGrid",
+    "aiHistorySelectionBar",
+    "aiHistorySelectionCount",
+    "aiHistoryAddToImageButton",
+    "aiHistoryAddToLibraryButton",
+    "aiHistoryDeleteButton",
+    "aiTaskCount",
+    "aiTaskList",
     "videoProcessImportToolButton",
     "videoProcessPreviewToolButton",
     "videoProcessCompressToolButton",
@@ -542,10 +710,37 @@ function bindElements() {
     "saveOutputPathButton",
     "uploadDropzone",
     "uploadInput",
-    "accountPanel",
+    "localProfileButton",
     "accountName",
-    "loginButton",
-    "logoutButton",
+    "localProfileAvatar",
+    "localProfileAvatarFallback",
+    "localProfileMcpStatus",
+    "localProfileDialog",
+    "localProfileCloseButton",
+    "localProfileAvatarPreview",
+    "localProfileAvatarPreviewFallback",
+    "localProfileAvatarInput",
+    "localProfileNameInput",
+    "localProfileTokenInput",
+    "localProfileConnectionStatus",
+    "localProfileModelButton",
+    "localProfileClearTokenButton",
+    "localProfileTestButton",
+    "localProfileSaveButton",
+    "aiPreviewDialog",
+    "aiPreviewDialogTitle",
+    "aiPreviewCloseButton",
+    "aiPreviewImage",
+    "aiPreviewCaption",
+    "aiDeleteDialog",
+    "aiDeleteCloseButton",
+    "aiDeleteSummary",
+    "aiDeleteInitialActions",
+    "aiDeleteRecordOnlyButton",
+    "aiDeleteWithFilesButton",
+    "aiDeleteConfirmFiles",
+    "aiDeleteBackButton",
+    "aiDeleteConfirmFilesButton",
     "videoName",
     "videoSize",
     "videoFps",
@@ -1134,6 +1329,1270 @@ function getProcessPreviewState(scope = activeMatteScope()) {
   };
 }
 
+function activeProject() {
+  return state.projectWorkspace.activeProject;
+}
+
+function activeProjectId() {
+  return String(activeProject()?.id || "");
+}
+
+function projectTypeLabel(value) {
+  const labels = {
+    "game-art": "游戏美术",
+    "vertical-game": "竖屏游戏",
+    "horizontal-game": "横屏游戏",
+    "ui-system": "UI 系统",
+    other: "其他",
+  };
+  return labels[value] || value || "未设置";
+}
+
+function renderProjectLauncher() {
+  if (!els.projectLauncherGrid) return;
+  const projects = state.projectWorkspace.projects;
+  els.projectLauncherGrid.innerHTML = projects.length
+    ? projects.map((project) => {
+        const available = Boolean(project.available);
+        const description = project.description || (project.is_default ? "临时和非项目性工作默认存放在这里" : "本地文件化项目");
+        return `
+          <button class="project-launcher-card ${project.is_default ? "default" : ""} ${available ? "" : "unavailable"}" type="button" data-project-enter="${escapeHtml(project.id)}" ${available ? "" : "disabled"}>
+            <span class="project-launcher-card-head">
+              <span class="project-launcher-card-icon" aria-hidden="true">${project.cover_relative_path ? `<img src="/api/v1/projects/${encodeURIComponent(project.id)}/files/${escapeHtml(project.cover_relative_path)}" alt="">` : project.is_default ? "DF" : "PR"}</span>
+              <span class="project-launcher-card-status ${available ? "ready" : ""}">${available ? "本地可用" : "目录不可用"}</span>
+            </span>
+            <span class="project-launcher-card-copy">
+              <strong title="${escapeHtml(project.display_name || project.slug)}">${escapeHtml(project.display_name || project.slug)}</strong>
+              <span>${escapeHtml(project.slug || "-")} · ${escapeHtml(projectTypeLabel(project.project_type))}</span>
+              <small title="${escapeHtml(description)}">${escapeHtml(description)}</small>
+            </span>
+            <span class="project-launcher-card-footer">
+              <span title="${escapeHtml(project.root_path || "")}">${escapeHtml(project.root_path || "")}</span>
+              <strong>${available ? "进入项目 →" : "重新定位"}</strong>
+            </span>
+          </button>`;
+      }).join("")
+    : '<div class="project-launcher-empty">暂无可用项目</div>';
+}
+
+async function loadProjectRegistry() {
+  const data = await apiJson(`/api/v1/projects?ts=${Date.now()}`);
+  state.projectWorkspace.projects = Array.isArray(data.projects) ? data.projects : [];
+  state.projectWorkspace.defaultParentPath = data.default_parent_path || "";
+  return data;
+}
+
+async function initializeProjectWorkspace() {
+  document.body.classList.add("project-launcher-active");
+  state.projectWorkspace.loading = true;
+  try {
+    const data = await loadProjectRegistry();
+    renderProjectLauncher();
+    const resumed = state.projectWorkspace.projects.find(
+      (project) => project.id === data.active_project_id && project.available
+    );
+    if (resumed) {
+      await enterProject(resumed, { selectOnServer: false, announce: false });
+    } else {
+      showProjectLauncher({ clearServerSelection: false });
+    }
+  } catch (error) {
+    showProjectLauncher({ clearServerSelection: false });
+    if (els.projectLauncherGrid) {
+      els.projectLauncherGrid.innerHTML = `<div class="project-launcher-empty">读取项目失败：${escapeHtml(error.message)}</div>`;
+    }
+    setStatus(`读取项目失败：${error.message}`, "error");
+  } finally {
+    state.projectWorkspace.loading = false;
+  }
+}
+
+function showProjectLauncher({ clearServerSelection = true } = {}) {
+  state.projectWorkspace.activeProject = null;
+  document.body.classList.add("project-launcher-active");
+  document.body.classList.remove("project-active", "workbench-scroll-locked", "resource-scroll-locked");
+  document.documentElement.classList.remove("workbench-scroll-locked", "resource-scroll-locked");
+  if (els.projectLauncher) els.projectLauncher.hidden = false;
+  if (els.projectSidebar) els.projectSidebar.hidden = true;
+  if (els.moduleSwitch) els.moduleSwitch.hidden = true;
+  document.querySelectorAll(".module-view").forEach((view) => {
+    view.hidden = true;
+  });
+  els.appEyebrow.textContent = PRODUCT_SUBTITLE;
+  els.appTitle.textContent = "项目总览";
+  document.title = `项目总览 - ${PRODUCT_TITLE}`;
+  renderProjectLauncher();
+  if (clearServerSelection) {
+    void apiJson("/api/v1/projects/leave", { method: "POST", body: {} }).catch((error) => {
+      setStatus(`返回项目总览失败：${error.message}`, "error");
+    });
+  }
+}
+
+function syncProjectContext(project) {
+  if (!project) return;
+  if (els.projectSidebarName) els.projectSidebarName.textContent = project.display_name || project.slug;
+  if (els.projectSidebarPath) {
+    els.projectSidebarPath.textContent = project.root_path || "";
+    els.projectSidebarPath.title = project.root_path || "";
+  }
+  if (els.projectDashboardTitle) els.projectDashboardTitle.textContent = project.display_name || project.slug;
+  if (els.projectDashboardDescription) {
+    els.projectDashboardDescription.textContent = project.description || "项目资产生产与处理总览";
+  }
+  if (els.projectDashboardType) els.projectDashboardType.textContent = projectTypeLabel(project.project_type);
+  if (els.projectDashboardRatio) els.projectDashboardRatio.textContent = project.aspect_ratio || "1:1";
+  if (els.projectDashboardCreated) els.projectDashboardCreated.textContent = aiRecordDate({ created_at: project.created_at }) || "-";
+  if (els.projectDashboardCover) {
+    els.projectDashboardCover.innerHTML = project.cover_relative_path
+      ? `<img src="/api/v1/projects/${encodeURIComponent(project.id)}/files/${escapeHtml(project.cover_relative_path)}" alt="${escapeHtml(project.display_name || "项目封面")}">`
+      : "<span>PROJECT</span>";
+  }
+  if (els.projectDashboardSlug) els.projectDashboardSlug.textContent = project.slug || "-";
+  if (els.projectDashboardPath) {
+    els.projectDashboardPath.textContent = project.root_path || "-";
+    els.projectDashboardPath.title = project.root_path || "";
+  }
+  if (els.projectDashboardStatus) {
+    els.projectDashboardStatus.textContent = project.is_default ? "Default 项目" : "本地项目";
+  }
+  if (els.aiBackgroundSelect) els.aiBackgroundSelect.value = project.default_background || "transparent";
+  if (els.aiCountSelect) els.aiCountSelect.value = String(project.default_image_count || 4);
+}
+
+async function loadProjectActivity() {
+  const projectId = activeProjectId();
+  if (!projectId || !els.projectActivityList) return;
+  try {
+    const [eventData, workflowData] = await Promise.all([
+      apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/events?limit=12&ts=${Date.now()}`),
+      apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/workflow-runs?limit=8&ts=${Date.now()}`),
+    ]);
+    const events = Array.isArray(eventData.events) ? eventData.events.slice().reverse() : [];
+    const workflows = Array.isArray(workflowData.workflow_runs) ? workflowData.workflow_runs : [];
+    const labels = {
+      "project.created": "项目已创建",
+      "workflow.created": "自动化工作流已创建",
+      "workflow.updated": "自动化工作流状态已更新",
+      "generation.submitted": "资产生成任务已提交",
+      "generation.legacy-history-migrated": "旧生成记录已迁移",
+      "asset-node.created": "资产节点已创建",
+      "asset-node.updated": "资产节点已更新",
+      "asset-node.deleted": "资产节点已删除",
+      "asset-node.trashed": "资产节点已移入回收站",
+      "style.trashed": "风格方向已移入回收站",
+      "library.assets-ingested": "生成结果已加入资产管理",
+      "integration.deployed": "资产已部署到正式项目",
+      "processing.intake-created": "图片已加入资产处理",
+    };
+    const rows = [
+      ...workflows.map((workflow) => ({ type: `workflow:${workflow.status}`, actor: workflow.actor, created_at: workflow.updated_at, label: workflow.request || workflow.id })),
+      ...events.map((event) => ({ ...event, label: labels[event.type] || event.type || "项目事件" })),
+    ].sort((left, right) => new Date(right.created_at || 0) - new Date(left.created_at || 0)).slice(0, 14);
+    els.projectActivityList.innerHTML = rows.length
+      ? rows.map((event) => `
+          <div class="project-activity-item">
+            <strong>${escapeHtml(String(event.type || "").startsWith("workflow:") ? `[${String(event.type).split(":")[1]}] ${event.label}` : event.label)}</strong>
+            <small>${escapeHtml(event.actor || "system")} · ${escapeHtml(aiRecordDate({ created_at: event.created_at }))}</small>
+          </div>`).join("")
+      : '<div class="project-activity-empty">暂无运行记录</div>';
+  } catch (error) {
+    els.projectActivityList.innerHTML = `<div class="project-activity-empty">记录读取失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function loadProjectDashboard() {
+  const projectId = activeProjectId();
+  if (!projectId) return;
+  try {
+    const data = await apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/dashboard?ts=${Date.now()}`);
+    const dashboard = data.dashboard || {};
+    state.projectAssets.dashboard = dashboard;
+    const progress = Math.max(0, Math.min(100, Number(dashboard.progress || 0)));
+    if (els.projectDashboardProgress) els.projectDashboardProgress.textContent = `${progress}%`;
+    if (els.projectDashboardProgressBar) els.projectDashboardProgressBar.style.width = `${progress}%`;
+    if (els.projectDashboardCategories) {
+      els.projectDashboardCategories.innerHTML = (dashboard.categories || []).map((item) => `
+        <button type="button" data-project-module="aiCreation" data-asset-category="${escapeHtml(item.key)}"><span>${escapeHtml(item.label || item.key)}</span><strong>${Number(item.completed || 0)} / ${Number(item.target || 0)}</strong></button>
+      `).join("");
+    }
+  } catch (error) {
+    setStatus(`读取项目进度失败：${error.message}`, "error");
+  }
+}
+
+function syncLegacyResourceProject(project) {
+  if (!project) return;
+  const existing = resourceProjectById(project.id);
+  const resourceProject = existing || {
+    id: project.id,
+    name: project.display_name,
+    folderPath: "",
+    folderPaths: [],
+    resources: [],
+    createdAt: project.created_at,
+    updatedAt: project.updated_at,
+  };
+  resourceProject.name = project.display_name;
+  state.resourceManager.projects = [resourceProject];
+  state.resourceManager.activeProjectId = project.id;
+  state.resourceManager.view = "detail";
+  state.resourceManager.activeFolderTab = "all";
+}
+
+async function enterProject(project, { selectOnServer = true, announce = true } = {}) {
+  if (!project?.id || !project.available) return;
+  let selectedProject = project;
+  if (selectOnServer) {
+    const data = await apiJson("/api/v1/projects/select", {
+      method: "POST",
+      body: { project_id: project.id },
+    });
+    selectedProject = data.project;
+  }
+  const changedProject = activeProjectId() !== selectedProject.id;
+  state.projectWorkspace.activeProject = selectedProject;
+  if (changedProject) {
+    state.aiCreation.loaded = false;
+    state.aiCreation.assetTree = [];
+    state.aiCreation.selectedAssetNodeId = "";
+    state.aiCreation.assetTreeQuery = "";
+    state.aiCreation.history = [];
+    state.aiCreation.selectedIds.clear();
+    state.projectAssets.styles = [];
+    state.projectAssets.library = [];
+    state.projectAssets.trash = [];
+    state.projectAssets.integration = null;
+    state.projectAssets.selectedId = "";
+    state.projectAssets.selectedIds.clear();
+    state.projectAssets.canvas = null;
+  }
+  document.body.classList.remove("project-launcher-active");
+  document.body.classList.add("project-active");
+  if (els.projectLauncher) els.projectLauncher.hidden = true;
+  if (els.projectSidebar) els.projectSidebar.hidden = false;
+  if (els.moduleSwitch) els.moduleSwitch.hidden = true;
+  syncProjectContext(selectedProject);
+  syncLegacyResourceProject(selectedProject);
+  setActiveModule("project", { announce: false });
+  void loadProjectActivity();
+  void loadProjectDashboard();
+  if (announce) setStatus(`已进入项目：${selectedProject.display_name}`, "success");
+}
+
+function projectSlugFromName(value) {
+  return String(value || "")
+    .normalize("NFKD")
+    .replace(/[^\x00-\x7F]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
+function updateProjectRootPreview() {
+  if (!els.projectRootPreview) return;
+  const parent = els.projectParentPathInput?.value || state.projectWorkspace.defaultParentPath || "work/projects";
+  const slug = els.projectSlugInput?.value.trim() || "project-slug";
+  const separator = parent.includes("\\") ? "\\" : "/";
+  els.projectRootPreview.textContent = `${parent.replace(/[\\/]+$/, "")}${separator}${slug}`;
+}
+
+function openProjectCreateDialog() {
+  if (!els.projectCreateDialog) return;
+  projectSlugEdited = false;
+  els.projectCreateForm.reset();
+  els.projectTypeInput.value = "game-art";
+  els.projectAspectRatioInput.value = "1:1";
+  if (els.projectCustomAspectRatioInput) els.projectCustomAspectRatioInput.value = "";
+  if (els.projectCreateModeInput) els.projectCreateModeInput.value = "blank";
+  if (els.projectTemplateHelp) els.projectTemplateHelp.hidden = true;
+  if (els.projectTemplateMoreButton) {
+    els.projectTemplateMoreButton.setAttribute("aria-expanded", "false");
+    els.projectTemplateMoreButton.textContent = "查看更多模板";
+  }
+  els.projectParentPathInput.value = state.projectWorkspace.defaultParentPath || "";
+  syncProjectCreateModeFields();
+  updateProjectRootPreview();
+  els.projectCreateDialog.hidden = false;
+  window.requestAnimationFrame(() => els.projectNameInput?.focus());
+}
+
+function syncProjectCreateModeFields() {
+  const mode = els.projectCreateModeInput?.value || "blank";
+  if (els.projectReferenceImagesField) els.projectReferenceImagesField.hidden = mode !== "reference";
+  if (els.projectTemplateField) els.projectTemplateField.hidden = mode !== "template";
+  if (els.projectCustomAspectRatioField) els.projectCustomAspectRatioField.hidden = els.projectAspectRatioInput?.value !== "custom";
+}
+
+function toggleProjectTemplateHelp() {
+  if (!els.projectTemplateHelp || !els.projectTemplateMoreButton) return;
+  els.projectTemplateHelp.hidden = !els.projectTemplateHelp.hidden;
+  const expanded = !els.projectTemplateHelp.hidden;
+  els.projectTemplateMoreButton.setAttribute("aria-expanded", String(expanded));
+  els.projectTemplateMoreButton.textContent = expanded ? "收起模板说明" : "查看更多模板";
+}
+
+function validProjectAspectRatio(value) {
+  return /^\d+(?:\.\d+)?:\d+(?:\.\d+)?$/.test(String(value || "").trim());
+}
+
+function projectAspectRatioFromCreateForm() {
+  if (els.projectAspectRatioInput?.value !== "custom") return els.projectAspectRatioInput?.value || "1:1";
+  const custom = els.projectCustomAspectRatioInput?.value.trim() || "";
+  if (!validProjectAspectRatio(custom)) throw new Error("自定义比例需要使用“宽:高”格式，例如 21:9。");
+  return custom;
+}
+
+function closeProjectCreateDialog() {
+  if (els.projectCreateDialog) els.projectCreateDialog.hidden = true;
+}
+
+async function chooseProjectParent() {
+  await withBusy(els.projectChooseParentButton, async () => {
+    const data = await apiJson("/api/v1/projects/pick-parent", { method: "POST", body: {} });
+    if (data.cancelled) return;
+    els.projectParentPathInput.value = data.folder?.path || state.projectWorkspace.defaultParentPath;
+    updateProjectRootPreview();
+  });
+}
+
+async function createProjectFromForm(event) {
+  event.preventDefault();
+  const displayName = els.projectNameInput.value.trim();
+  if (displayName.length < 2 || displayName.length > 30) {
+    setStatus("项目名称需要 2 到 30 个字符。", "error");
+    els.projectNameInput.focus();
+    return;
+  }
+  const slug = els.projectSlugInput.value.trim();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(slug)) {
+    setStatus("英文目录名只能使用小写英文、数字和短横线。", "error");
+    els.projectSlugInput.focus();
+    return;
+  }
+  const createMode = els.projectCreateModeInput?.value || "blank";
+  if (createMode === "reference" && !(els.projectReferenceImagesInput?.files?.length)) {
+    setStatus("参考风格模式需要至少上传一张参考图。", "error");
+    els.projectReferenceImagesInput?.focus();
+    return;
+  }
+  if (createMode === "template" && !els.projectTemplateInput?.value) {
+    setStatus("模板模式需要选择一个项目模板。", "error");
+    els.projectTemplateInput?.focus();
+    return;
+  }
+  let aspectRatio = "1:1";
+  try {
+    aspectRatio = projectAspectRatioFromCreateForm();
+  } catch (error) {
+    setStatus(error.message, "error");
+    els.projectCustomAspectRatioInput?.focus();
+    return;
+  }
+  await withBusy(els.projectCreateSubmitButton, async () => {
+    const data = await apiJson("/api/v1/projects", {
+      method: "POST",
+      body: {
+        display_name: displayName,
+        slug,
+        parent_path: els.projectParentPathInput.value.trim(),
+        project_type: els.projectTypeInput.value,
+        aspect_ratio: aspectRatio,
+        description: els.projectDescriptionInput.value.trim(),
+        style_tags: String(els.projectStyleTagsInput?.value || "").split(/[,，]/).map((item) => item.trim()).filter(Boolean),
+        create_mode: createMode,
+        template_id: createMode === "template" ? els.projectTemplateInput?.value || "" : "",
+      },
+    });
+    if (createMode === "reference" && els.projectReferenceImagesInput?.files?.length) {
+      await uploadProjectReferenceImages(data.project.id, Array.from(els.projectReferenceImagesInput.files));
+    }
+    closeProjectCreateDialog();
+    await loadProjectRegistry();
+    renderProjectLauncher();
+    await enterProject(data.project, { selectOnServer: false });
+  });
+}
+
+async function openExistingProject() {
+  await withBusy(els.projectOpenExistingButton, async () => {
+    const picked = await apiJson("/api/v1/projects/pick-existing", { method: "POST", body: {} });
+    if (picked.cancelled) return;
+    const data = await apiJson("/api/v1/projects/open", {
+      method: "POST",
+      body: { root_path: picked.folder?.path || "" },
+    });
+    await loadProjectRegistry();
+    renderProjectLauncher();
+    await enterProject(data.project, { selectOnServer: false });
+  });
+}
+
+function fileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+    reader.readAsDataURL(file);
+  });
+}
+
+function askText(title, initialValue = "", placeholder = "") {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "resource-project-dialog";
+    overlay.innerHTML = `<form class="resource-project-dialog-panel project-text-dialog"><div class="resource-project-dialog-head"><h2>${escapeHtml(title)}</h2><button class="icon-button" type="button" data-text-cancel aria-label="关闭">×</button></div><label class="ai-field"><span>${escapeHtml(title)}</span><input type="text" maxlength="120" value="${escapeHtml(initialValue)}" placeholder="${escapeHtml(placeholder)}"></label><div class="resource-project-dialog-actions"><button class="ghost-button" type="button" data-text-cancel>取消</button><button class="primary-button" type="submit">确定</button></div></form>`;
+    document.body.appendChild(overlay);
+    document.body.classList.add("modal-open");
+    const input = overlay.querySelector("input");
+    const finish = (value) => { overlay.remove(); document.body.classList.remove("modal-open"); resolve(value); };
+    overlay.querySelectorAll("[data-text-cancel]").forEach((button) => button.addEventListener("click", () => finish(null)));
+    overlay.querySelector("form").addEventListener("submit", (event) => { event.preventDefault(); finish(input.value.trim() || null); });
+    window.requestAnimationFrame(() => { input.focus(); input.select(); });
+  });
+}
+
+async function uploadProjectReferenceImages(projectId, files, role = "reference") {
+  const uploaded = [];
+  for (const file of files.slice(0, 20)) {
+    const data = await apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/images/import`, {
+      method: "POST",
+      body: { data_url: await fileAsDataUrl(file), file_name: file.name, role },
+    });
+    if (data.image) uploaded.push(data.image);
+  }
+  return uploaded;
+}
+
+function projectModuleViewSwitch(kind) {
+  const active = state.projectAssets.activeView[kind] || "list";
+  return `
+    <div class="workbench-view-switch" role="group" aria-label="视图切换">
+      <button class="icon-text-button ${active === "list" ? "active" : ""}" type="button" data-project-action="set-view" data-kind="${kind}" data-view="list" aria-pressed="${active === "list"}">列表</button>
+      <button class="icon-text-button ${active === "canvas" ? "active" : ""}" type="button" data-project-action="set-view" data-kind="${kind}" data-view="canvas" aria-pressed="${active === "canvas"}">画布</button>
+    </div>`;
+}
+
+async function loadProjectAssetModule(moduleName) {
+  const projectId = activeProjectId();
+  if (!projectId || !els.projectAssetModuleBody) return;
+  els.projectAssetModuleBody.innerHTML = '<div class="project-tool-loading">正在读取项目文件...</div>';
+  try {
+    if (moduleName === "style") {
+      const [styles, history] = await Promise.all([
+        apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/styles?ts=${Date.now()}`),
+        apiJson(`/api/v1/generation/history?project_id=${encodeURIComponent(projectId)}&ts=${Date.now()}`),
+      ]);
+      state.projectAssets.styles = styles.styles || [];
+      state.aiCreation.history = history.history || [];
+    } else if (moduleName === "library") {
+      const data = await apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/library?ts=${Date.now()}`);
+      state.projectAssets.library = data.assets || [];
+    } else if (moduleName === "trash") {
+      const data = await apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/trash?ts=${Date.now()}`);
+      state.projectAssets.trash = data.items || [];
+      state.projectAssets.selectedIds.clear();
+    } else if (moduleName === "integration") {
+      const [integration, library] = await Promise.all([
+        apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/integration?ts=${Date.now()}`),
+        apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/library?ts=${Date.now()}`),
+      ]);
+      state.projectAssets.integration = integration.integration || {};
+      state.projectAssets.library = library.assets || [];
+    }
+    renderProjectAssetModule(moduleName);
+  } catch (error) {
+    els.projectAssetModuleBody.innerHTML = `<div class="project-tool-error">${escapeHtml(error.message)}</div>`;
+    setStatus(`读取${projectModuleLabel(moduleName)}失败：${error.message}`, "error");
+  }
+}
+
+function projectModuleLabel(moduleName) {
+  return { style: "风格探索", library: "资产管理", integration: "项目对接", trash: "回收站", settings: "项目设置" }[moduleName] || "项目资产";
+}
+
+function renderProjectAssetModule(moduleName = state.activeModule) {
+  if (!els.projectAssetModuleBody) return;
+  els.projectAssetModuleTitle.textContent = projectModuleLabel(moduleName);
+  els.projectAssetModuleKicker.textContent = {
+    style: "Style exploration", library: "Asset management", integration: "Project integration", trash: "Recoverable trash", settings: "Project settings",
+  }[moduleName] || "Project assets";
+  els.projectAssetModuleActions.innerHTML = "";
+  if (moduleName === "style") renderStyleModule();
+  else if (moduleName === "library") renderLibraryModule();
+  else if (moduleName === "integration") renderIntegrationModule();
+  else if (moduleName === "trash") renderTrashModule();
+  else if (moduleName === "settings") renderProjectSettingsModule();
+}
+
+function styleStatusLabel(status) {
+  return { normal: "普通", selected: "候选", confirmed: "已确认", archived: "已归档" }[status] || status || "普通";
+}
+
+function selectedStyleDirection() {
+  const styles = state.projectAssets.styles || [];
+  return styles.find((item) => item.id === state.projectAssets.selectedId) || styles[0] || null;
+}
+
+function styleCoverRecord(direction) {
+  const records = state.aiCreation.history.filter((item) => item.style_direction_id === direction?.id && item.status === "succeeded");
+  return records.find((item) => item.id === direction?.cover_image_id) || records[0] || null;
+}
+
+function styleReferenceUrl(reference) {
+  return reference?.relative_path
+    ? `/api/v1/projects/${encodeURIComponent(activeProjectId())}/files/${String(reference.relative_path).split("/").map(encodeURIComponent).join("/")}`
+    : "";
+}
+
+function styleCanvasItems() {
+  const directions = state.projectAssets.styles.map((item) => ({
+    id: item.id,
+    refType: "style_direction",
+    title: item.name,
+    subtitle: `${styleStatusLabel(item.status)} · ${(item.tags || []).join(" / ")}`,
+    image: styleCoverRecord(item)?.local_url || "",
+  }));
+  const images = state.aiCreation.history
+    .filter((item) => item.style_direction_id && item.status === "succeeded" && item.lifecycle_status !== "trashed")
+    .map((item) => ({
+      id: item.id,
+      refType: "generation_result",
+      title: item.prompt || "风格探索结果",
+      subtitle: `${styleStatusLabel(item.lifecycle_status || "normal")} · ${aiRecordDate(item)}`,
+      image: item.local_url || "",
+    }));
+  return [...directions, ...images];
+}
+
+function renderStyleModule() {
+  const styles = state.projectAssets.styles || [];
+  if (!state.projectAssets.selectedId && styles[0]) state.projectAssets.selectedId = styles[0].id;
+  const selected = selectedStyleDirection();
+  const view = state.projectAssets.activeView.style || "list";
+  els.projectAssetModuleActions.innerHTML = `${projectModuleViewSwitch("style")}<button class="primary-button" type="button" data-project-action="style-new">新建方向</button>`;
+  if (view === "canvas") {
+    els.projectAssetModuleBody.innerHTML = `<div class="style-canvas-layout">
+      <aside class="canvas-context-panel"><div class="canvas-side-head"><strong>已保存方向</strong><span>${styles.length}</span></div><div class="canvas-direction-list">${styles.map((item) => `<button class="${selected?.id === item.id ? "active" : ""}" type="button" data-project-action="style-select" data-id="${escapeHtml(item.id)}"><span class="asset-row-thumb">${styleCoverRecord(item)?.local_url ? `<img src="${escapeHtml(styleCoverRecord(item).local_url)}" alt="">` : "ST"}</span><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(styleStatusLabel(item.status))} · ${escapeHtml(aiRecordDate({ created_at: item.updated_at }))}</small></span></button>`).join("") || '<div class="asset-table-empty">暂无方向</div>'}</div></aside>
+      <div id="styleCanvasHost" class="asset-canvas-host"></div>
+      <aside class="canvas-settings-panel"><h3>生成设置</h3>${selected ? `<label class="ai-field"><span>描述需求</span><textarea id="stylePromptEditor" rows="6">${escapeHtml(selected.description || "")}</textarea></label><label class="ai-field"><span>参考图</span><input id="styleReferenceInput" type="file" accept="image/png,image/jpeg,image/webp" multiple></label><div class="ai-field-grid"><label class="ai-field"><span>图片比例</span><select id="styleRatioSelect">${["1:1","9:16","16:9","4:3","3:4"].map((value) => `<option ${value === (activeProject()?.default_aspect_ratio || "1:1") ? "selected" : ""}>${value}</option>`).join("")}</select></label><label class="ai-field"><span>生成数量</span><select id="styleCountSelect"><option>1</option><option selected>2</option><option>4</option></select></label></div><label class="ai-field"><span>风格强度</span><input id="styleStrengthInput" type="range" min="0" max="100" value="70"></label><details class="ai-advanced-settings"><summary>高级设置</summary><label class="ai-field"><span>负面提示</span><textarea id="styleNegativePromptInput" rows="3"></textarea></label></details><div class="asset-detail-actions"><button class="primary-button" type="button" data-project-action="style-generate" data-id="${escapeHtml(selected.id)}">生成图片</button><button class="ghost-button" type="button" data-project-action="style-variant" data-id="${escapeHtml(selected.id)}">生成变体</button></div><button class="ghost-button wide" type="button" data-project-action="style-status" data-status="confirmed" data-id="${escapeHtml(selected.id)}">确认为项目风格</button>` : '<div class="asset-detail-empty">选择方向后生成</div>'}</aside>
+    </div>`;
+    renderProjectCanvasModule("style", styleCanvasItems(), document.getElementById("styleCanvasHost"));
+    return;
+  }
+  const stats = { selected: styles.filter((item) => item.status === "selected").length, confirmed: styles.filter((item) => item.status === "confirmed").length, archived: styles.filter((item) => item.status === "archived").length };
+  const visibleStyles = styles.filter((item) => {
+    if (state.projectAssets.styleGroup === "ungrouped" && item.group_id) return false;
+    if (!["all", "ungrouped"].includes(state.projectAssets.styleGroup) && item.group_id !== state.projectAssets.styleGroup) return false;
+    return !state.projectAssets.filters.query || `${item.name} ${item.description} ${(item.tags || []).join(" ")}`.toLowerCase().includes(state.projectAssets.filters.query.toLowerCase());
+  });
+  els.projectAssetModuleBody.innerHTML = `
+    <div class="project-stat-strip">
+      <span><small>全部</small><strong>${styles.length}</strong></span><span><small>候选</small><strong>${stats.selected}</strong></span><span><small>已确认</small><strong>${stats.confirmed}</strong></span><span><small>已归档</small><strong>${stats.archived}</strong></span>
+    </div>
+    <div class="asset-list-layout style-list-layout">
+      <aside class="asset-filter-panel">
+        <h3>方向分组</h3>
+        <button class="filter-row ${state.projectAssets.styleGroup === "all" ? "active" : ""}" type="button" data-project-action="style-group-filter" data-group="all"><span>全部方向</span><strong>${styles.length}</strong></button>
+        <button class="filter-row ${state.projectAssets.styleGroup === "ungrouped" ? "active" : ""}" type="button" data-project-action="style-group-filter" data-group="ungrouped"><span>未分组</span><strong>${styles.filter((item) => !item.group_id).length}</strong></button>
+        ${Array.from(new Set(styles.map((item) => item.group_id).filter(Boolean))).map((group) => `<button class="filter-row ${state.projectAssets.styleGroup === group ? "active" : ""}" type="button" data-project-action="style-group-filter" data-group="${escapeHtml(group)}"><span>${escapeHtml(group)}</span><strong>${styles.filter((item) => item.group_id === group).length}</strong></button>`).join("")}
+      </aside>
+      <section class="asset-table-panel">
+        <div class="asset-table-toolbar"><input type="search" data-project-filter="query" placeholder="搜索方向名称、标签或描述" value="${escapeHtml(state.projectAssets.filters.query)}"><button class="ghost-button" type="button" data-project-action="style-new-group">新建分组</button><button class="ghost-button" type="button" data-project-action="style-manage-groups">管理分组</button></div>
+        <div class="asset-data-table style-data-table">
+          <div class="asset-data-head"><span>预览</span><span>方向名称</span><span>状态</span><span>更新时间</span><span></span></div>
+          ${visibleStyles.map((item) => {
+            const cover = styleCoverRecord(item);
+            return `<button class="asset-data-row ${selected?.id === item.id ? "selected" : ""}" type="button" data-project-action="style-select" data-id="${escapeHtml(item.id)}">
+              <span class="asset-row-thumb">${cover?.local_url ? `<img src="${escapeHtml(cover.local_url)}" alt="">` : "<b>ST</b>"}</span>
+              <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description || (item.tags || []).join(" / ") || "暂无描述")}</small></span>
+              <span><em class="lifecycle-chip ${escapeHtml(item.status)}">${escapeHtml(styleStatusLabel(item.status))}</em></span>
+              <span>${escapeHtml(aiRecordDate({ created_at: item.updated_at }))}</span><span>›</span>
+            </button>`;
+          }).join("") || '<div class="asset-table-empty">暂无风格方向</div>'}
+        </div>
+      </section>
+      <aside class="asset-detail-panel">${selected ? renderStyleDetail(selected) : '<div class="asset-detail-empty">选择或新建一个风格方向</div>'}</aside>
+    </div>`;
+}
+
+function renderStyleDetail(style) {
+  const cover = styleCoverRecord(style);
+  const images = state.aiCreation.history.filter((item) => item.style_direction_id === style.id && item.status === "succeeded");
+  return `
+    <div class="asset-detail-preview">${cover?.local_url ? `<img src="${escapeHtml(cover.local_url)}" alt="${escapeHtml(style.name)}">` : "<span>尚未生成风格图</span>"}</div>
+    <label class="ai-field"><span>方向名称</span><input id="styleNameEditor" type="text" maxlength="60" value="${escapeHtml(style.name)}"></label>
+    <label class="ai-field"><span>风格标签</span><input id="styleTagsEditor" type="text" value="${escapeHtml((style.tags || []).join(", "))}" placeholder="标签以逗号分隔"></label>
+    <label class="ai-field"><span>分组</span><input id="styleGroupEditor" type="text" value="${escapeHtml(style.group_id || "")}" placeholder="未分组"></label>
+    <label class="ai-field"><span>风格描述</span><textarea id="styleDescriptionEditor" rows="5">${escapeHtml(style.description || "")}</textarea></label>
+    <label class="ai-field"><span>继续探索</span><textarea id="stylePromptEditor" rows="4" placeholder="描述希望继续探索的视觉方向">${escapeHtml(style.description || "")}</textarea></label>
+    <label class="ai-field"><span>参考图</span><input id="styleReferenceInput" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
+    <div class="asset-reference-strip">${(style.reference_images || []).map((item) => `<img src="${escapeHtml(styleReferenceUrl(item))}" alt="${escapeHtml(item.file_name || "参考图")}">`).join("")}</div>
+    <div class="asset-reference-strip">${images.slice(0, 6).map((item) => `<button type="button" data-project-action="style-cover" data-id="${escapeHtml(item.id)}"><img src="${escapeHtml(item.local_url)}" alt=""></button>`).join("")}</div>
+    <dl class="asset-detail-meta"><div><dt>当前状态</dt><dd>${escapeHtml(styleStatusLabel(style.status))}</dd></div><div><dt>创建时间</dt><dd>${escapeHtml(aiRecordDate({ created_at: style.created_at }))}</dd></div><div><dt>更新时间</dt><dd>${escapeHtml(aiRecordDate({ created_at: style.updated_at }))}</dd></div></dl>
+    <div class="asset-detail-actions"><button class="primary-button" type="button" data-project-action="style-generate" data-id="${escapeHtml(style.id)}">生成图片</button><button class="ghost-button" type="button" data-project-action="style-save" data-id="${escapeHtml(style.id)}">保存</button></div>
+    <div class="asset-detail-actions"><button class="ghost-button" type="button" data-project-action="style-status" data-status="selected" data-id="${escapeHtml(style.id)}">设为候选</button><button class="ghost-button" type="button" data-project-action="style-status" data-status="confirmed" data-id="${escapeHtml(style.id)}">确认为项目风格</button></div>
+    <div class="asset-detail-actions"><button class="ghost-button" type="button" data-project-action="style-status" data-status="archived" data-id="${escapeHtml(style.id)}">归档</button><button class="ghost-button danger" type="button" data-project-action="style-delete" data-id="${escapeHtml(style.id)}">移入回收站</button></div>`;
+}
+
+function libraryStatusLabel(status) {
+  return { normal: "普通", selected: "已选", confirmed: "已确认", in_library: "已入库", archived: "已归档" }[status] || status || "已入库";
+}
+
+function selectedLibraryAsset() {
+  const assets = state.projectAssets.library || [];
+  return assets.find((item) => item.id === state.projectAssets.selectedId) || assets[0] || null;
+}
+
+function filteredLibraryAssets() {
+  const filters = state.projectAssets.filters;
+  return (state.projectAssets.library || []).filter((item) => {
+    if (filters.query && !`${item.name} ${(item.tags || []).join(" ")}`.toLowerCase().includes(filters.query.toLowerCase())) return false;
+    if (filters.status !== "all" && item.status !== filters.status) return false;
+    if (filters.category !== "all" && item.category !== filters.category) return false;
+    if (filters.format !== "all" && item.file_format !== filters.format) return false;
+    if (filters.background !== "all" && (item.background || "transparent") !== filters.background) return false;
+    return true;
+  });
+}
+
+function renderLibraryModule() {
+  const assets = state.projectAssets.library || [];
+  if (!state.projectAssets.selectedId && assets[0]) state.projectAssets.selectedId = assets[0].id;
+  const view = state.projectAssets.activeView.library || "list";
+  const selected = selectedLibraryAsset();
+  const visible = filteredLibraryAssets();
+  els.projectAssetModuleActions.innerHTML = `${projectModuleViewSwitch("library")}<button class="ghost-button" type="button" data-project-action="library-download-selected">下载已选</button>`;
+  if (view === "canvas") {
+    els.projectAssetModuleBody.innerHTML = `<div class="library-canvas-layout">
+      <aside class="canvas-context-panel"><h3>资产筛选</h3><label><span>分类</span><select data-project-filter="category"><option value="all">全部分类</option>${[["character","角色"],["scene","场景"],["ui","UI"],["icon","图标"],["effect","特效"],["other","其他"]].map(([value,label]) => `<option value="${value}" ${state.projectAssets.filters.category === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><label><span>状态</span><select data-project-filter="status"><option value="all">全部状态</option>${["in_library","selected","confirmed","archived"].map((value) => `<option value="${value}" ${state.projectAssets.filters.status === value ? "selected" : ""}>${libraryStatusLabel(value)}</option>`).join("")}</select></label><label><span>标签</span><input type="search" data-project-filter="query" value="${escapeHtml(state.projectAssets.filters.query)}" placeholder="搜索标签或名称"></label><div class="canvas-side-summary"><strong>${visible.length}</strong><span>项符合条件</span></div></aside>
+      <div id="libraryCanvasHost" class="asset-canvas-host"></div>
+      <aside class="canvas-settings-panel"><h3>当前资产</h3>${selected ? renderLibraryDetail(selected) : '<div class="asset-detail-empty">选择资产查看详情</div>'}</aside>
+    </div>`;
+    renderProjectCanvasModule("library", visible.map((item) => ({ id: item.id, refType: "library_asset", title: item.name, subtitle: `${item.category} · ${libraryStatusLabel(item.status)}`, image: item.url || "" })), document.getElementById("libraryCanvasHost"));
+    return;
+  }
+  els.projectAssetModuleBody.innerHTML = `
+    <div class="asset-list-layout library-list-layout">
+      <aside class="asset-filter-panel"><h3>筛选</h3>
+        <label><span>分类</span><select data-project-filter="category"><option value="all">全部分类</option>${[["character","角色"],["scene","场景"],["ui","UI"],["icon","图标"],["effect","特效"],["other","其他"]].map(([value,label]) => `<option value="${value}" ${state.projectAssets.filters.category === value ? "selected" : ""}>${label}</option>`).join("")}</select></label>
+        <label><span>状态</span><select data-project-filter="status"><option value="all">全部状态</option><option value="in_library" ${state.projectAssets.filters.status === "in_library" ? "selected" : ""}>已入库</option><option value="selected" ${state.projectAssets.filters.status === "selected" ? "selected" : ""}>已选</option><option value="confirmed" ${state.projectAssets.filters.status === "confirmed" ? "selected" : ""}>已确认</option><option value="archived" ${state.projectAssets.filters.status === "archived" ? "selected" : ""}>已归档</option></select></label>
+        <label><span>文件格式</span><select data-project-filter="format"><option value="all">全部格式</option><option value="png" ${state.projectAssets.filters.format === "png" ? "selected" : ""}>PNG</option><option value="jpg" ${state.projectAssets.filters.format === "jpg" ? "selected" : ""}>JPG</option><option value="webp" ${state.projectAssets.filters.format === "webp" ? "selected" : ""}>WebP</option></select></label>
+        <label><span>背景</span><select data-project-filter="background"><option value="all">全部背景</option><option value="transparent" ${state.projectAssets.filters.background === "transparent" ? "selected" : ""}>透明</option><option value="solid" ${state.projectAssets.filters.background === "solid" ? "selected" : ""}>纯色</option><option value="scene" ${state.projectAssets.filters.background === "scene" ? "selected" : ""}>场景</option></select></label>
+      </aside>
+      <section class="asset-table-panel"><div class="asset-table-toolbar"><input type="search" data-project-filter="query" placeholder="搜索名称或标签" value="${escapeHtml(state.projectAssets.filters.query)}"><span>${visible.length} 项资产</span></div>
+        <div class="asset-data-table library-data-table"><div class="asset-data-head"><span></span><span>缩略图</span><span>名称</span><span>分类</span><span>状态</span><span>格式 / 尺寸</span><span>更新时间</span></div>
+          ${visible.map((item) => `<div class="asset-data-row ${selected?.id === item.id ? "selected" : ""}" data-project-action="library-select" data-id="${escapeHtml(item.id)}">
+            <span><input type="checkbox" data-project-action="library-check" data-id="${escapeHtml(item.id)}" ${state.projectAssets.selectedIds.has(item.id) ? "checked" : ""}></span><span class="asset-row-thumb"><img src="${escapeHtml(item.url || "")}" alt=""></span>
+            <span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml((item.tags || []).join(" / ") || item.file_name || "")}</small></span><span>${escapeHtml(item.category || "other")}</span><span><em class="lifecycle-chip">${escapeHtml(libraryStatusLabel(item.status))}</em></span><span>${escapeHtml(String(item.file_format || "").toUpperCase())} · ${Number(item.width || 0)}×${Number(item.height || 0)}</span><span>${escapeHtml(aiRecordDate({ created_at: item.updated_at }))}</span>
+          </div>`).join("") || '<div class="asset-table-empty">暂无符合条件的资产</div>'}</div>
+      </section>
+      <aside class="asset-detail-panel">${selected ? renderLibraryDetail(selected) : '<div class="asset-detail-empty">选择资产查看详情</div>'}</aside>
+    </div>`;
+}
+
+function renderLibraryDetail(asset) {
+  return `<div class="asset-detail-preview checker"><img src="${escapeHtml(asset.url || "")}" alt="${escapeHtml(asset.name)}"></div>
+    <label class="ai-field"><span>名称</span><input id="libraryNameEditor" type="text" value="${escapeHtml(asset.name)}"></label>
+    <label class="ai-field"><span>标签</span><input id="libraryTagsEditor" type="text" value="${escapeHtml((asset.tags || []).join(", "))}"></label>
+    <label class="ai-field"><span>分类</span><select id="libraryCategoryEditor">${["character","scene","ui","icon","effect","other"].map((value) => `<option value="${value}" ${asset.category === value ? "selected" : ""}>${value}</option>`).join("")}</select></label>
+    <label class="ai-field"><span>状态</span><select id="libraryStatusEditor">${["in_library","selected","confirmed","archived"].map((value) => `<option value="${value}" ${asset.status === value ? "selected" : ""}>${libraryStatusLabel(value)}</option>`).join("")}</select></label>
+    <dl class="asset-detail-meta"><div><dt>尺寸</dt><dd>${Number(asset.width || 0)} × ${Number(asset.height || 0)}</dd></div><div><dt>格式</dt><dd>${escapeHtml(String(asset.file_format || "").toUpperCase())}</dd></div><div><dt>大小</dt><dd>${formatImageBytes(Number(asset.bytes || 0))}</dd></div><div><dt>背景</dt><dd>${escapeHtml(asset.background || "transparent")}</dd></div><div><dt>更新时间</dt><dd>${escapeHtml(aiRecordDate({ created_at: asset.updated_at }))}</dd></div><div><dt>来源资产</dt><dd>${escapeHtml(asset.source_asset_node_id || "-")}</dd></div><div><dt>来源项目</dt><dd>${escapeHtml(activeProject()?.display_name || "-")}</dd></div></dl>
+    <div class="asset-detail-actions"><a class="primary-button" href="${escapeHtml(asset.url || "")}" download="${escapeHtml(asset.file_name || "asset")}">下载素材</a><button class="ghost-button" type="button" data-project-action="library-save" data-id="${escapeHtml(asset.id)}">保存信息</button></div>
+    <div class="asset-detail-actions"><button class="ghost-button" type="button" data-project-action="library-preview" data-id="${escapeHtml(asset.id)}">预览原图</button><button class="ghost-button" type="button" data-project-action="library-remove" data-id="${escapeHtml(asset.id)}">移出资产管理</button><button class="ghost-button danger" type="button" data-project-action="library-delete" data-id="${escapeHtml(asset.id)}">删除</button></div>`;
+}
+
+function renderIntegrationModule() {
+  const integration = state.projectAssets.integration || { target_root: "", mappings: {}, deployments: [] };
+  const mappings = integration.mappings || {};
+  const categories = [["character","角色"],["scene","场景"],["ui","UI"],["icon","图标"],["effect","特效"],["other","其他"]];
+  els.projectAssetModuleActions.innerHTML = '<button class="ghost-button" type="button" data-project-action="integration-preflight">冲突预检</button><button class="primary-button" type="button" data-project-action="integration-deploy">部署已入库资产</button>';
+  els.projectAssetModuleBody.innerHTML = `<div class="integration-layout">
+    <section class="integration-config-panel"><h3>正式项目目录</h3><div class="path-picker-row"><input id="integrationTargetInput" type="text" value="${escapeHtml(integration.target_root || "")}" placeholder="选择或输入正式项目根目录"><button class="ghost-button" type="button" data-project-action="integration-browse">选择文件夹</button><button class="primary-button" type="button" data-project-action="integration-save">保存绑定</button></div>
+      <h3>分类映射</h3><div class="integration-mapping-grid">${categories.map(([key,label]) => `<label><span>${label}</span><input data-integration-mapping="${key}" value="${escapeHtml(mappings[key] || key)}" placeholder="目标相对目录"></label>`).join("")}</div>
+      <div id="integrationPreflightResult" class="integration-preflight-result"><span>部署前会检查目标路径、缺失文件、同名冲突和文件哈希。</span></div>
+    </section>
+    <aside class="integration-deployment-panel"><div class="integration-summary"><span><small>可部署资产</small><strong>${state.projectAssets.library.length}</strong></span><span><small>部署记录</small><strong>${(integration.deployments || []).length}</strong></span></div><h3>最近部署</h3>
+      <div class="deployment-list">${(integration.deployments || []).slice(0, 12).map((item) => `<article><strong>${escapeHtml(item.id)}</strong><span>${(item.files || []).length} 个文件 · ${escapeHtml(item.status)}</span><small>${escapeHtml(aiRecordDate({ created_at: item.created_at }))}</small></article>`).join("") || '<div class="asset-table-empty">暂无部署记录</div>'}</div>
+    </aside></div>`;
+}
+
+function trashTypeLabel(value) {
+  return { style_direction: "风格方向", generation_result: "生成结果", library_asset: "入库资产", asset_node: "资产节点" }[value] || value || "项目对象";
+}
+
+function renderTrashModule() {
+  const items = state.projectAssets.trash || [];
+  els.projectAssetModuleActions.innerHTML = '<button class="ghost-button" type="button" data-project-action="trash-restore-selected">批量恢复</button><button class="ghost-button danger" type="button" data-project-action="trash-purge-selected">彻底删除</button><button class="primary-button danger" type="button" data-project-action="trash-clear">清空回收站</button>';
+  els.projectAssetModuleBody.innerHTML = `<div class="trash-table"><div class="asset-data-head"><span></span><span>名称</span><span>类型</span><span>原位置</span><span>删除时间</span><span>操作</span></div>
+    ${items.map((item) => `<div class="asset-data-row"><span><input type="checkbox" data-project-action="trash-check" data-id="${escapeHtml(item.id)}" ${state.projectAssets.selectedIds.has(item.id) ? "checked" : ""}></span><span><strong>${escapeHtml(item.name || item.object_id)}</strong><small>${escapeHtml(item.object_id || "")}</small></span><span>${escapeHtml(trashTypeLabel(item.object_type))}</span><span>${escapeHtml(item.source_module || "-")}</span><span>${escapeHtml(aiRecordDate({ created_at: item.trashed_at }))}</span><span><button class="ghost-button tiny" type="button" data-project-action="trash-restore" data-id="${escapeHtml(item.id)}">恢复</button><button class="ghost-button tiny danger" type="button" data-project-action="trash-purge" data-id="${escapeHtml(item.id)}">彻底删除</button></span></div>`).join("") || '<div class="asset-table-empty">回收站为空</div>'}</div>`;
+}
+
+const PROJECT_RATIO_PRESETS = ["1:1", "9:16", "16:9", "4:3", "3:4"];
+
+function projectRatioOptions(value) {
+  const current = String(value || "1:1");
+  const custom = !PROJECT_RATIO_PRESETS.includes(current);
+  return `${PROJECT_RATIO_PRESETS.map((ratio) => `<option value="${ratio}" ${current === ratio ? "selected" : ""}>${ratio}</option>`).join("")}<option value="custom" ${custom ? "selected" : ""}>自定义</option>`;
+}
+
+function renderProjectSettingsModule() {
+  const project = activeProject() || {};
+  const tab = state.projectAssets.settingsTab;
+  els.projectAssetModuleActions.innerHTML = '<button class="primary-button" type="button" data-project-action="settings-save">保存设置</button>';
+  const tabs = [["basic","基础信息"],["generation","默认生成参数"],["style","风格设置"],["data","数据管理"]];
+  let body = "";
+  if (tab === "basic") body = `<div class="settings-form-grid"><label class="ai-field"><span>项目名称</span><input id="settingsProjectName" maxlength="30" value="${escapeHtml(project.display_name || "")}"></label><label class="ai-field"><span>项目类型</span><select id="settingsProjectType">${["game-art","vertical-game","horizontal-game","ui-system","other"].map((value) => `<option value="${value}" ${project.project_type === value ? "selected" : ""}>${projectTypeLabel(value)}</option>`).join("")}</select></label><label class="ai-field"><span>项目比例</span><select id="settingsAspectRatio">${projectRatioOptions(project.aspect_ratio)}</select></label><label class="ai-field"><span>自定义比例</span><input id="settingsCustomAspectRatio" value="${escapeHtml(PROJECT_RATIO_PRESETS.includes(project.aspect_ratio) ? "" : project.aspect_ratio || "")}" placeholder="选择自定义时填写，例如 21:9"></label><label class="ai-field settings-wide"><span>项目简介</span><textarea id="settingsDescription" maxlength="200" rows="5">${escapeHtml(project.description || "")}</textarea></label><label class="ai-field settings-wide"><span>项目封面</span><input id="settingsCoverInput" type="file" accept="image/png,image/jpeg,image/webp"></label></div>`;
+  else if (tab === "generation") body = `<div class="settings-form-grid"><label class="ai-field"><span>默认图片比例</span><select id="settingsDefaultRatio">${projectRatioOptions(project.default_aspect_ratio)}</select></label><label class="ai-field"><span>自定义默认比例</span><input id="settingsCustomDefaultRatio" value="${escapeHtml(PROJECT_RATIO_PRESETS.includes(project.default_aspect_ratio) ? "" : project.default_aspect_ratio || "")}" placeholder="选择自定义时填写，例如 21:9"></label><label class="ai-field"><span>默认背景</span><select id="settingsDefaultBackground"><option value="transparent" ${project.default_background === "transparent" ? "selected" : ""}>透明</option><option value="solid" ${project.default_background === "solid" ? "selected" : ""}>纯色</option><option value="scene" ${project.default_background === "scene" ? "selected" : ""}>场景</option></select></label><label class="ai-field"><span>默认生成数量</span><input id="settingsDefaultCount" type="number" min="1" max="16" value="${Number(project.default_image_count || 4)}"></label><label class="ai-field"><span>默认文件格式</span><select id="settingsDefaultFormat"><option value="png" ${project.default_file_format === "png" ? "selected" : ""}>PNG</option><option value="jpg" ${project.default_file_format === "jpg" ? "selected" : ""}>JPG</option><option value="webp" ${project.default_file_format === "webp" ? "selected" : ""}>WebP</option></select></label></div>`;
+  else if (tab === "style") {
+    const confirmed = state.projectAssets.styles.find((item) => item.id === project.current_style_direction_id) || null;
+    body = `<div class="settings-style-panel"><div class="settings-current-style"><span>当前项目风格</span><strong>${escapeHtml(confirmed?.name || "尚未确认")}</strong><small>${escapeHtml(confirmed?.description || "可在风格探索中选择候选并确认")}</small></div>${confirmed ? `<div class="asset-reference-strip">${(confirmed.reference_images || []).map((item) => `<img src="${escapeHtml(styleReferenceUrl(item))}" alt="${escapeHtml(item.file_name || "风格参考图")}">`).join("") || '<span>暂无风格参考图</span>'}</div>` : ""}<label class="ai-field"><span>默认风格标签</span><input id="settingsStyleTags" value="${escapeHtml((project.style_tags || []).join(", "))}"></label><button class="ghost-button danger" type="button" data-project-action="settings-unconfirm-style" ${confirmed ? "" : "disabled"}>解除风格确认</button></div>`;
+  } else body = `<div class="settings-data-panel"><article><div><strong>导出项目数据</strong><span>导出项目清单、风格、资产树、入库资产、画布和事件摘要。</span></div><button class="ghost-button" type="button" data-project-action="settings-export">导出 JSON</button></article><article><div><strong>清空生成结果</strong><span>所有生成结果会进入项目回收站，可在彻底删除前恢复。</span></div><button class="ghost-button danger" type="button" data-project-action="settings-clear-generation">移入回收站</button></article><article><div><strong>删除项目</strong><span>项目目录将移动到本机 deleted-projects 归档区。</span></div><button class="primary-button danger" type="button" data-project-action="settings-delete-project" ${project.is_default ? "disabled" : ""}>删除项目</button></article></div>`;
+  els.projectAssetModuleBody.innerHTML = `<div class="settings-layout"><nav class="settings-tabs">${tabs.map(([value,label]) => `<button class="${tab === value ? "active" : ""}" type="button" data-project-action="settings-tab" data-tab="${value}">${label}</button>`).join("")}</nav><section class="settings-panel">${body}</section></div>`;
+}
+
+async function loadCanvasForType(canvasType, items) {
+  const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/canvases/${encodeURIComponent(canvasType)}?ts=${Date.now()}`);
+  const canvas = data.canvas || { viewport: { x: 0, y: 0, zoom: 1 }, nodes: [] };
+  const known = new Set(canvas.nodes.map((node) => node.ref_id).filter(Boolean));
+  items.forEach((item, index) => {
+    if (known.has(item.id)) return;
+    canvas.nodes.push({ id: `node_${item.id}`, ref_type: item.refType || (canvasType === "style" ? "style_direction" : canvasType === "library" ? "library_asset" : "asset"), ref_id: item.id, title: item.title, note: item.subtitle || "", x: 70 + (index % 4) * 260, y: 70 + Math.floor(index / 4) * 210, width: 220, height: 160, locked: false, z_index: index, group_id: "" });
+  });
+  state.projectAssets.canvas = canvas;
+  state.projectAssets.canvasType = canvasType;
+  state.projectAssets.canvasSelection.clear();
+  return canvas;
+}
+
+async function renderProjectCanvasModule(canvasType, items, host = els.projectAssetModuleBody) {
+  host.innerHTML = '<div class="project-tool-loading">正在读取画布...</div>';
+  try {
+    await loadCanvasForType(canvasType, items);
+    paintProjectCanvas(host, items);
+    scheduleCanvasSave();
+  } catch (error) {
+    host.innerHTML = `<div class="project-tool-error">画布读取失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function canvasItemMap(items) {
+  return new Map(items.map((item) => [item.id, item]));
+}
+
+function paintProjectCanvas(host, items) {
+  const canvas = state.projectAssets.canvas || { viewport: { x: 0, y: 0, zoom: 1 }, nodes: [] };
+  const viewport = canvas.viewport || { x: 0, y: 0, zoom: 1 };
+  const itemMap = canvasItemMap(items);
+  const groups = Array.from(new Set((canvas.nodes || []).map((node) => node.group_id).filter(Boolean))).map((groupId) => {
+    const nodes = canvas.nodes.filter((node) => node.group_id === groupId);
+    const left = Math.min(...nodes.map((node) => Number(node.x || 0))) - 24;
+    const top = Math.min(...nodes.map((node) => Number(node.y || 0))) - 42;
+    const right = Math.max(...nodes.map((node) => Number(node.x || 0) + Number(node.width || 220))) + 24;
+    const bottom = Math.max(...nodes.map((node) => Number(node.y || 0) + Number(node.height || 160))) + 24;
+    return { id: groupId, left, top, width: right - left, height: bottom - top };
+  });
+  const edges = state.projectAssets.canvasType === "production"
+    ? (canvas.nodes || []).flatMap((node) => {
+      const item = itemMap.get(node.ref_id);
+      if (!item?.parentId) return [];
+      const parent = canvas.nodes.find((candidate) => candidate.ref_id === item.parentId);
+      if (!parent) return [];
+      const x1 = Number(parent.x || 0) + Number(parent.width || 220) / 2;
+      const y1 = Number(parent.y || 0) + Number(parent.height || 160) / 2;
+      const x2 = Number(node.x || 0) + Number(node.width || 220) / 2;
+      const y2 = Number(node.y || 0) + Number(node.height || 160) / 2;
+      const width = Math.hypot(x2 - x1, y2 - y1);
+      const angle = Math.atan2(y2 - y1, x2 - x1) * 180 / Math.PI;
+      return [{ x: x1, y: y1, width, angle }];
+    })
+    : [];
+  host.innerHTML = `<div class="asset-canvas-shell" data-canvas-type="${escapeHtml(state.projectAssets.canvasType)}">
+    <div class="asset-canvas-toolbar"><button type="button" data-canvas-action="select" class="${state.projectAssets.canvasTool === "select" ? "active" : ""}">选择</button><button type="button" data-canvas-action="box-select" class="${state.projectAssets.canvasTool === "box" ? "active" : ""}">框选</button><button type="button" data-canvas-action="note">便签</button><button type="button" data-canvas-action="group">分组</button><button type="button" data-canvas-action="align">对齐</button><button type="button" data-canvas-action="lock">锁定</button><button type="button" data-canvas-action="delete">删除</button><span></span><button class="asset-canvas-icon-button" type="button" data-canvas-action="undo" title="撤销" aria-label="撤销">↶</button><button class="asset-canvas-icon-button" type="button" data-canvas-action="redo" title="重做" aria-label="重做">↷</button><button class="asset-canvas-icon-button" type="button" data-canvas-action="zoom-out" title="缩小" aria-label="缩小">−</button><strong>${Math.round(Number(viewport.zoom || 1) * 100)}%</strong><button class="asset-canvas-icon-button" type="button" data-canvas-action="zoom-in" title="放大" aria-label="放大">＋</button><button type="button" data-canvas-action="fit">适应</button></div>
+    <div class="asset-canvas-viewport"><div class="asset-canvas-scene" style="transform:translate(${Number(viewport.x || 0)}px,${Number(viewport.y || 0)}px) scale(${Number(viewport.zoom || 1)})">
+      ${edges.map((edge) => `<span class="asset-canvas-edge" style="left:${edge.x}px;top:${edge.y}px;width:${edge.width}px;transform:rotate(${edge.angle}deg)"></span>`).join("")}
+      ${groups.map((group) => `<div class="asset-canvas-group-frame" style="left:${group.left}px;top:${group.top}px;width:${group.width}px;height:${group.height}px"><span>分组</span></div>`).join("")}
+      ${(canvas.nodes || []).map((node) => {
+        const item = itemMap.get(node.ref_id) || {};
+        const selected = state.projectAssets.canvasSelection.has(node.id);
+        return `<article class="asset-canvas-node ${selected ? "selected" : ""} ${node.locked ? "locked" : ""} ${node.ref_type === "note" ? "note" : ""}" data-canvas-node="${escapeHtml(node.id)}" style="left:${Number(node.x || 0)}px;top:${Number(node.y || 0)}px;width:${Number(node.width || 220)}px;height:${Number(node.height || 160)}px;z-index:${Number(node.z_index || 0)}">
+          ${item.image ? `<img src="${escapeHtml(item.image)}" alt="">` : node.ref_type === "note" ? "" : '<div class="asset-canvas-placeholder">ASSET</div>'}<div class="asset-canvas-node-copy"><strong>${escapeHtml(node.title || item.title || "未命名")}</strong><small>${escapeHtml(node.note || item.subtitle || "")}</small>${(node.tags || []).length ? `<span class="canvas-node-tags">${node.tags.map((tag) => `<em>${escapeHtml(tag)}</em>`).join("")}</span>` : ""}</div>${node.locked ? '<span class="canvas-lock-indicator">锁</span>' : ""}
+        </article>`;
+      }).join("")}
+    </div></div>
+    <div class="asset-canvas-status"><span>${(canvas.nodes || []).length} 个节点</span><span>已选 ${state.projectAssets.canvasSelection.size}</span><span>位置与视口已保存到项目文件</span></div>
+  </div>`;
+  bindCanvasInteractions(host, items);
+}
+
+function canvasSnapshot() {
+  return JSON.parse(JSON.stringify(state.projectAssets.canvas || {}));
+}
+
+function pushCanvasUndo() {
+  state.projectAssets.canvasUndo.push(canvasSnapshot());
+  if (state.projectAssets.canvasUndo.length > 50) state.projectAssets.canvasUndo.shift();
+  state.projectAssets.canvasRedo = [];
+}
+
+function scheduleCanvasSave() {
+  window.clearTimeout(state.projectAssets.canvasSaveTimer);
+  state.projectAssets.canvasSaveTimer = window.setTimeout(async () => {
+    if (!activeProjectId() || !state.projectAssets.canvasType || !state.projectAssets.canvas) return;
+    try {
+      await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/canvases/${encodeURIComponent(state.projectAssets.canvasType)}`, { method: "POST", body: { canvas: state.projectAssets.canvas } });
+    } catch (error) {
+      setStatus(`保存画布失败：${error.message}`, "error");
+    }
+  }, 450);
+}
+
+function bindCanvasInteractions(host, items) {
+  state.projectAssets.canvasHost = host;
+  state.projectAssets.canvasItems = items;
+  const viewportElement = host.querySelector(".asset-canvas-viewport");
+  viewportElement?.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const viewport = state.projectAssets.canvas.viewport;
+    viewport.zoom = Math.max(0.1, Math.min(4, Number(viewport.zoom || 1) * (event.deltaY > 0 ? 0.9 : 1.1)));
+    paintProjectCanvas(host, items);
+    scheduleCanvasSave();
+  }, { passive: false });
+  viewportElement?.addEventListener("pointerdown", (event) => {
+    const nodeElement = event.target.closest("[data-canvas-node]");
+    const canvas = state.projectAssets.canvas;
+    if (nodeElement) {
+      const node = canvas.nodes.find((item) => item.id === nodeElement.dataset.canvasNode);
+      if (!node) return;
+      if (state.projectAssets.canvasType === "library" && node.ref_type === "library_asset") {
+        state.projectAssets.selectedId = node.ref_id;
+        const asset = state.projectAssets.library.find((item) => item.id === node.ref_id);
+        const detail = host.closest(".library-canvas-layout")?.querySelector(".canvas-settings-panel");
+        if (asset && detail) detail.innerHTML = `<h3>当前资产</h3>${renderLibraryDetail(asset)}`;
+      }
+      if (!event.ctrlKey && !event.metaKey && !state.projectAssets.canvasSelection.has(node.id)) state.projectAssets.canvasSelection.clear();
+      if ((event.ctrlKey || event.metaKey) && state.projectAssets.canvasSelection.has(node.id)) state.projectAssets.canvasSelection.delete(node.id);
+      else state.projectAssets.canvasSelection.add(node.id);
+      if (!node.locked) {
+        pushCanvasUndo();
+        state.projectAssets.canvasDrag = { mode: "node", startX: event.clientX, startY: event.clientY, originals: new Map(canvas.nodes.filter((item) => state.projectAssets.canvasSelection.has(item.id) && !item.locked).map((item) => [item.id, { x: item.x, y: item.y }])) };
+      }
+    } else if (state.projectAssets.canvasTool === "box") {
+      if (!event.ctrlKey && !event.metaKey) state.projectAssets.canvasSelection.clear();
+      const rect = viewportElement.getBoundingClientRect();
+      state.projectAssets.canvasDrag = { mode: "box", startX: event.clientX, startY: event.clientY, viewportRect: rect };
+      const box = document.createElement("div");
+      box.className = "asset-canvas-selection-box";
+      viewportElement.appendChild(box);
+    } else {
+      if (!event.ctrlKey && !event.metaKey) state.projectAssets.canvasSelection.clear();
+      state.projectAssets.canvasDrag = { mode: "pan", startX: event.clientX, startY: event.clientY, x: Number(canvas.viewport.x || 0), y: Number(canvas.viewport.y || 0) };
+    }
+    paintProjectCanvas(host, items);
+  });
+  host.querySelectorAll("[data-canvas-action]").forEach((button) => button.addEventListener("click", () => handleCanvasAction(button.dataset.canvasAction, host, items)));
+  if (!document.documentElement.dataset.projectCanvasBound) {
+    document.documentElement.dataset.projectCanvasBound = "true";
+    document.addEventListener("pointermove", (event) => {
+      const drag = state.projectAssets.canvasDrag;
+      if (!drag || !state.projectAssets.canvas) return;
+      const currentHost = state.projectAssets.canvasHost;
+      if (!currentHost) return;
+      if (drag.mode === "node") {
+        const zoom = Number(state.projectAssets.canvas.viewport.zoom || 1);
+        drag.originals.forEach((origin, id) => {
+          const node = state.projectAssets.canvas.nodes.find((item) => item.id === id);
+          if (node) { node.x = origin.x + (event.clientX - drag.startX) / zoom; node.y = origin.y + (event.clientY - drag.startY) / zoom; }
+        });
+      } else if (drag.mode === "pan") {
+        state.projectAssets.canvas.viewport.x = drag.x + event.clientX - drag.startX;
+        state.projectAssets.canvas.viewport.y = drag.y + event.clientY - drag.startY;
+      } else if (drag.mode === "box") {
+        const left = Math.min(drag.startX, event.clientX);
+        const top = Math.min(drag.startY, event.clientY);
+        const right = Math.max(drag.startX, event.clientX);
+        const bottom = Math.max(drag.startY, event.clientY);
+        const selectionBox = currentHost.querySelector(".asset-canvas-selection-box");
+        if (selectionBox) {
+          selectionBox.style.left = `${left - drag.viewportRect.left}px`;
+          selectionBox.style.top = `${top - drag.viewportRect.top}px`;
+          selectionBox.style.width = `${right - left}px`;
+          selectionBox.style.height = `${bottom - top}px`;
+        }
+        currentHost.querySelectorAll("[data-canvas-node]").forEach((element) => {
+          const nodeRect = element.getBoundingClientRect();
+          if (nodeRect.left <= right && nodeRect.right >= left && nodeRect.top <= bottom && nodeRect.bottom >= top) {
+            state.projectAssets.canvasSelection.add(element.dataset.canvasNode);
+            element.classList.add("selected");
+          }
+        });
+        return;
+      }
+      const scene = currentHost.querySelector(".asset-canvas-scene");
+      if (scene) {
+        const viewport = state.projectAssets.canvas.viewport;
+        scene.style.transform = `translate(${viewport.x}px,${viewport.y}px) scale(${viewport.zoom})`;
+        state.projectAssets.canvas.nodes.forEach((node) => {
+          const element = scene.querySelector(`[data-canvas-node="${CSS.escape(node.id)}"]`);
+          if (element) { element.style.left = `${node.x}px`; element.style.top = `${node.y}px`; }
+        });
+      }
+    });
+    document.addEventListener("pointerup", () => {
+      if (!state.projectAssets.canvasDrag) return;
+      const wasBox = state.projectAssets.canvasDrag.mode === "box";
+      state.projectAssets.canvasDrag = null;
+      state.projectAssets.canvasHost?.querySelector(".asset-canvas-selection-box")?.remove();
+      if (wasBox && state.projectAssets.canvasHost) {
+        paintProjectCanvas(state.projectAssets.canvasHost, state.projectAssets.canvasItems);
+      }
+      scheduleCanvasSave();
+    });
+  }
+}
+
+function handleCanvasAction(action, host, items) {
+  const canvas = state.projectAssets.canvas;
+  if (!canvas) return;
+  if (action === "select" || action === "box-select") {
+    state.projectAssets.canvasTool = action === "box-select" ? "box" : "select";
+  } else if (action === "undo" && state.projectAssets.canvasUndo.length) {
+    state.projectAssets.canvasRedo.push(canvasSnapshot());
+    state.projectAssets.canvas = state.projectAssets.canvasUndo.pop();
+  } else if (action === "redo" && state.projectAssets.canvasRedo.length) {
+    state.projectAssets.canvasUndo.push(canvasSnapshot());
+    state.projectAssets.canvas = state.projectAssets.canvasRedo.pop();
+  } else if (action === "zoom-in" || action === "zoom-out") {
+    canvas.viewport.zoom = Math.max(0.1, Math.min(4, Number(canvas.viewport.zoom || 1) * (action === "zoom-in" ? 1.2 : 0.8)));
+  } else if (action === "fit") {
+    canvas.viewport = { x: 30, y: 30, zoom: 0.85 };
+  } else if (action === "note") {
+    void askText("便签内容", "新便签").then((note) => {
+      if (!note) return;
+      pushCanvasUndo();
+      canvas.nodes.push({ id: `note_${Date.now()}`, ref_type: "note", ref_id: "", title: "便签", note, x: 120, y: 120, width: 220, height: 140, locked: false, z_index: canvas.nodes.length, group_id: "" });
+      paintProjectCanvas(host, items);
+      scheduleCanvasSave();
+    });
+    return;
+  } else if (action === "group" && state.projectAssets.canvasSelection.size) {
+    pushCanvasUndo();
+    const groupId = `group_${Date.now()}`;
+    canvas.nodes.filter((node) => state.projectAssets.canvasSelection.has(node.id)).forEach((node) => { node.group_id = groupId; });
+  } else if (action === "align" && state.projectAssets.canvasSelection.size > 1) {
+    pushCanvasUndo();
+    const nodes = canvas.nodes.filter((node) => state.projectAssets.canvasSelection.has(node.id) && !node.locked);
+    const left = Math.min(...nodes.map((node) => Number(node.x || 0)));
+    nodes.forEach((node) => { node.x = left; });
+  } else if (action === "lock" && state.projectAssets.canvasSelection.size) {
+    pushCanvasUndo();
+    const nodes = canvas.nodes.filter((node) => state.projectAssets.canvasSelection.has(node.id));
+    const shouldLock = nodes.some((node) => !node.locked);
+    nodes.forEach((node) => { node.locked = shouldLock; });
+  } else if (action === "delete" && state.projectAssets.canvasSelection.size) {
+    pushCanvasUndo();
+    canvas.nodes = canvas.nodes.filter((node) => !state.projectAssets.canvasSelection.has(node.id));
+    state.projectAssets.canvasSelection.clear();
+  }
+  paintProjectCanvas(host, items);
+  scheduleCanvasSave();
+}
+
+function productionCanvasItems() {
+  const nodes = state.aiCreation.assetTree.map((item) => {
+    const record = state.aiCreation.history.find((entry) => entry.asset_node_id === item.id && entry.status === "succeeded");
+    return { id: item.id, parentId: item.parent_id || "", refType: item.type === "category" ? "category" : item.type === "group" ? "group" : "asset", title: item.name, subtitle: `${Number(item.generated_count || 0)} 已生成 · ${Number(item.selected_count || 0)} 已选`, image: record?.local_url || "" };
+  });
+  const selectedResults = state.aiCreation.history.filter((entry) => entry.status === "succeeded" && ["selected", "confirmed", "in_library"].includes(entry.lifecycle_status)).slice(0, 120).map((entry) => ({ id: entry.id, refType: "generation_result", title: entry.prompt || "已选结果", subtitle: `${entry.lifecycle_status} · ${aiRecordDate(entry)}`, image: entry.local_url || "" }));
+  return [...nodes, ...selectedResults];
+}
+
+function setProductionView(view) {
+  state.projectAssets.activeView.production = view === "canvas" ? "canvas" : "list";
+  const isCanvas = state.projectAssets.activeView.production === "canvas";
+  els.aiProductionListViewButton?.classList.toggle("active", !isCanvas);
+  els.aiProductionCanvasViewButton?.classList.toggle("active", isCanvas);
+  els.aiProductionListViewButton?.setAttribute("aria-pressed", String(!isCanvas));
+  els.aiProductionCanvasViewButton?.setAttribute("aria-pressed", String(isCanvas));
+  if (els.aiImageWorkspace) els.aiImageWorkspace.hidden = isCanvas || state.aiCreation.view === "history";
+  if (els.aiProductionCanvasWorkspace) els.aiProductionCanvasWorkspace.hidden = !isCanvas || state.aiCreation.view === "history";
+  if (isCanvas && els.aiProductionCanvasHost) void renderProjectCanvasModule("production", productionCanvasItems(), els.aiProductionCanvasHost);
+}
+
+function selectedProductionCanvasRecords() {
+  const canvas = state.projectAssets.canvas;
+  if (!canvas || state.projectAssets.canvasType !== "production") return [];
+  const ids = new Set(canvas.nodes.filter((node) => state.projectAssets.canvasSelection.has(node.id) && node.ref_type === "generation_result").map((node) => node.ref_id));
+  return state.aiCreation.history.filter((record) => ids.has(record.id));
+}
+
+async function handleProductionCanvasQuickAction(event) {
+  const button = event.target.closest("[data-production-canvas-action]");
+  if (!button) return;
+  const action = button.dataset.productionCanvasAction;
+  const canvas = state.projectAssets.canvas;
+  if (action === "add") {
+    const selected = selectedAiAssetNode();
+    const node = canvas?.nodes?.find((item) => item.ref_id === selected?.id);
+    if (!selected || !node) { setStatus("请先在结构树中选择要加入画布的资产节点。", "error"); return; }
+    state.projectAssets.canvasSelection.clear();
+    state.projectAssets.canvasSelection.add(node.id);
+    paintProjectCanvas(els.aiProductionCanvasHost, productionCanvasItems());
+    setStatus(`已在画布中定位“${selected.name}”。`, "success");
+    return;
+  }
+  if (action === "tag") {
+    const nodes = canvas?.nodes?.filter((node) => state.projectAssets.canvasSelection.has(node.id)) || [];
+    if (!nodes.length) { setStatus("请先选择要添加标签的画布节点。", "error"); return; }
+    const value = await askText("添加标签", "", "多个标签可用逗号分隔");
+    if (!value) return;
+    const tags = value.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean).slice(0, 12);
+    if (!tags.length) return;
+    pushCanvasUndo();
+    nodes.forEach((node) => { node.tags = Array.from(new Set([...(node.tags || []), ...tags])).slice(0, 12); });
+    paintProjectCanvas(els.aiProductionCanvasHost, productionCanvasItems());
+    scheduleCanvasSave();
+    setStatus(`已为 ${nodes.length} 个画布节点添加标签。`, "success");
+    return;
+  }
+  const records = selectedProductionCanvasRecords();
+  if (action === "delete") {
+    handleCanvasAction("delete", els.aiProductionCanvasHost, productionCanvasItems());
+    return;
+  }
+  if (!records.length) { setStatus("请先在画布中选择一个生成结果节点。", "error"); return; }
+  if (action === "variant") await submitAiImageGeneration(records[0]);
+  else if (action === "select-result") await setAiRecordLifecycle(records.map((record) => record.id), records.every((record) => record.lifecycle_status === "selected") ? "normal" : "selected");
+  else if (action === "library") await addAiRecordsToLibrary(records.map((record) => record.id));
+  else if (action === "download") records.forEach((record, index) => window.setTimeout(() => { const anchor = document.createElement("a"); anchor.href = record.local_url; anchor.download = ""; anchor.click(); }, index * 120));
+}
+
+function handleProjectAssetModuleInput(event) {
+  const field = event.target.closest("[data-project-filter]");
+  if (!field) return;
+  state.projectAssets.filters[field.dataset.projectFilter] = field.value;
+  if (state.activeModule === "style") renderStyleModule();
+  if (state.activeModule === "library") renderLibraryModule();
+}
+
+function handleProjectAssetModuleChange(event) {
+  handleProjectAssetModuleInput(event);
+}
+
+function handleProjectAssetModuleClick(event) {
+  const target = event.target.closest("[data-project-action]");
+  if (!target) return;
+  event.preventDefault();
+  void runProjectAssetAction(target.dataset.projectAction || "", target);
+}
+
+async function refreshCurrentProjectModule(message = "") {
+  await loadProjectAssetModule(state.activeModule);
+  await loadProjectDashboard();
+  if (message) setStatus(message, "success");
+}
+
+async function patchStyle(styleId, changes) {
+  const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/styles/${encodeURIComponent(styleId)}`, { method: "PATCH", body: changes });
+  const index = state.projectAssets.styles.findIndex((item) => item.id === styleId);
+  if (index >= 0) state.projectAssets.styles[index] = data.style;
+  return data.style;
+}
+
+async function generateStyleImage(style) {
+  await ensureAiCreationLoaded();
+  const prompt = document.getElementById("stylePromptEditor")?.value.trim() || style.description || style.name;
+  const model = state.aiCreation.selectedModel || state.aiCreation.models[0]?.id;
+  if (!prompt || !model) throw new Error("请先配置生成服务并填写风格描述");
+  const files = Array.from(document.getElementById("styleReferenceInput")?.files || []);
+  if (files.length) {
+    const references = await uploadProjectReferenceImages(activeProjectId(), files, `style-reference-${style.id}`);
+    style = await patchStyle(style.id, { reference_images: [...(style.reference_images || []), ...references].slice(-20) });
+  }
+  const count = Math.max(1, Math.min(4, Number(document.getElementById("styleCountSelect")?.value || 1)));
+  const params = {
+    aspect_ratio: document.getElementById("styleRatioSelect")?.value || activeProject()?.default_aspect_ratio || "1:1",
+    resolution: "1K",
+    style_strength: Number(document.getElementById("styleStrengthInput")?.value || 70),
+    negative_prompt: document.getElementById("styleNegativePromptInput")?.value.trim() || "",
+    reference_images: (style.reference_images || []).map((item) => item.relative_path),
+  };
+  const records = [];
+  for (let index = 0; index < count; index += 1) {
+    const data = await apiJson("/api/v1/generation/tasks", { method: "POST", body: { project_id: activeProjectId(), asset_node_id: "category-other", style_direction_id: style.id, prompt, model, params, actor: "user" } });
+    upsertAiHistoryRecord(data.record);
+    pollAiGenerationRecord(data.record.id);
+    records.push(data.record);
+  }
+  return records;
+}
+
+async function saveIntegration() {
+  const mappings = {};
+  document.querySelectorAll("[data-integration-mapping]").forEach((input) => { mappings[input.dataset.integrationMapping] = input.value.trim(); });
+  const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/integration`, { method: "PATCH", body: { target_root: document.getElementById("integrationTargetInput")?.value.trim() || "", mappings } });
+  state.projectAssets.integration = data.integration;
+  renderIntegrationModule();
+}
+
+async function integrationPreflight() {
+  await saveIntegration();
+  const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/integration/preflight`, { method: "POST", body: {} });
+  const result = data.preflight || {};
+  const host = document.getElementById("integrationPreflightResult");
+  if (host) host.innerHTML = `<strong class="${result.ready ? "success" : "error"}">${result.ready ? "预检通过" : "预检未通过"}</strong><span>${(result.files || []).length} 个文件，${(result.conflicts || []).length} 个冲突</span>${(result.errors || []).map((item) => `<small>${escapeHtml(item)}</small>`).join("")}`;
+  return result;
+}
+
+function downloadJsonFile(name, payload) {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url; anchor.download = name; anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportProjectData() {
+  const projectId = activeProjectId();
+  const [project, dashboard, styles, tree, results, library, trash, integration, styleCanvas, productionCanvas, libraryCanvas] = await Promise.all([
+    apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/dashboard`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/styles`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/asset-tree`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/generation-results`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/library`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/trash`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/integration`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/canvases/style`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/canvases/production`), apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/canvases/library`),
+  ]);
+  downloadJsonFile(`${activeProject()?.slug || "project"}-sprite-forge-data.json`, { schema_version: 1, exported_at: new Date().toISOString(), project: project.project, dashboard: dashboard.dashboard, styles: styles.styles, asset_tree: tree.asset_tree, generation_results: results.results, library: library.assets, trash: trash.items, integration: integration.integration, canvases: { style: styleCanvas.canvas, production: productionCanvas.canvas, library: libraryCanvas.canvas } });
+}
+
+async function saveProjectSettings() {
+  const tab = state.projectAssets.settingsTab;
+  const changes = {};
+  if (tab === "basic") {
+    const selectedRatio = document.getElementById("settingsAspectRatio")?.value || "1:1";
+    const aspectRatio = selectedRatio === "custom" ? document.getElementById("settingsCustomAspectRatio")?.value.trim() || "" : selectedRatio;
+    if (!validProjectAspectRatio(aspectRatio)) throw new Error("项目比例需要使用“宽:高”格式，例如 21:9。");
+    Object.assign(changes, { display_name: document.getElementById("settingsProjectName")?.value, project_type: document.getElementById("settingsProjectType")?.value, aspect_ratio: aspectRatio, description: document.getElementById("settingsDescription")?.value });
+  }
+  if (tab === "generation") {
+    const selectedRatio = document.getElementById("settingsDefaultRatio")?.value || "1:1";
+    const defaultRatio = selectedRatio === "custom" ? document.getElementById("settingsCustomDefaultRatio")?.value.trim() || "" : selectedRatio;
+    if (!validProjectAspectRatio(defaultRatio)) throw new Error("默认图片比例需要使用“宽:高”格式，例如 21:9。");
+    Object.assign(changes, { default_aspect_ratio: defaultRatio, default_background: document.getElementById("settingsDefaultBackground")?.value, default_image_count: Number(document.getElementById("settingsDefaultCount")?.value || 4), default_file_format: document.getElementById("settingsDefaultFormat")?.value });
+  }
+  if (tab === "style") changes.style_tags = String(document.getElementById("settingsStyleTags")?.value || "").split(/[,，]/).map((item) => item.trim()).filter(Boolean);
+  if (Object.keys(changes).length) {
+    const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}`, { method: "PATCH", body: changes });
+    state.projectWorkspace.activeProject = data.project;
+    syncProjectContext(data.project);
+  }
+  const cover = document.getElementById("settingsCoverInput")?.files?.[0];
+  if (cover) {
+    await uploadProjectReferenceImages(activeProjectId(), [cover], "cover");
+    const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}`);
+    state.projectWorkspace.activeProject = data.project;
+    syncProjectContext(data.project);
+  }
+  renderProjectSettingsModule();
+}
+
+async function runProjectAssetAction(action, target) {
+  const id = target.dataset.id || "";
+  try {
+    if (action === "set-view") {
+      state.projectAssets.activeView[target.dataset.kind] = target.dataset.view === "canvas" ? "canvas" : "list";
+      renderProjectAssetModule();
+    } else if (action === "style-new" || action === "style-new-group") {
+      const name = await askText(action === "style-new-group" ? "新方向名称" : "风格方向名称", "新风格方向");
+      if (!name) return;
+      const groupId = action === "style-new-group" ? await askText("分组名称", "探索组") || "" : "";
+      const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/styles`, { method: "POST", body: { name, group_id: groupId } });
+      state.projectAssets.styles.unshift(data.style); state.projectAssets.selectedId = data.style.id; renderStyleModule();
+    } else if (action === "style-select") {
+      state.projectAssets.selectedId = id; renderStyleModule();
+    } else if (action === "style-group-filter") {
+      state.projectAssets.styleGroup = target.dataset.group || "all"; renderStyleModule();
+    } else if (action === "style-manage-groups") {
+      const groups = Array.from(new Set(state.projectAssets.styles.map((item) => item.group_id).filter(Boolean)));
+      if (!groups.length) { setStatus("当前没有可管理的风格分组。", "error"); return; }
+      const source = await askText("要重命名的分组", groups[0], groups.join(" / ")); if (!source || !groups.includes(source)) return;
+      const next = await askText("新的分组名称", source); if (!next || next === source) return;
+      await Promise.all(state.projectAssets.styles.filter((item) => item.group_id === source).map((item) => patchStyle(item.id, { group_id: next })));
+      state.projectAssets.styleGroup = next; renderStyleModule();
+    } else if (action === "style-save") {
+      let style = state.projectAssets.styles.find((item) => item.id === id);
+      const references = await uploadProjectReferenceImages(activeProjectId(), Array.from(document.getElementById("styleReferenceInput")?.files || []), `style-reference-${id}`);
+      await patchStyle(id, { name: document.getElementById("styleNameEditor")?.value, description: document.getElementById("styleDescriptionEditor")?.value, tags: String(document.getElementById("styleTagsEditor")?.value || "").split(/[,，]/).map((item) => item.trim()).filter(Boolean), group_id: document.getElementById("styleGroupEditor")?.value, reference_images: [...(style?.reference_images || []), ...references].slice(-20) }); renderStyleModule(); setStatus("风格方向已保存。", "success");
+    } else if (action === "style-status") {
+      await patchStyle(id, { status: target.dataset.status });
+      if (target.dataset.status === "confirmed") {
+        const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}`);
+        state.projectWorkspace.activeProject = data.project; syncProjectContext(data.project);
+      }
+      renderStyleModule(); await loadProjectDashboard(); setStatus("风格状态已更新。", "success");
+    } else if (action === "style-cover") {
+      const style = selectedStyleDirection(); if (!style) return; await patchStyle(style.id, { cover_image_id: id }); renderStyleModule();
+    } else if (action === "style-generate" || action === "style-variant") {
+      const style = state.projectAssets.styles.find((item) => item.id === id); if (!style) return; await generateStyleImage(style); setStatus("风格探索任务已提交，结果会自动进入当前项目。", "success");
+    } else if (action === "style-delete") {
+      if (!window.confirm("将这个风格方向移入项目回收站？")) return; await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/styles/${encodeURIComponent(id)}`, { method: "DELETE" }); state.projectAssets.selectedId = ""; await refreshCurrentProjectModule("风格方向已移入回收站。");
+    } else if (action === "library-select") {
+      state.projectAssets.selectedId = id; renderLibraryModule();
+    } else if (action === "library-check") {
+      if (target.checked) state.projectAssets.selectedIds.add(id); else state.projectAssets.selectedIds.delete(id);
+    } else if (action === "library-save") {
+      const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/library/${encodeURIComponent(id)}`, { method: "PATCH", body: { name: document.getElementById("libraryNameEditor")?.value, tags: String(document.getElementById("libraryTagsEditor")?.value || "").split(/[,，]/).map((item) => item.trim()).filter(Boolean), category: document.getElementById("libraryCategoryEditor")?.value, status: document.getElementById("libraryStatusEditor")?.value } });
+      const index = state.projectAssets.library.findIndex((item) => item.id === id); if (index >= 0) state.projectAssets.library[index] = { ...data.asset, url: state.projectAssets.library[index].url }; renderLibraryModule(); setStatus("资产信息已保存。", "success");
+    } else if (action === "library-preview") {
+      const asset = state.projectAssets.library.find((item) => item.id === id); if (asset?.url) openImageLightbox(asset.url, asset.name || asset.file_name || "资产预览");
+    } else if (action === "library-remove") {
+      const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/library/${encodeURIComponent(id)}`, { method: "PATCH", body: { status: "archived" } });
+      const index = state.projectAssets.library.findIndex((item) => item.id === id); if (index >= 0) state.projectAssets.library[index] = { ...data.asset, url: state.projectAssets.library[index].url }; renderLibraryModule(); setStatus("资产已移出当前管理视图并归档。", "success");
+    } else if (action === "library-delete") {
+      if (!window.confirm("将这项资产移入项目回收站？")) return; await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/library/${encodeURIComponent(id)}`, { method: "DELETE" }); state.projectAssets.selectedId = ""; await refreshCurrentProjectModule("资产已移入回收站。");
+    } else if (action === "library-download-selected") {
+      const selected = state.projectAssets.library.filter((item) => state.projectAssets.selectedIds.has(item.id));
+      selected.forEach((item, index) => window.setTimeout(() => { const anchor = document.createElement("a"); anchor.href = item.url; anchor.download = item.file_name || item.name; anchor.click(); }, index * 120));
+    } else if (action === "integration-browse") {
+      const data = await apiJson("/api/select-resource-folder", { method: "POST" }); if (!data.cancelled && data.folder?.path) document.getElementById("integrationTargetInput").value = data.folder.path;
+    } else if (action === "integration-save") {
+      await saveIntegration(); setStatus("项目目录和分类映射已保存。", "success");
+    } else if (action === "integration-preflight") {
+      const result = await integrationPreflight(); setStatus(result.ready ? "项目对接预检通过。" : "项目对接预检发现问题。", result.ready ? "success" : "error");
+    } else if (action === "integration-deploy") {
+      const preflight = await integrationPreflight(); if (!preflight.ready || !window.confirm(`将 ${preflight.files.length} 个资产复制到正式项目目录？同名冲突会先备份。`)) return;
+      await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/integration/deploy`, { method: "POST", body: { idempotency_key: `ui-${Date.now()}` } }); await refreshCurrentProjectModule("资产部署并校验完成。");
+    } else if (action === "trash-check") {
+      if (target.checked) state.projectAssets.selectedIds.add(id); else state.projectAssets.selectedIds.delete(id);
+    } else if (action === "trash-restore" || action === "trash-restore-selected") {
+      const ids = action === "trash-restore" ? [id] : Array.from(state.projectAssets.selectedIds); if (!ids.length) return;
+      await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/trash/restore`, { method: "POST", body: { item_ids: ids } }); await refreshCurrentProjectModule("所选项目对象已恢复。");
+    } else if (action === "trash-purge" || action === "trash-purge-selected" || action === "trash-clear") {
+      const ids = action === "trash-purge" ? [id] : action === "trash-purge-selected" ? Array.from(state.projectAssets.selectedIds) : state.projectAssets.trash.map((item) => item.id); if (!ids.length) return;
+      if (!window.confirm(`彻底删除 ${ids.length} 项？此操作无法撤销。`)) return;
+      await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/trash/purge`, { method: "POST", body: { item_ids: ids } }); await refreshCurrentProjectModule("所选项目对象已彻底删除。");
+    } else if (action === "settings-tab") {
+      state.projectAssets.settingsTab = target.dataset.tab || "basic"; if (state.projectAssets.settingsTab === "style" && !state.projectAssets.styles.length) { const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/styles`); state.projectAssets.styles = data.styles || []; } renderProjectSettingsModule();
+    } else if (action === "settings-save") {
+      await saveProjectSettings(); setStatus("项目设置已保存。", "success");
+    } else if (action === "settings-unconfirm-style") {
+      const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}`, { method: "PATCH", body: { style_status: "unconfirmed", current_style_direction_id: "" } }); state.projectWorkspace.activeProject = data.project; renderProjectSettingsModule();
+    } else if (action === "settings-export") {
+      await exportProjectData(); setStatus("项目数据已导出。", "success");
+    } else if (action === "settings-clear-generation") {
+      const records = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/generation-results`); const ids = (records.results || []).filter((item) => item.lifecycle_status !== "trashed").map((item) => item.id); if (!ids.length || !window.confirm(`将 ${ids.length} 条生成结果移入回收站？`)) return;
+      await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/generation-results/lifecycle`, { method: "POST", body: { record_ids: ids, status: "trashed" } }); setStatus("生成结果已移入回收站。", "success");
+    } else if (action === "settings-delete-project") {
+      const project = activeProject(); if (!project || project.is_default || !window.confirm(`删除项目“${project.display_name}”？项目目录会移动到本机归档区。`)) return;
+      await apiJson(`/api/v1/projects/${encodeURIComponent(project.id)}`, { method: "DELETE" }); await loadProjectRegistry(); showProjectLauncher({ clearServerSelection: false }); setStatus("项目已移入本机归档区。", "success");
+    }
+  } catch (error) {
+    setStatus(`${projectModuleLabel(state.activeModule)}操作失败：${error.message}`, "error");
+  }
+}
+
+function activateProjectModule(moduleName, resourceNode = "") {
+  if (!activeProjectId()) return;
+  if (resourceNode) state.projectWorkspace.resourceNode = resourceNode;
+  setActiveModule(moduleName);
+}
+
 function setProcessPreview(preview, scope = activeMatteScope()) {
   if (scope === "image") {
     state.imageProcessPreview = preview;
@@ -1143,16 +2602,28 @@ function setProcessPreview(preview, scope = activeMatteScope()) {
 }
 
 function setActiveModule(moduleName, { announce = true } = {}) {
-  const nextModule = moduleName === "image" ? "image" : moduleName === "videoProcess" ? "videoProcess" : moduleName === "resource" ? "resource" : moduleName === "model" ? "model" : "video";
+  const nextModule = ["project", "style", "video", "videoProcess", "aiCreation", "image", "library", "integration", "trash", "settings", "resource", "model"].includes(moduleName) ? moduleName : "project";
   state.activeModule = nextModule;
+  const isProject = nextModule === "project";
   const isImage = nextModule === "image";
   const isVideoProcess = nextModule === "videoProcess";
+  const isAiCreation = nextModule === "aiCreation";
   const isResource = nextModule === "resource";
   const isModel = nextModule === "model";
-  const isFixedWorkbench = nextModule === "video" || isVideoProcess || isImage;
-  els.videoModule.hidden = isImage || isVideoProcess || isResource || isModel;
+  const isProjectAsset = ["style", "library", "integration", "trash", "settings"].includes(nextModule);
+  const isFixedWorkbench = isProject || nextModule === "video" || isVideoProcess || isAiCreation || isImage || isProjectAsset;
+  if (els.projectDashboard) {
+    els.projectDashboard.hidden = !isProject;
+  }
+  if (els.projectAssetModule) {
+    els.projectAssetModule.hidden = !isProjectAsset;
+  }
+  els.videoModule.hidden = nextModule !== "video";
   if (els.videoProcessModule) {
     els.videoProcessModule.hidden = !isVideoProcess;
+  }
+  if (els.aiCreationModule) {
+    els.aiCreationModule.hidden = !isAiCreation;
   }
   els.imageModule.hidden = !isImage;
   if (els.resourceModule) {
@@ -1163,30 +2634,62 @@ function setActiveModule(moduleName, { announce = true } = {}) {
   }
   els.moduleVideoButton.classList.toggle("active", nextModule === "video");
   els.moduleVideoProcessButton?.classList.toggle("active", isVideoProcess);
+  els.moduleAiCreationButton?.classList.toggle("active", isAiCreation);
   els.moduleImageButton.classList.toggle("active", isImage);
   els.moduleResourceButton?.classList.toggle("active", isResource);
   els.moduleModelButton?.classList.toggle("active", isModel);
   els.moduleVideoButton.setAttribute("aria-pressed", String(nextModule === "video"));
   els.moduleVideoProcessButton?.setAttribute("aria-pressed", String(isVideoProcess));
+  els.moduleAiCreationButton?.setAttribute("aria-pressed", String(isAiCreation));
   els.moduleImageButton.setAttribute("aria-pressed", String(isImage));
   els.moduleResourceButton?.setAttribute("aria-pressed", String(isResource));
   els.moduleModelButton?.setAttribute("aria-pressed", String(isModel));
+  document.querySelectorAll("[data-project-module]").forEach((button) => {
+    const resourceMatches = nextModule !== "resource"
+      || !button.dataset.resourceNode
+      || button.dataset.resourceNode === state.projectWorkspace.resourceNode;
+    const aiViewMatches = nextModule !== "aiCreation"
+      || !button.dataset.aiView
+      || button.dataset.aiView === state.aiCreation.view;
+    button.classList.toggle("active", button.dataset.projectModule === nextModule && resourceMatches && aiViewMatches);
+  });
   document.documentElement.classList.toggle("workbench-scroll-locked", isFixedWorkbench);
   document.body.classList.toggle("workbench-scroll-locked", isFixedWorkbench);
   document.documentElement.classList.toggle("resource-scroll-locked", isResource || isModel);
   document.body.classList.toggle("resource-scroll-locked", isResource || isModel);
-  els.appEyebrow.textContent = PRODUCT_SUBTITLE;
-  els.appTitle.textContent = isResource ? "\u8D44\u6E90\u7BA1\u7406" : isModel ? "\u6A21\u578B\u7BA1\u7406" : PRODUCT_TITLE;
-  document.title = isResource ? `\u8D44\u6E90\u7BA1\u7406 - ${PRODUCT_TITLE}` : isModel ? `\u6A21\u578B\u7BA1\u7406 - ${PRODUCT_TITLE}` : PRODUCT_TITLE;
+  const project = activeProject();
+  const moduleLabels = {
+    project: "项目总览",
+    style: "风格探索",
+    aiCreation: state.aiCreation.view === "history" ? "生成历史" : "图片生成",
+    image: "图片处理",
+    videoProcess: "视频处理",
+    video: "序列帧提取",
+    library: "资产管理",
+    integration: "项目对接",
+    trash: "回收站",
+    settings: "项目设置",
+    resource: "资源管理",
+    model: "项目设置",
+  };
+  els.appEyebrow.textContent = moduleLabels[nextModule] || PRODUCT_SUBTITLE;
+  els.appTitle.textContent = project?.display_name || PRODUCT_TITLE;
+  document.title = `${moduleLabels[nextModule] || PRODUCT_TITLE} - ${project?.display_name || PRODUCT_TITLE}`;
   if (isFixedWorkbench || isResource || isModel) {
     window.scrollTo({ top: 0, behavior: "auto" });
   }
   if (announce) {
-    setStatus(isModel ? "\u5DF2\u5207\u6362\u5230\u6A21\u578B\u7BA1\u7406\u3002" : isResource ? "\u5DF2\u5207\u6362\u5230\u8D44\u6E90\u7BA1\u7406\u3002" : isImage ? "\u5DF2\u5207\u6362\u5230\u56FE\u7247\u5904\u7406\u5165\u53E3\u3002" : isVideoProcess ? "\u5DF2\u5207\u6362\u5230\u89C6\u9891\u5904\u7406\u3002" : "\u5DF2\u5207\u6362\u5230\u89C6\u9891\u8F6C\u5E8F\u5217\u5E27\u3002", "success");
+    setStatus(`已切换到${moduleLabels[nextModule] || "项目工作台"}。`, "success");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
   if (isImage) {
     void refreshImagePasteButtonAvailability();
+  }
+  if (isAiCreation) {
+    void ensureAiCreationLoaded();
+  }
+  if (isProjectAsset) {
+    void loadProjectAssetModule(nextModule);
   }
   renderVideoProcessModule();
   renderResourceManager();
@@ -1720,8 +3223,8 @@ function restoreResourceManager(snapshot) {
   state.resourceSelection.clear();
 }
 
-function createResourceProject() {
-  const projectName = window.prompt("\u9879\u76EE\u540D\u79F0", `\u8D44\u6E90\u9879\u76EE ${resourceProjects().length + 1}`);
+async function createResourceProject() {
+  const projectName = await askText("\u9879\u76EE\u540D\u79F0", `\u8D44\u6E90\u9879\u76EE ${resourceProjects().length + 1}`);
   const name = String(projectName || "").trim();
   if (!name) {
     return;
@@ -3376,6 +4879,37 @@ function initWorkflowNavigation() {
   refreshWorkflowNavigation();
 }
 
+function normalizeThemeMode(mode) {
+  return mode === "dark" ? "dark" : "light";
+}
+
+function applySunnyStageTheme(mode, { persist = true } = {}) {
+  const normalized = normalizeThemeMode(mode);
+  document.documentElement.dataset.theme = normalized;
+  document.body.dataset.theme = normalized;
+  els.themeLightButton?.classList.toggle("active", normalized === "light");
+  els.themeDarkButton?.classList.toggle("active", normalized === "dark");
+  els.themeLightButton?.setAttribute("aria-pressed", String(normalized === "light"));
+  els.themeDarkButton?.setAttribute("aria-pressed", String(normalized === "dark"));
+  if (persist) {
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, normalized);
+    } catch {
+      // Theme persistence is optional; the visible mode still updates.
+    }
+  }
+}
+
+function initSunnyStageTheme() {
+  let savedTheme = "light";
+  try {
+    savedTheme = localStorage.getItem(THEME_STORAGE_KEY) || "light";
+  } catch {
+    savedTheme = "light";
+  }
+  applySunnyStageTheme(savedTheme, { persist: false });
+}
+
 function normalizeMagicResizeMode(mode) {
   return mode === "soft" ? "soft" : "hard";
 }
@@ -3400,11 +4934,56 @@ function setMagicResizeMode(mode, { clearExisting = true } = {}) {
 }
 
 function bindEvents() {
+  els.projectCreateButton?.addEventListener("click", openProjectCreateDialog);
+  els.projectOpenExistingButton?.addEventListener("click", () => void openExistingProject());
+  els.projectBackButton?.addEventListener("click", () => showProjectLauncher());
+  els.projectCreateCloseButton?.addEventListener("click", closeProjectCreateDialog);
+  els.projectCreateCancelButton?.addEventListener("click", closeProjectCreateDialog);
+  els.projectChooseParentButton?.addEventListener("click", () => void chooseProjectParent());
+  els.projectCreateForm?.addEventListener("submit", (event) => void createProjectFromForm(event));
+  els.projectCreateModeInput?.addEventListener("change", syncProjectCreateModeFields);
+  els.projectAspectRatioInput?.addEventListener("change", syncProjectCreateModeFields);
+  els.projectTemplateMoreButton?.addEventListener("click", toggleProjectTemplateHelp);
+  els.projectNameInput?.addEventListener("input", () => {
+    if (!projectSlugEdited) {
+      els.projectSlugInput.value = projectSlugFromName(els.projectNameInput.value);
+    }
+    updateProjectRootPreview();
+  });
+  els.projectSlugInput?.addEventListener("input", () => {
+    projectSlugEdited = true;
+    els.projectSlugInput.value = els.projectSlugInput.value.toLowerCase().replace(/[^a-z0-9-]/g, "");
+    updateProjectRootPreview();
+  });
+  els.aiProductionListViewButton?.addEventListener("click", () => setProductionView("list"));
+  els.aiProductionCanvasViewButton?.addEventListener("click", () => setProductionView("canvas"));
+  els.aiProductionCanvasWorkspace?.addEventListener("click", (event) => void handleProductionCanvasQuickAction(event));
+  els.projectAssetModuleBody?.addEventListener("click", handleProjectAssetModuleClick);
+  els.projectAssetModuleBody?.addEventListener("input", handleProjectAssetModuleInput);
+  els.projectAssetModuleBody?.addEventListener("change", handleProjectAssetModuleChange);
+  els.projectAssetModuleActions?.addEventListener("click", handleProjectAssetModuleClick);
+  els.projectLauncherGrid?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-project-enter]");
+    if (!button) return;
+    const project = state.projectWorkspace.projects.find((item) => item.id === button.dataset.projectEnter);
+    if (project) void enterProject(project);
+  });
+  [els.projectSidebar, els.projectDashboard].forEach((container) => {
+    container?.addEventListener("click", (event) => {
+      const button = event.target.closest("[data-project-module]");
+      if (!button || button.disabled) return;
+      if (button.dataset.assetCategory) state.aiCreation.selectedAssetNodeId = `category-${button.dataset.assetCategory}`;
+      activateProjectModule(button.dataset.projectModule || "project", button.dataset.resourceNode || "");
+    });
+  });
   els.moduleVideoButton.addEventListener("click", () => setActiveModule("video"));
   els.moduleVideoProcessButton?.addEventListener("click", () => setActiveModule("videoProcess"));
+  els.moduleAiCreationButton?.addEventListener("click", () => setActiveModule("aiCreation"));
   els.moduleImageButton.addEventListener("click", () => setActiveModule("image"));
   els.moduleResourceButton?.addEventListener("click", () => setActiveModule("resource"));
   els.moduleModelButton?.addEventListener("click", () => setActiveModule("model"));
+  els.themeLightButton?.addEventListener("click", () => applySunnyStageTheme("light"));
+  els.themeDarkButton?.addEventListener("click", () => applySunnyStageTheme("dark"));
   els.modelRefreshButton?.addEventListener("click", () => refreshModelManager({ announce: true }));
   els.modelList?.addEventListener("click", (event) => {
     const clickTarget = event.target instanceof Element ? event.target : event.target?.parentElement;
@@ -4084,6 +5663,22 @@ function bindEvents() {
       cancelImageNamingFormatBrush();
       return;
     }
+    if (!els.localProfileDialog?.hidden) {
+      closeLocalProfileDialog();
+      return;
+    }
+    if (!els.projectCreateDialog?.hidden) {
+      closeProjectCreateDialog();
+      return;
+    }
+    if (!els.aiPreviewDialog?.hidden) {
+      closeAiPreviewDialog();
+      return;
+    }
+    if (!els.aiDeleteDialog?.hidden) {
+      closeAiDeleteDialog();
+      return;
+    }
     if (!els.resourceProjectEditDialog?.hidden) {
       closeResourceProjectEditDialog();
       return;
@@ -4104,8 +5699,58 @@ function bindEvents() {
   els.imageExportResultButton?.addEventListener("click", () => void exportImageMatteResult());
   els.imageExportToResourceButton?.addEventListener("click", () => openResourceExportProjectDialog("matte"));
   els.imageStartSplitButton?.addEventListener("click", startImageSplitFlow);
-  els.loginButton?.addEventListener("click", handleOneClickLogin);
-  els.logoutButton?.addEventListener("click", handleLogout);
+  els.localProfileButton?.addEventListener("click", openLocalProfileDialog);
+  els.aiOpenProfileButton?.addEventListener("click", openLocalProfileDialog);
+  document.querySelectorAll("[data-open-profile]").forEach((button) => {
+    button.addEventListener("click", openLocalProfileDialog);
+  });
+  els.localProfileCloseButton?.addEventListener("click", closeLocalProfileDialog);
+  els.localProfileModelButton?.addEventListener("click", openModelManagerFromLocalProfile);
+  els.localProfileSaveButton?.addEventListener("click", () => void saveLocalProfile());
+  els.localProfileTestButton?.addEventListener("click", () => void testGenerationProviderConnection());
+  els.localProfileClearTokenButton?.addEventListener("click", () => void clearGenerationProviderToken());
+  els.localProfileAvatarInput?.addEventListener("change", handleLocalProfileAvatarChange);
+  els.aiImageViewButton?.addEventListener("click", () => setAiCreationView("image"));
+  els.aiHistoryViewButton?.addEventListener("click", () => setAiCreationView("history"));
+  els.aiAssetTreeSearchInput?.addEventListener("input", () => {
+    state.aiCreation.assetTreeQuery = els.aiAssetTreeSearchInput.value.trim().toLowerCase();
+    renderAiAssetTree();
+  });
+  els.aiAssetTree?.addEventListener("click", handleAiAssetNodeClick);
+  els.aiChildAssetGrid?.addEventListener("click", handleAiAssetNodeClick);
+  els.aiAssetNodeAddButton?.addEventListener("click", () => void createAiAssetNode());
+  els.aiAssetGroupAddButton?.addEventListener("click", () => void createAiAssetNode("group"));
+  els.aiAssetNodeRenameButton?.addEventListener("click", () => void renameSelectedAiAssetNode());
+  els.aiAssetNodeDeleteButton?.addEventListener("click", () => void deleteSelectedAiAssetNode());
+  els.aiModelSelect?.addEventListener("change", () => {
+    state.aiCreation.selectedModel = els.aiModelSelect.value;
+    renderGenerationCapabilityControls();
+  });
+  els.aiPromptInput?.addEventListener("input", updateAiGenerateAvailability);
+  els.aiGenerateButton?.addEventListener("click", () => void submitAiImageGeneration());
+  els.aiResultStatusFilter?.addEventListener("change", syncAiResultFilters);
+  els.aiResultTypeFilter?.addEventListener("change", syncAiResultFilters);
+  els.aiResultRatioFilter?.addEventListener("change", syncAiResultFilters);
+  els.aiResultBackgroundFilter?.addEventListener("change", syncAiResultFilters);
+  els.aiResultTimeFilter?.addEventListener("change", syncAiResultFilters);
+  els.aiResultSortSelect?.addEventListener("change", syncAiResultFilters);
+  els.aiRefreshHistoryButton?.addEventListener("click", () => void loadAiHistory({ refreshRemote: true }));
+  els.aiHistoryMediaFilter?.addEventListener("change", syncAiHistoryFilters);
+  els.aiHistoryStatusFilter?.addEventListener("change", syncAiHistoryFilters);
+  els.aiHistorySearchInput?.addEventListener("input", syncAiHistoryFilters);
+  els.aiHistorySelectVisibleButton?.addEventListener("click", selectVisibleAiHistory);
+  els.aiHistoryClearSelectionButton?.addEventListener("click", clearAiHistorySelection);
+  els.aiHistoryAddToImageButton?.addEventListener("click", () => void addSelectedAiRecordsToImageProcessing());
+  els.aiHistoryAddToLibraryButton?.addEventListener("click", () => void addAiRecordsToLibrary(Array.from(state.aiCreation.selectedIds)));
+  els.aiHistoryDeleteButton?.addEventListener("click", () => void setAiRecordLifecycle(Array.from(state.aiCreation.selectedIds), "trashed"));
+  els.aiResultGrid?.addEventListener("click", handleAiCardAction);
+  els.aiHistoryGrid?.addEventListener("click", handleAiCardAction);
+  els.aiPreviewCloseButton?.addEventListener("click", closeAiPreviewDialog);
+  els.aiDeleteCloseButton?.addEventListener("click", closeAiDeleteDialog);
+  els.aiDeleteRecordOnlyButton?.addEventListener("click", () => void deleteAiHistoryRecords(false));
+  els.aiDeleteWithFilesButton?.addEventListener("click", showAiDeleteFileConfirmation);
+  els.aiDeleteBackButton?.addEventListener("click", hideAiDeleteFileConfirmation);
+  els.aiDeleteConfirmFilesButton?.addEventListener("click", () => void deleteAiHistoryRecords(true));
   els.importPathButton.addEventListener("click", importFromPath);
   els.saveOutputPathButton?.addEventListener("click", selectOutputPath);
   els.uploadInput.addEventListener("change", handleUploadInputChange);
@@ -5638,45 +7283,12 @@ function applyFormState(snapshot) {
 
 function persistSession() {
   try {
-    const extractSelectionOrder = normalizeExtractSelectionOrder();
-    const selectionOrder = normalizeSelectionOrder();
     const snapshot = {
-      activeModule: state.activeModule,
       activeImagePage: state.activeImagePage,
       activeImageTool: state.activeImageTool,
-      imageUpload: state.imageUpload,
-      imageJob: state.imageJob,
-      imageSelectedIndex: state.imageSelectedIndex,
-      imageSplitSelectedIndex: state.imageSplitSelectedIndex,
       imageSplitDetectionStrength: state.imageSplitDetectionStrength,
       imagePreviewLinked: state.imagePreviewLinked,
       imagePreviewBackgrounds: state.imagePreviewBackgrounds,
-      imageSplit: state.imageSplit,
-      imageNaming: state.imageNaming,
-      resourceManager: state.resourceManager,
-      videoProcess: state.videoProcess,
-      upload: state.upload,
-      extractJob: state.extractJob,
-      job: state.job,
-      exportResult: state.exportResult,
-      processPreview: state.processPreview,
-      extractSimilarity: serializableExtractSimilarity(),
-      extractSelectionTouched: state.extractSelectionTouched,
-      extractSelectedIndices: Array.from(state.extractSelected).sort((a, b) => a - b),
-      extractSelectionOrder,
-      selectedIndices: Array.from(state.selected).sort((a, b) => a - b),
-      selectionOrder,
-      extractPreview: {
-        isPlaying: state.extractPreview.isPlaying,
-        currentIndex: state.extractPreview.currentIndex,
-        isReversed: state.extractPreview.isReversed,
-      },
-      preview: {
-        isPlaying: state.preview.isPlaying,
-        currentIndex: state.preview.currentIndex,
-        isReversed: state.preview.isReversed,
-      },
-      form: collectFormState(),
       savedAt: new Date().toISOString(),
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
@@ -5701,10 +7313,6 @@ function restoreSessionFromStorage() {
   if (!snapshot) {
     return;
   }
-
-  if (snapshot.activeModule) {
-    setActiveModule(snapshot.activeModule, { announce: false });
-  }
   if (snapshot.activeImagePage) {
     setActiveImagePage(snapshot.activeImagePage, { announce: false, persist: false });
   }
@@ -5712,175 +7320,10 @@ function restoreSessionFromStorage() {
     setActiveImageTool(snapshot.activeImageTool, { announce: false });
   }
 
-  setOrderedSelectionMode(false);
-  setExtractOrderedSelectionMode(false);
-
-  state.imageUpload = snapshot.imageUpload || null;
-  state.imageJob = snapshot.imageJob?.frames ? snapshot.imageJob : null;
-  state.imageSelectedIndex = Number(snapshot.imageSelectedIndex || 0);
-  state.imageSplitSelectedIndex = Number(snapshot.imageSplitSelectedIndex ?? snapshot.imageSelectedIndex ?? 0);
   setImageSplitDetectionStrength(snapshot.imageSplitDetectionStrength ?? state.imageSplitDetectionStrength);
   state.imagePreviewLinked = Boolean(snapshot.imagePreviewLinked);
   restoreImagePreviewBackgrounds(snapshot.imagePreviewBackgrounds);
-  restoreResourceManager(snapshot.resourceManager);
-  renderResourceManager();
-  if (snapshot.imageSplit?.byFrame) {
-    state.imageSplit = {
-      byFrame: snapshot.imageSplit.byFrame || {},
-      skipped: Boolean(snapshot.imageSplit.skipped),
-      confirmed: Boolean(snapshot.imageSplit.confirmed),
-      selectedId: snapshot.imageSplit.selectedId || null,
-      selectedIds: Array.isArray(snapshot.imageSplit.selectedIds) ? snapshot.imageSplit.selectedIds : [],
-      drag: null,
-      view: normalizeImageSplitView(snapshot.imageSplit.view),
-    };
-  }
-  if (snapshot.imageNaming) {
-    state.imageNaming = {
-      names: snapshot.imageNaming.names || {},
-      sizes: snapshot.imageNaming.sizes || {},
-      batch: snapshot.imageNaming.batch || {},
-      sizePresets: normalizeImageNamingSizePresets(snapshot.imageNaming.sizePresets),
-      exportMode: snapshot.imageNaming.exportMode === "direct" ? "direct" : "folder",
-      compression: snapshot.imageNaming.compression || {},
-      excludedKeys: Array.isArray(snapshot.imageNaming.excludedKeys) ? snapshot.imageNaming.excludedKeys : [],
-      collapsedGroups: snapshot.imageNaming.collapsedGroups || {},
-      nineSlice: snapshot.imageNaming.nineSlice || {},
-      confirmed: Boolean(snapshot.imageNaming.confirmed),
-    };
-  }
-  if (snapshot.videoProcess) {
-    const restoredUpload = snapshot.videoProcess.upload || null;
-    const restoredLibrary = Array.isArray(snapshot.videoProcess.library)
-      ? snapshot.videoProcess.library.filter((item) => item?.upload_id)
-      : [];
-    if (restoredUpload?.upload_id && !restoredLibrary.some((item) => item.upload_id === restoredUpload.upload_id)) {
-      restoredLibrary.unshift(restoredUpload);
-    }
-    state.videoProcess = {
-      upload: restoredUpload,
-      library: restoredLibrary,
-      selectedUploadId: snapshot.videoProcess.selectedUploadId || restoredUpload?.upload_id || restoredLibrary[0]?.upload_id || "",
-      activeTool: snapshot.videoProcess.activeTool || "import",
-      result: snapshot.videoProcess.result || null,
-      settings: {
-        ...state.videoProcess.settings,
-        ...(snapshot.videoProcess.settings || {}),
-      },
-    };
-  }
   updateImagePreviewLinkButtons();
-  renderImageWorkflow();
-  renderVideoProcessModule();
-
-  if (!snapshot.upload && !snapshot.extractJob?.frames && !snapshot.job?.frames && !snapshot.imageUpload && !snapshot.imageJob?.frames && !snapshot.videoProcess?.upload) {
-    if (snapshot?.form) {
-      applyFormState(snapshot.form);
-      renderImageWorkflow();
-      updateSegmentConfirmationUI();
-    }
-    return;
-  }
-
-  if (snapshot.upload) {
-    applyUpload(snapshot.upload, { resetSizing: false });
-  } else {
-    resetPreviewState();
-    state.upload = null;
-    state.processPreview = null;
-    els.previewPanel.hidden = true;
-    els.extractPanel.hidden = true;
-    els.extractResultPanel.hidden = true;
-    els.processPanel.hidden = true;
-    resetExtractFramesState();
-    resetProcessPreview("video");
-    updateSegmentConfirmationUI();
-  }
-  applyFormState(snapshot.form);
-  if (state.upload) {
-    normalizeSegment("end");
-    renderSegmentControls();
-    updateSegmentConfirmationUI();
-    restartSegmentPlayback({ autoplay: false });
-  }
-  renderImageWorkflow();
-
-  if (snapshot.preview && typeof snapshot.preview.isPlaying === "boolean") {
-    state.preview.isPlaying = snapshot.preview.isPlaying;
-  }
-  if (snapshot.preview && typeof snapshot.preview.isReversed === "boolean") {
-    state.preview.isReversed = snapshot.preview.isReversed;
-    els.previewReverseInput.checked = state.preview.isReversed;
-  }
-  if (snapshot.extractPreview && typeof snapshot.extractPreview.isPlaying === "boolean") {
-    state.extractPreview.isPlaying = snapshot.extractPreview.isPlaying;
-  }
-  if (snapshot.extractPreview && typeof snapshot.extractPreview.isReversed === "boolean") {
-    state.extractPreview.isReversed = snapshot.extractPreview.isReversed;
-    els.extractPreviewReverseInput.checked = state.extractPreview.isReversed;
-  }
-
-  if (snapshot.processPreview) {
-    state.processPreview = snapshot.processPreview;
-    renderProcessPreview("video");
-  }
-
-  if (snapshot.extractJob?.frames) {
-    state.extractJob = snapshot.extractJob;
-    state.extractSelectionTouched = Boolean(snapshot.extractSelectionTouched);
-    if (state.extractSelectionTouched && Array.isArray(snapshot.extractSelectedIndices)) {
-      state.extractSelected = new Set(
-        snapshot.extractSelectedIndices.map((index) => Number(index)).filter((index) => !Number.isNaN(index))
-      );
-    } else {
-      state.extractSelected = new Set();
-    }
-    state.extractSelectionOrder = state.extractSelectionTouched && Array.isArray(snapshot.extractSelectionOrder)
-      ? snapshot.extractSelectionOrder.map((index) => Number(index)).filter((index) => !Number.isNaN(index))
-      : [];
-    normalizeExtractSelectionOrder();
-    state.extractPreview.currentIndex = clamp(
-      Number(snapshot.extractPreview?.currentIndex || 0),
-      0,
-      Math.max(snapshot.extractJob.frames.length - 1, 0)
-    );
-    restoreExtractSimilarity(snapshot.extractSimilarity);
-    renderExtractJob();
-  } else {
-    showExtractWorkbench();
-  }
-
-  if (snapshot.job?.frames) {
-    state.job = snapshot.job;
-    state.exportResult = snapshot.exportResult || null;
-    if (Array.isArray(snapshot.selectedIndices)) {
-      state.selected = new Set(
-        snapshot.selectedIndices.map((index) => Number(index)).filter((index) => !Number.isNaN(index))
-      );
-    } else {
-      state.selected = new Set(snapshot.job.frames.map((frame) => frame.index));
-    }
-    state.selectionOrder = Array.isArray(snapshot.selectionOrder)
-      ? snapshot.selectionOrder.map((index) => Number(index)).filter((index) => !Number.isNaN(index))
-      : Array.from(state.selected);
-    normalizeSelectionOrder();
-    state.preview.currentIndex = clamp(
-      Number(snapshot.preview?.currentIndex || 0),
-      0,
-      Math.max(snapshot.job.frames.length - 1, 0)
-    );
-    renderJob();
-    if (state.exportResult) {
-      renderExportResult();
-    }
-  } else {
-    syncAnimationPreview();
-  }
-
-  renderImageWorkflow();
-  renderVideoProcessModule();
-
-  setStatus("\u5DF2\u6062\u590D\u4E0A\u6B21\u7684\u5DE5\u4F5C\u73B0\u573A\u3002", "success");
 }
 
 function startHotReloadPolling() {
@@ -14950,50 +16393,1033 @@ function syncManualColorLabel(scope = activeMatteScope()) {
   controls.manualKeyLabel.textContent = (controls.manualKeyInput.value || "#00ff00").toUpperCase();
 }
 
-function restoreAuthFromStorage() {
-  try {
-    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
-    state.auth = raw ? JSON.parse(raw) : null;
-  } catch (error) {
-    console.warn("restoreAuthFromStorage failed", error);
-    state.auth = null;
-  }
+function profileInitial(name = state.localProfile?.name) {
+  return Array.from(String(name || "游客").trim() || "游客")[0] || "游";
 }
 
-function persistAuth() {
+function renderLocalProfile() {
+  const profile = state.localProfile || {};
+  const name = String(profile.name || "游客");
+  const avatarUrl = String(profile.avatar_url || "");
+  const mcp = profile.mcp || {};
+  els.accountName.textContent = name;
+  els.localProfileAvatarFallback.textContent = profileInitial(name);
+  if (avatarUrl) {
+    els.localProfileAvatar.src = `${avatarUrl}?ts=${Date.now()}`;
+    els.localProfileAvatar.hidden = false;
+    els.localProfileAvatarFallback.hidden = true;
+  } else {
+    els.localProfileAvatar.removeAttribute("src");
+    els.localProfileAvatar.hidden = true;
+    els.localProfileAvatarFallback.hidden = false;
+  }
+  els.localProfileMcpStatus.textContent = mcp.validated
+    ? `MCP 可用 · ${Number(mcp.model_count || 0)} 模型`
+    : mcp.configured
+      ? "MCP 待验证"
+      : "MCP 未配置";
+  els.localProfileMcpStatus.classList.toggle("ready", Boolean(mcp.validated));
+  renderAiConnectionState();
+}
+
+async function loadLocalProfile() {
   try {
-    if (state.auth) {
-      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(state.auth));
-    } else {
-      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    window.localStorage.removeItem("sprite-video-lab-auth-v1");
+    const data = await apiJson(`/api/local-profile?ts=${Date.now()}`);
+    state.localProfile = data.profile || state.localProfile;
+    renderLocalProfile();
+    if (state.activeModule === "aiCreation" && state.localProfile.mcp?.configured) {
+      await ensureAiCreationLoaded({ force: true });
     }
   } catch (error) {
-    console.warn("persistAuth failed", error);
+    setStatus(`读取本地资料失败：${error.message}`, "error");
   }
 }
 
-function updateAuthUI() {
-  const loggedIn = Boolean(state.auth);
-  els.accountName.textContent = loggedIn ? state.auth.display_name || "本地创作者" : "未登录";
-  els.loginButton.hidden = loggedIn;
-  els.logoutButton.hidden = !loggedIn;
+function openLocalProfileDialog() {
+  const profile = state.localProfile || {};
+  els.localProfileNameInput.value = profile.name || "游客";
+  els.localProfileTokenInput.value = "";
+  state.localProfileAvatarDataUrl = "";
+  const avatarUrl = String(profile.avatar_url || "");
+  if (avatarUrl) {
+    els.localProfileAvatarPreview.src = `${avatarUrl}?ts=${Date.now()}`;
+    els.localProfileAvatarPreview.hidden = false;
+    els.localProfileAvatarPreviewFallback.hidden = true;
+  } else {
+    els.localProfileAvatarPreview.removeAttribute("src");
+    els.localProfileAvatarPreview.hidden = true;
+    els.localProfileAvatarPreviewFallback.hidden = false;
+    els.localProfileAvatarPreviewFallback.textContent = profileInitial(profile.name);
+  }
+  const mcp = profile.mcp || {};
+  els.localProfileConnectionStatus.textContent = mcp.validated
+    ? `连接正常，可用图片模型 ${Number(mcp.model_count || 0)} 个`
+    : mcp.last_error || (mcp.configured ? "Token 已配置，尚未验证" : "尚未配置 Token");
+  els.localProfileClearTokenButton.disabled = !mcp.configured;
+  els.localProfileDialog.hidden = false;
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => els.localProfileNameInput.focus(), 0);
 }
 
-async function handleOneClickLogin() {
-  await withBusy(els.loginButton, async () => {
-    const data = await apiJson("/api/one-click-login", { method: "POST" });
-    state.auth = data.auth;
-    persistAuth();
-    updateAuthUI();
-    setStatus("已登录：" + (state.auth.display_name || "本地创作者"), "success");
+function closeLocalProfileDialog() {
+  els.localProfileDialog.hidden = true;
+  els.localProfileTokenInput.value = "";
+  els.localProfileAvatarInput.value = "";
+  state.localProfileAvatarDataUrl = "";
+  document.body.classList.remove("modal-open");
+}
+
+function openModelManagerFromLocalProfile() {
+  closeLocalProfileDialog();
+  setActiveModule("model");
+  void refreshModelManager({ announce: true });
+}
+
+function handleLocalProfileAvatarChange() {
+  const file = els.localProfileAvatarInput.files?.[0];
+  if (!file) {
+    state.localProfileAvatarDataUrl = "";
+    return;
+  }
+  if (!["image/png", "image/jpeg", "image/webp"].includes(file.type) || file.size > 5 * 1024 * 1024) {
+    els.localProfileAvatarInput.value = "";
+    setStatus("头像仅支持 5 MB 内的 PNG、JPEG 或 WebP。", "error");
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.localProfileAvatarDataUrl = String(reader.result || "");
+    els.localProfileAvatarPreview.src = state.localProfileAvatarDataUrl;
+    els.localProfileAvatarPreview.hidden = false;
+    els.localProfileAvatarPreviewFallback.hidden = true;
+  };
+  reader.onerror = () => setStatus("头像读取失败。", "error");
+  reader.readAsDataURL(file);
+}
+
+async function saveLocalProfile() {
+  await withBusy(els.localProfileSaveButton, async () => {
+    try {
+      const profileData = await apiJson("/api/local-profile", {
+        method: "POST",
+        body: {
+          name: els.localProfileNameInput.value.trim() || "游客",
+          avatar_data_url: state.localProfileAvatarDataUrl || "",
+        },
+      });
+      state.localProfile = profileData.profile || state.localProfile;
+      const token = els.localProfileTokenInput.value.trim();
+      if (token) {
+        const tokenData = await apiJson("/api/v1/generation/provider-token", { method: "POST", body: { token } });
+        state.localProfile = tokenData.profile || state.localProfile;
+      }
+      renderLocalProfile();
+      closeLocalProfileDialog();
+      setStatus("本地资料已保存。", "success");
+      if (state.activeModule === "aiCreation") {
+        await ensureAiCreationLoaded({ force: true });
+      }
+    } catch (error) {
+      setStatus(`保存本地资料失败：${error.message}`, "error");
+    }
   });
 }
 
-function handleLogout() {
-  state.auth = null;
-  persistAuth();
-  updateAuthUI();
-  setStatus("Logged out.");
+async function testGenerationProviderConnection() {
+  await withBusy(els.localProfileTestButton, async () => {
+    try {
+      const token = els.localProfileTokenInput.value.trim();
+      if (token) {
+        const tokenData = await apiJson("/api/v1/generation/provider-token", { method: "POST", body: { token } });
+        state.localProfile = tokenData.profile || state.localProfile;
+        els.localProfileTokenInput.value = "";
+      }
+      els.localProfileConnectionStatus.textContent = "正在连接生成服务...";
+      const data = await apiJson("/api/v1/generation/provider-test", { method: "POST" });
+      state.localProfile = data.profile || state.localProfile;
+      renderLocalProfile();
+      els.localProfileConnectionStatus.textContent = `连接正常，可用图片模型 ${Number(state.localProfile.mcp?.model_count || 0)} 个`;
+      els.localProfileClearTokenButton.disabled = false;
+      setStatus("生成服务连接正常。", "success");
+      state.aiCreation.loaded = false;
+      if (state.activeModule === "aiCreation") {
+        await ensureAiCreationLoaded({ force: true });
+      }
+    } catch (error) {
+      await loadLocalProfile();
+      els.localProfileConnectionStatus.textContent = state.localProfile.mcp?.last_error || error.message;
+      setStatus(`生成服务连接失败：${error.message}`, "error");
+    }
+  });
+}
+
+async function clearGenerationProviderToken() {
+  if (!window.confirm("清除本机保存的生成服务 MCP Token？")) {
+    return;
+  }
+  await withBusy(els.localProfileClearTokenButton, async () => {
+    try {
+      const data = await apiJson("/api/v1/generation/provider-token", { method: "DELETE" });
+      state.localProfile = data.profile || state.localProfile;
+      state.aiCreation.models = [];
+      state.aiCreation.loaded = false;
+      renderLocalProfile();
+      els.localProfileConnectionStatus.textContent = "Token 已清除";
+      els.localProfileClearTokenButton.disabled = true;
+      setStatus("生成服务 MCP Token 已从本机清除。", "success");
+    } catch (error) {
+      setStatus(`清除 Token 失败：${error.message}`, "error");
+    }
+  });
+}
+
+function renderAiConnectionState() {
+  if (!els.aiConnectionBadge) {
+    return;
+  }
+  const mcp = state.localProfile?.mcp || {};
+  els.aiConnectionBadge.className = `ai-state-chip ${mcp.validated ? "ready" : "warning"}`;
+  els.aiConnectionBadge.textContent = mcp.validated ? "MCP 可用" : mcp.configured ? "待验证" : "未配置";
+  els.aiTokenNotice.hidden = Boolean(mcp.validated);
+  const noticeText = els.aiTokenNotice.querySelector("span");
+  if (noticeText) {
+    noticeText.textContent = mcp.configured
+      ? "请先在本地资料中测试生成服务连接。"
+      : "配置生成服务 MCP Token 后可开始生成。";
+  }
+  updateAiGenerateAvailability();
+}
+
+function aiAssetNodeById(nodeId) {
+  return state.aiCreation.assetTree.find((node) => node.id === nodeId) || null;
+}
+
+function selectedAiAssetNode() {
+  return aiAssetNodeById(state.aiCreation.selectedAssetNodeId);
+}
+
+function aiAssetChildren(parentId) {
+  return state.aiCreation.assetTree
+    .filter((node) => String(node.parent_id || "") === String(parentId || ""))
+    .sort((left, right) => Number(left.order || 0) - Number(right.order || 0));
+}
+
+function aiAssetDescendantIds(nodeId) {
+  const ids = new Set([nodeId]);
+  const queue = [nodeId];
+  while (queue.length) {
+    const parentId = queue.shift();
+    aiAssetChildren(parentId).forEach((child) => {
+      if (ids.has(child.id)) return;
+      ids.add(child.id);
+      queue.push(child.id);
+    });
+  }
+  return ids;
+}
+
+function aiRecordsForAssetNode(nodeId, { includeDescendants = true } = {}) {
+  if (!nodeId) return state.aiCreation.history;
+  const nodeIds = includeDescendants ? aiAssetDescendantIds(nodeId) : new Set([nodeId]);
+  return state.aiCreation.history.filter((record) => nodeIds.has(record.asset_node_id));
+}
+
+function aiAssetNodeCountLabel(node) {
+  const generated = aiRecordsForAssetNode(node.id).length;
+  const target = Math.max(0, Number(node.target_count || 0));
+  return target ? `${generated} / ${target}` : String(generated);
+}
+
+function aiAssetTreeNodeMarkup(node, depth = 0) {
+  const children = aiAssetChildren(node.id);
+  const expanded = state.aiCreation.expandedNodeIds.has(node.id);
+  const selected = node.id === state.aiCreation.selectedAssetNodeId;
+  const query = state.aiCreation.assetTreeQuery;
+  const selfMatches = !query || String(node.name || "").toLowerCase().includes(query);
+  const childMarkup = children.map((child) => aiAssetTreeNodeMarkup(child, depth + 1)).join("");
+  if (!selfMatches && !childMarkup) return "";
+  return `
+    <div class="ai-tree-node-wrap" style="--tree-depth:${Math.min(depth, 4)}">
+      ${children.length ? `<button class="ai-tree-expander" type="button" data-ai-tree-toggle="${escapeHtml(node.id)}" aria-label="${expanded ? "折叠" : "展开"}${escapeHtml(node.name || "节点")}" aria-expanded="${expanded}">${expanded ? "−" : "+"}</button>` : '<span class="ai-tree-expander-spacer"></span>'}
+      <button class="ai-tree-node ${selected ? "selected" : ""} ${node.type === "category" ? "category" : ""}" type="button" data-ai-asset-node="${escapeHtml(node.id)}" role="treeitem" aria-selected="${String(selected)}">
+        <span class="ai-tree-node-icon" aria-hidden="true">${node.type === "category" ? "◆" : node.type === "group" ? "▣" : "●"}</span>
+        <strong title="${escapeHtml(node.name || "")}">${escapeHtml(node.name || "未命名")}</strong>
+        <small>${escapeHtml(aiAssetNodeCountLabel(node))}</small>
+      </button>
+      ${childMarkup && expanded ? `<div class="ai-tree-children" role="group">${childMarkup}</div>` : ""}
+    </div>`;
+}
+
+function renderAiAssetTree() {
+  if (!els.aiAssetTree) return;
+  const roots = aiAssetChildren("");
+  const markup = roots.map((node) => aiAssetTreeNodeMarkup(node)).join("");
+  els.aiAssetTree.innerHTML = markup || '<div class="ai-empty-state compact">没有匹配的资产节点</div>';
+  if (els.aiAssetTreeCount) {
+    els.aiAssetTreeCount.textContent = `${state.aiCreation.assetTree.length} 个节点`;
+  }
+  const selected = selectedAiAssetNode();
+  const canEdit = Boolean(selected && selected.type !== "category");
+  if (els.aiAssetNodeRenameButton) els.aiAssetNodeRenameButton.disabled = !canEdit;
+  if (els.aiAssetNodeDeleteButton) els.aiAssetNodeDeleteButton.disabled = !canEdit;
+}
+
+function renderAiAssetContext() {
+  const selected = selectedAiAssetNode();
+  const children = selected ? aiAssetChildren(selected.id) : [];
+  if (els.aiCurrentNodeTitle) els.aiCurrentNodeTitle.textContent = selected?.name || "资产节点";
+  if (els.aiCurrentNodeMeta) els.aiCurrentNodeMeta.textContent = `${children.length} 个子节点`;
+  if (els.aiCurrentAssetInput) els.aiCurrentAssetInput.value = selected?.name || "未选择";
+  if (els.aiProjectStyleInput) {
+    const confirmed = state.projectAssets.styles.find((item) => item.id === activeProject()?.current_style_direction_id);
+    els.aiProjectStyleInput.value = confirmed?.name || "尚未确认";
+  }
+  if (!els.aiChildAssetGrid) return;
+  els.aiChildAssetGrid.innerHTML = children.length
+    ? children.map((node) => {
+        const records = aiRecordsForAssetNode(node.id);
+        const preview = records.find((record) => record.status === "succeeded" && record.local_url);
+        const selectedCount = records.filter((record) => ["selected", "confirmed", "in_library"].includes(record.lifecycle_status)).length;
+        const status = selectedCount ? "已选" : records.length ? "已生成" : "未生成";
+        return `
+          <button class="ai-child-asset-card ${node.id === state.aiCreation.selectedAssetNodeId ? "selected" : ""}" type="button" data-ai-asset-node="${escapeHtml(node.id)}">
+            <span class="ai-child-asset-preview">${preview ? `<img src="${escapeHtml(preview.local_url)}" alt="">` : `<b>${node.type === "group" ? "组" : "资"}</b>`}</span>
+            <strong title="${escapeHtml(node.name || "")}">${escapeHtml(node.name || "未命名")}</strong>
+            <small>${records.length} 已生成 · ${selectedCount} 已选 · ${status}</small>
+          </button>`;
+      }).join("")
+    : '<div class="ai-empty-state compact">当前节点没有子资产，可直接生成或新建节点</div>';
+}
+
+async function loadAiAssetTree() {
+  const projectId = activeProjectId();
+  if (!projectId) return;
+  try {
+    const data = await apiJson(`/api/v1/projects/${encodeURIComponent(projectId)}/asset-tree?ts=${Date.now()}`);
+    state.aiCreation.assetTree = Array.isArray(data.asset_tree?.nodes) ? data.asset_tree.nodes : [];
+    if (!aiAssetNodeById(state.aiCreation.selectedAssetNodeId)) {
+      state.aiCreation.selectedAssetNodeId = aiAssetNodeById("category-character")?.id || state.aiCreation.assetTree[0]?.id || "";
+    }
+    renderAiAssetTree();
+    renderAiAssetContext();
+  } catch (error) {
+    state.aiCreation.assetTree = [];
+    setStatus(`读取资产结构失败：${error.message}`, "error");
+  }
+}
+
+function selectAiAssetNode(nodeId) {
+  if (!aiAssetNodeById(nodeId)) return;
+  state.aiCreation.selectedAssetNodeId = nodeId;
+  renderAiCreation();
+}
+
+function handleAiAssetNodeClick(event) {
+  const toggle = event.target.closest?.("[data-ai-tree-toggle]");
+  if (toggle) {
+    const id = toggle.dataset.aiTreeToggle;
+    if (state.aiCreation.expandedNodeIds.has(id)) state.aiCreation.expandedNodeIds.delete(id);
+    else state.aiCreation.expandedNodeIds.add(id);
+    renderAiAssetTree();
+    return;
+  }
+  const button = event.target.closest?.("[data-ai-asset-node]");
+  if (!button) return;
+  selectAiAssetNode(button.dataset.aiAssetNode || "");
+}
+
+async function createAiAssetNode(nodeType = "asset") {
+  const selected = selectedAiAssetNode();
+  if (!selected) return;
+  const parentId = selected.type === "asset" ? selected.parent_id : selected.id;
+  const name = await askText(nodeType === "group" ? "新分组名称" : "新资产节点名称", "");
+  if (name === null || !name.trim()) return;
+  try {
+    const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/asset-nodes`, {
+      method: "POST",
+      body: { parent_id: parentId, name: name.trim(), type: nodeType, actor: "user" },
+    });
+    await loadAiAssetTree();
+    state.aiCreation.expandedNodeIds.add(parentId);
+    selectAiAssetNode(data.node.id);
+    setStatus(`已创建${nodeType === "group" ? "分组" : "资产节点"}：${data.node.name}`, "success");
+  } catch (error) {
+    setStatus(`创建资产节点失败：${error.message}`, "error");
+  }
+}
+
+async function renameSelectedAiAssetNode() {
+  const selected = selectedAiAssetNode();
+  if (!selected || selected.type === "category") return;
+  const name = await askText("修改资产节点名称", selected.name || "");
+  if (name === null || !name.trim() || name.trim() === selected.name) return;
+  try {
+    await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/asset-nodes/${encodeURIComponent(selected.id)}`, {
+      method: "PATCH",
+      body: { name: name.trim(), actor: "user" },
+    });
+    await loadAiAssetTree();
+    setStatus("资产节点已重命名。", "success");
+  } catch (error) {
+    setStatus(`重命名失败：${error.message}`, "error");
+  }
+}
+
+async function deleteSelectedAiAssetNode() {
+  const selected = selectedAiAssetNode();
+  if (!selected || selected.type === "category") return;
+  if (!window.confirm(`将资产节点“${selected.name}”移入回收站？仅空节点可以删除。`)) return;
+  try {
+    await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/asset-nodes/${encodeURIComponent(selected.id)}`, {
+      method: "DELETE",
+    });
+    state.aiCreation.selectedAssetNodeId = selected.parent_id || "category-other";
+    await loadAiAssetTree();
+    setStatus("资产节点已移入回收站。", "success");
+  } catch (error) {
+    setStatus(`删除资产节点失败：${error.message}`, "error");
+  }
+}
+
+async function ensureAiCreationLoaded({ force = false } = {}) {
+  if (!activeProjectId()) {
+    return;
+  }
+  if (state.aiCreation.loading || (state.aiCreation.loaded && !force)) {
+    renderAiCreation();
+    return;
+  }
+  state.aiCreation.loading = true;
+  renderAiCreation();
+  try {
+    await Promise.all([loadAiHistory(), loadAiAssetTree(), loadProductionStyles()]);
+    if (state.localProfile?.mcp?.configured) {
+      await loadGenerationModels();
+    }
+    state.aiCreation.loaded = true;
+  } finally {
+    state.aiCreation.loading = false;
+    renderAiCreation();
+  }
+}
+
+async function loadProductionStyles() {
+  const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/styles?ts=${Date.now()}`);
+  state.projectAssets.styles = data.styles || [];
+}
+
+function setAiCreationView(view) {
+  state.aiCreation.view = view === "history" ? "history" : "image";
+  renderAiCreation();
+}
+
+function renderAiCreation() {
+  if (!els.aiCreationModule) {
+    return;
+  }
+  const isHistory = state.aiCreation.view === "history";
+  const isCanvas = !isHistory && state.projectAssets.activeView.production === "canvas";
+  const isActiveModule = state.activeModule === "aiCreation";
+  els.aiImageViewButton.classList.toggle("active", isActiveModule && !isHistory);
+  els.aiImageViewButton.setAttribute("aria-pressed", String(isActiveModule && !isHistory));
+  els.aiHistoryViewButton.classList.toggle("active", isActiveModule && isHistory);
+  els.aiHistoryViewButton.setAttribute("aria-pressed", String(isActiveModule && isHistory));
+  els.aiCreatePanel.hidden = isHistory;
+  els.aiImageWorkspace.hidden = isHistory || isCanvas;
+  if (els.aiProductionCanvasWorkspace) els.aiProductionCanvasWorkspace.hidden = isHistory || !isCanvas;
+  els.aiHistoryWorkspace.hidden = !isHistory;
+  els.aiCreationModule.classList.toggle("history-active", isHistory);
+  renderAiConnectionState();
+  renderAiAssetTree();
+  renderAiAssetContext();
+  renderAiResultGrid();
+  renderAiTaskQueue();
+  renderAiHistory();
+  if (isCanvas && els.aiProductionCanvasHost && state.projectAssets.canvasType !== "production") {
+    void renderProjectCanvasModule("production", productionCanvasItems(), els.aiProductionCanvasHost);
+  }
+}
+
+async function loadGenerationModels() {
+  try {
+    const data = await apiJson(`/api/v1/generation/models?ts=${Date.now()}`);
+    state.aiCreation.models = Array.isArray(data.models) ? data.models : [];
+    const existing = state.aiCreation.models.some((model) => model.id === state.aiCreation.selectedModel);
+    if (!existing) {
+      state.aiCreation.selectedModel = state.aiCreation.models.find((model) => /low/i.test(model.id))?.id || state.aiCreation.models[0]?.id || "";
+    }
+    renderGenerationModelOptions();
+  } catch (error) {
+    state.aiCreation.models = [];
+    renderGenerationModelOptions();
+    setStatus(`读取图片模型失败：${error.message}`, "error");
+  }
+}
+
+function renderGenerationModelOptions() {
+  const models = state.aiCreation.models;
+  els.aiModelSelect.innerHTML = models.length
+    ? models.map((model) => `<option value="${escapeHtml(model.id)}">${escapeHtml(model.display_name || model.id)}</option>`).join("")
+    : '<option value="">暂无可用模型</option>';
+  els.aiModelSelect.disabled = !models.length;
+  els.aiModelSelect.value = state.aiCreation.selectedModel;
+  renderGenerationCapabilityControls();
+}
+
+function selectedGenerationModel() {
+  return state.aiCreation.models.find((model) => model.id === state.aiCreation.selectedModel) || null;
+}
+
+function normalizedCapabilityOptions(value, fallback) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item)).filter(Boolean);
+  }
+  if (value && typeof value === "object") {
+    return Object.keys(value);
+  }
+  return [...fallback];
+}
+
+function fillAiSelect(select, values, preferred) {
+  const options = Array.from(new Set(values));
+  select.innerHTML = options.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("");
+  select.value = options.includes(preferred) ? preferred : options[0] || "";
+  select.disabled = !options.length;
+}
+
+function renderGenerationCapabilityControls() {
+  const model = selectedGenerationModel();
+  const currentAspect = els.aiAspectRatioSelect.value || "1:1";
+  const currentResolution = els.aiResolutionSelect.value || "1K";
+  const ratios = normalizedCapabilityOptions(model?.supported_aspect_ratios, ["1:1"]);
+  const resolutions = normalizedCapabilityOptions(model?.supported_resolutions, ["1K"]);
+  fillAiSelect(els.aiAspectRatioSelect, ratios, currentAspect);
+  fillAiSelect(els.aiResolutionSelect, resolutions, currentResolution);
+  if (els.aiResultRatioFilter) {
+    const currentFilter = state.aiCreation.resultFilters.ratio;
+    const historyRatios = state.aiCreation.history.map((item) => item.params?.aspect_ratio || item.aspect_ratio).filter(Boolean);
+    const filterRatios = Array.from(new Set([...ratios, ...historyRatios]));
+    els.aiResultRatioFilter.innerHTML = `<option value="all">全部比例</option>${filterRatios.map((value) => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`).join("")}`;
+    els.aiResultRatioFilter.value = filterRatios.includes(currentFilter) ? currentFilter : "all";
+  }
+  const pricing = model?.pricing;
+  const pricingText = pricing && typeof pricing === "object"
+    ? Object.entries(pricing).map(([key, value]) => `${key}: ${value}`).join(" · ")
+    : String(pricing || "");
+  els.aiModelMeta.textContent = model ? `${model.display_name || model.id}${pricingText ? ` · ${pricingText}` : ""}` : "选择模型后显示可用参数";
+  updateAiGenerateAvailability();
+}
+
+function updateAiGenerateAvailability() {
+  if (!els.aiGenerateButton) {
+    return;
+  }
+  els.aiGenerateButton.disabled = !state.localProfile?.mcp?.validated || !state.aiCreation.selectedModel || !els.aiPromptInput.value.trim() || state.aiCreation.loading;
+}
+
+async function submitAiImageGeneration(record = null) {
+  const projectId = activeProjectId();
+  const prompt = record?.prompt || els.aiPromptInput.value.trim();
+  const model = record?.model || state.aiCreation.selectedModel;
+  let params = record?.params || null;
+  if (!projectId || !prompt || !model) {
+    setStatus("请填写提示词并选择模型。", "error");
+    return;
+  }
+  await withBusy(els.aiGenerateButton, async () => {
+    try {
+      if (!params) {
+        const references = await uploadProjectReferenceImages(projectId, Array.from(els.aiReferenceImageInput?.files || []), "generation-reference");
+        params = {
+          aspect_ratio: els.aiAspectRatioSelect.value,
+          resolution: els.aiResolutionSelect.value,
+          background: els.aiBackgroundSelect?.value || "transparent",
+          asset_description: els.aiAssetDescriptionInput?.value.trim() || "",
+          negative_prompt: els.aiNegativePromptInput?.value.trim() || "",
+          project_style_direction_id: activeProject()?.current_style_direction_id || "",
+          reference_images: references.map((item) => item.relative_path),
+        };
+      }
+      const count = record ? 1 : Math.max(1, Math.min(8, Number(els.aiCountSelect?.value || 1)));
+      const records = [];
+      for (let index = 0; index < count; index += 1) {
+        const data = await apiJson("/api/v1/generation/tasks", {
+          method: "POST",
+          body: {
+            project_id: projectId,
+            asset_node_id: state.aiCreation.selectedAssetNodeId || "category-other",
+            prompt,
+            model,
+            params,
+            actor: "user",
+          },
+        });
+        upsertAiHistoryRecord(data.record);
+        pollAiGenerationRecord(data.record.id);
+        records.push(data.record);
+      }
+      renderAiCreation();
+      setStatus(`${records.length} 个图片生成任务已提交。`, "success");
+    } catch (error) {
+      await loadAiHistory();
+      setStatus(`图片生成失败：${error.message}`, "error");
+    }
+  });
+}
+
+function upsertAiHistoryRecord(record) {
+  if (!record?.id) {
+    return;
+  }
+  const index = state.aiCreation.history.findIndex((item) => item.id === record.id);
+  if (index >= 0) {
+    state.aiCreation.history[index] = record;
+  } else {
+    state.aiCreation.history.unshift(record);
+  }
+}
+
+async function loadAiHistory({ refreshRemote = false } = {}) {
+  const projectId = activeProjectId();
+  if (!projectId) return;
+  try {
+    if (refreshRemote) {
+      await apiJson("/api/v1/generation/history/refresh", {
+        method: "POST",
+        body: { project_id: projectId },
+      });
+    }
+    const data = await apiJson(`/api/v1/generation/history?project_id=${encodeURIComponent(projectId)}&ts=${Date.now()}`);
+    state.aiCreation.history = Array.isArray(data.history) ? data.history : [];
+    const availableIds = new Set(state.aiCreation.history.map((record) => record.id));
+    state.aiCreation.selectedIds = new Set(Array.from(state.aiCreation.selectedIds).filter((id) => availableIds.has(id)));
+    state.aiCreation.history.filter(isActiveAiRecord).forEach((record) => pollAiGenerationRecord(record.id));
+    renderAiCreation();
+  } catch (error) {
+    setStatus(`读取生成历史失败：${error.message}`, "error");
+  }
+}
+
+function isActiveAiRecord(record) {
+  return ["submitting", "queued", "running"].includes(String(record?.status || ""));
+}
+
+function pollAiGenerationRecord(recordId, delay = 2000) {
+  if (!recordId || state.aiCreation.pollingIds.has(recordId)) {
+    return;
+  }
+  state.aiCreation.pollingIds.add(recordId);
+  const run = async () => {
+    try {
+      const projectId = activeProjectId();
+      if (!projectId) return;
+      const data = await apiJson(`/api/v1/generation/task?id=${encodeURIComponent(recordId)}&project_id=${encodeURIComponent(projectId)}&ts=${Date.now()}`);
+      upsertAiHistoryRecord(data.record);
+      renderAiCreation();
+      if (isActiveAiRecord(data.record)) {
+        state.aiCreation.pollTimers.set(recordId, window.setTimeout(run, 2000));
+      } else {
+        state.aiCreation.pollingIds.delete(recordId);
+        state.aiCreation.pollTimers.delete(recordId);
+      }
+    } catch (error) {
+      state.aiCreation.pollTimers.set(recordId, window.setTimeout(run, 5000));
+    }
+  };
+  state.aiCreation.pollTimers.set(recordId, window.setTimeout(run, delay));
+}
+
+function stopAiPollingRecord(recordId) {
+  const timerId = state.aiCreation.pollTimers.get(recordId);
+  if (timerId) window.clearTimeout(timerId);
+  state.aiCreation.pollTimers.delete(recordId);
+  state.aiCreation.pollingIds.delete(recordId);
+}
+
+function aiStatusLabel(record) {
+  const labels = {
+    submitting: "提交中",
+    queued: "等待中",
+    running: "生成中",
+    succeeded: "已完成",
+    failed: "失败",
+    canceled: "已取消",
+    download_failed: "下载失败",
+  };
+  return labels[record?.status] || record?.status || "未知";
+}
+
+function aiStatusTone(record) {
+  if (record?.status === "succeeded") return "success";
+  if (["failed", "canceled", "download_failed"].includes(record?.status)) return "error";
+  return "running";
+}
+
+function aiRecordDate(record) {
+  const date = new Date(record?.created_at || "");
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function aiRecordCard(record, { selectable = false } = {}) {
+  const succeeded = record.status === "succeeded" && record.local_url;
+  const selected = state.aiCreation.selectedIds.has(record.id);
+  const lifecycle = record.lifecycle_status || "normal";
+  const params = record.params || {};
+  const thumb = succeeded
+    ? `<button class="ai-card-preview" type="button" data-ai-action="preview" data-ai-id="${escapeHtml(record.id)}" aria-label="预览生成图片"><img src="${escapeHtml(record.local_url)}" alt="${escapeHtml(record.prompt || "生成图片")}"></button>`
+    : `<div class="ai-card-placeholder"><span>${escapeHtml(aiStatusLabel(record))}</span><b>${Math.max(0, Number(record.progress || 0))}%</b></div>`;
+  const select = selectable && succeeded
+    ? `<button class="ai-card-select ${selected ? "selected" : ""}" type="button" data-ai-action="select" data-ai-id="${escapeHtml(record.id)}" aria-pressed="${String(selected)}">${selected ? "✓" : ""}</button>`
+    : "";
+  const primaryAction = succeeded
+    ? `<button class="primary-button tiny ai-card-primary-action" type="button" data-ai-action="process" data-ai-id="${escapeHtml(record.id)}">加入图片处理</button>`
+    : record.status === "download_failed"
+    ? `<button class="ghost-button tiny ai-card-primary-action" type="button" data-ai-action="retry-download" data-ai-id="${escapeHtml(record.id)}">重试下载</button>`
+    : ["failed", "canceled"].includes(record.status)
+      ? `<button class="ghost-button tiny ai-card-primary-action" type="button" data-ai-action="regenerate" data-ai-id="${escapeHtml(record.id)}">重新生成</button>`
+      : "";
+  const stateAction = succeeded && lifecycle !== "in_library"
+    ? `<button class="ghost-button tiny ai-card-state-action" type="button" data-ai-action="lifecycle" data-lifecycle="${lifecycle === "selected" ? "normal" : "selected"}" data-ai-id="${escapeHtml(record.id)}">${lifecycle === "selected" ? "取消已选" : "设为已选"}</button>`
+    : "";
+  const secondaryActions = [
+    succeeded && !["confirmed", "in_library"].includes(lifecycle)
+      ? `<button class="ghost-button tiny" type="button" data-ai-action="lifecycle" data-lifecycle="confirmed" data-ai-id="${escapeHtml(record.id)}">确认</button>`
+      : "",
+    succeeded && lifecycle !== "in_library"
+      ? `<button class="ghost-button tiny" type="button" data-ai-action="library" data-ai-id="${escapeHtml(record.id)}">加入资产管理</button>`
+      : "",
+    succeeded
+      ? `<button class="ghost-button tiny" type="button" data-ai-action="similar" data-ai-id="${escapeHtml(record.id)}">生成相似图</button>`
+      : "",
+    succeeded
+      ? `<a class="ghost-button tiny" href="${escapeHtml(record.local_url)}" download data-ai-action="download" data-ai-id="${escapeHtml(record.id)}">下载</a>`
+      : "",
+    record.local_path
+      ? `<button class="ghost-button tiny" type="button" data-ai-action="open" data-ai-id="${escapeHtml(record.id)}">打开位置</button>`
+      : "",
+    lifecycle !== "trashed"
+      ? `<button class="ghost-button tiny danger" type="button" data-ai-action="delete" data-ai-id="${escapeHtml(record.id)}">移入回收站</button>`
+      : "",
+  ].filter(Boolean).join("");
+  const moreActions = secondaryActions
+    ? `<details class="ai-card-more"><summary class="ai-card-more-toggle" title="更多操作" aria-label="更多操作"><span aria-hidden="true">...</span></summary><div class="ai-card-more-menu">${secondaryActions}</div></details>`
+    : "";
+  return `
+    <article class="ai-result-card ${selected ? "selected" : ""} lifecycle-${escapeHtml(lifecycle)}">
+      <div class="ai-card-media">${thumb}${select}<span class="ai-card-status ${aiStatusTone(record)}">${escapeHtml(aiStatusLabel(record))}</span></div>
+      <div class="ai-card-body">
+        <strong title="${escapeHtml(record.prompt || "")}">${escapeHtml(record.prompt || "未命名任务")}</strong>
+        <small>${escapeHtml(record.model || "-")} · ${escapeHtml(aiRecordDate(record))}</small>
+        <small>${escapeHtml(params.aspect_ratio || record.aspect_ratio || "-")} · ${escapeHtml(params.background || record.background || "transparent")} · ${escapeHtml(String(record.file_format || PathExtensionFallback(record.local_path || "png")).toUpperCase())} · ${escapeHtml(record.task_id || "本地任务")}</small>
+        <span class="lifecycle-chip ${escapeHtml(lifecycle)}">${escapeHtml({ normal: "普通", selected: "已选", confirmed: "已确认", in_library: "已入库", archived: "已归档", trashed: "回收站" }[lifecycle] || lifecycle)}</span>
+        ${record.error ? `<p title="${escapeHtml(record.error)}">${escapeHtml(record.error)}</p>` : ""}
+        <div class="ai-card-actions">
+          ${primaryAction}
+          ${stateAction}
+          ${moreActions}
+        </div>
+      </div>
+    </article>`;
+}
+
+function renderAiResultGrid() {
+  if (!els.aiResultGrid) return;
+  const node = selectedAiAssetNode();
+  const filters = state.aiCreation.resultFilters;
+  const now = Date.now();
+  const records = aiRecordsForAssetNode(node?.id || "").filter((record) => {
+    if (record.lifecycle_status === "trashed") return false;
+    if (filters.status === "active" && !isActiveAiRecord(record)) return false;
+    if (filters.status === "failed" && !["failed", "canceled", "download_failed"].includes(record.status)) return false;
+    if (["normal", "selected", "in_library"].includes(filters.status) && (record.lifecycle_status || "normal") !== filters.status) return false;
+    const fileType = String(record.file_format || PathExtensionFallback(record.local_path || "png")).toLowerCase().replace("jpeg", "jpg");
+    if (filters.type !== "all" && fileType !== filters.type) return false;
+    if (filters.ratio !== "all" && (record.params?.aspect_ratio || record.aspect_ratio) !== filters.ratio) return false;
+    if (filters.background !== "all" && (record.params?.background || record.background || "transparent") !== filters.background) return false;
+    if (filters.time !== "all") {
+      const created = new Date(record.created_at || 0).getTime();
+      const age = now - created;
+      if (!Number.isFinite(created) || created <= 0) return false;
+      if (filters.time === "today") {
+        const today = new Date();
+        const date = new Date(created);
+        if (date.getFullYear() !== today.getFullYear() || date.getMonth() !== today.getMonth() || date.getDate() !== today.getDate()) return false;
+      }
+      if (filters.time === "7d" && age > 7 * 24 * 60 * 60 * 1000) return false;
+      if (filters.time === "30d" && age > 30 * 24 * 60 * 60 * 1000) return false;
+    }
+    return true;
+  }).sort((left, right) => {
+    const delta = new Date(right.created_at || 0) - new Date(left.created_at || 0);
+    return filters.sort === "oldest" ? -delta : delta;
+  }).slice(0, 60);
+  els.aiResultSummary.textContent = records.length ? `${records.length} 个结果` : "暂无结果";
+  els.aiResultGrid.innerHTML = records.length
+    ? records.map((record) => aiRecordCard(record)).join("")
+    : '<div class="ai-empty-state">当前资产节点还没有生成结果</div>';
+}
+
+function syncAiResultFilters() {
+  state.aiCreation.resultFilters = {
+    status: els.aiResultStatusFilter?.value || "all",
+    type: els.aiResultTypeFilter?.value || "all",
+    ratio: els.aiResultRatioFilter?.value || "all",
+    background: els.aiResultBackgroundFilter?.value || "all",
+    time: els.aiResultTimeFilter?.value || "all",
+    sort: els.aiResultSortSelect?.value || "newest",
+  };
+  renderAiResultGrid();
+}
+
+function renderAiTaskQueue() {
+  if (!els.aiTaskList) return;
+  const records = state.aiCreation.history.filter((record) => isActiveAiRecord(record) || ["download_failed", "failed"].includes(record.status)).slice(0, 12);
+  els.aiTaskCount.textContent = String(records.length);
+  els.aiTaskList.innerHTML = records.length
+    ? records.map((record) => `
+      <button class="ai-task-item" type="button" data-ai-action="focus" data-ai-id="${escapeHtml(record.id)}">
+        <span><strong>${escapeHtml(record.prompt || "生成任务")}</strong><small>${escapeHtml(record.model || "-")}</small></span>
+        <em class="${aiStatusTone(record)}">${escapeHtml(aiStatusLabel(record))}</em>
+      </button>`).join("")
+    : '<div class="ai-empty-state compact">暂无任务</div>';
+  els.aiTaskList.querySelectorAll("[data-ai-action]").forEach((button) => button.addEventListener("click", handleAiCardAction));
+}
+
+function syncAiHistoryFilters() {
+  state.aiCreation.filters.media = els.aiHistoryMediaFilter.value;
+  state.aiCreation.filters.status = els.aiHistoryStatusFilter.value;
+  state.aiCreation.filters.query = els.aiHistorySearchInput.value.trim().toLowerCase();
+  renderAiHistory();
+}
+
+function filteredAiHistory() {
+  const filters = state.aiCreation.filters;
+  return state.aiCreation.history.filter((record) => {
+    if (filters.media !== "all" && record.media_type !== filters.media) return false;
+    if (filters.status === "active" && !isActiveAiRecord(record)) return false;
+    if (filters.status === "succeeded" && record.status !== "succeeded") return false;
+    if (filters.status === "failed" && !["failed", "canceled", "download_failed"].includes(record.status)) return false;
+    if (["normal", "selected", "in_library", "trashed", "confirmed", "archived"].includes(filters.status) && (record.lifecycle_status || "normal") !== filters.status) return false;
+    if (filters.status === "all" && record.lifecycle_status === "trashed") return false;
+    if (filters.query && !`${record.prompt || ""} ${record.model || ""}`.toLowerCase().includes(filters.query)) return false;
+    return true;
+  });
+}
+
+function renderAiHistory() {
+  if (!els.aiHistoryGrid) return;
+  const records = filteredAiHistory();
+  els.aiHistoryGrid.innerHTML = records.length
+    ? records.map((record) => aiRecordCard(record, { selectable: true })).join("")
+    : '<div class="ai-empty-state">没有符合筛选条件的历史</div>';
+  const selectedCount = state.aiCreation.selectedIds.size;
+  els.aiHistorySelectionBar.hidden = selectedCount === 0;
+  els.aiHistorySelectionCount.textContent = `已选 ${selectedCount} 项`;
+}
+
+function selectVisibleAiHistory() {
+  filteredAiHistory().filter((record) => record.status === "succeeded" && record.local_url).forEach((record) => state.aiCreation.selectedIds.add(record.id));
+  renderAiHistory();
+}
+
+function clearAiHistorySelection() {
+  state.aiCreation.selectedIds.clear();
+  renderAiHistory();
+}
+
+function aiRecordById(recordId) {
+  return state.aiCreation.history.find((record) => record.id === recordId) || null;
+}
+
+function handleAiCardAction(event) {
+  const moreToggle = event.target?.closest?.(".ai-card-more-toggle");
+  if (moreToggle) {
+    const currentMenu = moreToggle.closest(".ai-card-more");
+    window.requestAnimationFrame(() => {
+      document.querySelectorAll(".ai-card-more[open]").forEach((menu) => {
+        if (menu !== currentMenu) menu.removeAttribute("open");
+      });
+      if (!currentMenu?.open) return;
+      const card = currentMenu.closest(".ai-result-card");
+      const grid = card?.closest(".ai-result-grid, .ai-history-grid");
+      if (card && grid) {
+        const cardRect = card.getBoundingClientRect();
+        const gridRect = grid.getBoundingClientRect();
+        grid.scrollTop += cardRect.bottom - gridRect.bottom + 4;
+      }
+    });
+    return;
+  }
+  const target = event.currentTarget?.dataset?.aiAction ? event.currentTarget : event.target?.closest?.("[data-ai-action]");
+  const action = target?.dataset?.aiAction;
+  const record = aiRecordById(target?.dataset?.aiId || "");
+  if (!action || !record) return;
+  target.closest?.(".ai-card-more")?.removeAttribute("open");
+  if (action === "select") {
+    if (state.aiCreation.selectedIds.has(record.id)) state.aiCreation.selectedIds.delete(record.id);
+    else state.aiCreation.selectedIds.add(record.id);
+    renderAiHistory();
+  } else if (action === "preview" && record.local_url) {
+    openAiPreviewDialog(record);
+  } else if (action === "process") {
+    void addAiRecordsToImageProcessing([record.id]);
+  } else if (action === "open" && record.local_path) {
+    void openPath(record.local_path);
+  } else if (action === "delete") {
+    void setAiRecordLifecycle([record.id], "trashed");
+  } else if (action === "lifecycle") {
+    void setAiRecordLifecycle([record.id], target.dataset.lifecycle || "normal");
+  } else if (action === "library") {
+    void addAiRecordsToLibrary([record.id]);
+  } else if (action === "regenerate") {
+    void submitAiImageGeneration(record);
+  } else if (action === "similar") {
+    els.aiPromptInput.value = record.prompt || "";
+    setAiCreationView("image");
+    void submitAiImageGeneration(record);
+  } else if (action === "retry-download") {
+    pollAiGenerationRecord(record.id, 0);
+  } else if (action === "focus") {
+    setAiCreationView("history");
+    els.aiHistorySearchInput.value = record.prompt || "";
+    syncAiHistoryFilters();
+  }
+}
+
+async function setAiRecordLifecycle(recordIds, lifecycleStatus) {
+  if (!recordIds.length) return;
+  try {
+    const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/generation-results/lifecycle`, { method: "POST", body: { record_ids: recordIds, status: lifecycleStatus } });
+    (data.results || []).forEach(upsertAiHistoryRecord);
+    if (lifecycleStatus === "trashed") recordIds.forEach((id) => state.aiCreation.selectedIds.delete(id));
+    renderAiCreation();
+    await loadProjectDashboard();
+    setStatus(lifecycleStatus === "trashed" ? "生成结果已移入项目回收站。" : "生成结果状态已更新。", "success");
+  } catch (error) {
+    setStatus(`更新生成结果失败：${error.message}`, "error");
+  }
+}
+
+async function addAiRecordsToLibrary(recordIds) {
+  try {
+    await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/library/ingest`, { method: "POST", body: { record_ids: recordIds } });
+    await loadAiHistory();
+    await loadProjectDashboard();
+    setStatus(`${recordIds.length} 个结果已复制到资产管理。`, "success");
+  } catch (error) {
+    setStatus(`加入资产管理失败：${error.message}`, "error");
+  }
+}
+
+function openAiPreviewDialog(record) {
+  els.aiPreviewImage.src = record.local_url;
+  els.aiPreviewDialogTitle.textContent = record.prompt || "生成结果";
+  els.aiPreviewCaption.textContent = `${record.model || "-"} · ${record.width || "-"} x ${record.height || "-"}`;
+  els.aiPreviewDialog.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeAiPreviewDialog() {
+  els.aiPreviewDialog.hidden = true;
+  els.aiPreviewImage.removeAttribute("src");
+  document.body.classList.remove("modal-open");
+}
+
+async function addSelectedAiRecordsToImageProcessing() {
+  await addAiRecordsToImageProcessing(Array.from(state.aiCreation.selectedIds));
+}
+
+async function addAiRecordsToImageProcessing(recordIds) {
+  const records = recordIds.map(aiRecordById).filter((record) => record?.status === "succeeded" && record.local_url);
+  if (!records.length) {
+    setStatus("所选记录没有可加入处理的本地图片。", "error");
+    return;
+  }
+  try {
+    const intakeData = await apiJson(
+      `/api/v1/projects/${encodeURIComponent(activeProjectId())}/processing-intakes`,
+      {
+        method: "POST",
+        body: {
+          record_ids: records.map((record) => record.id),
+          actor: "user",
+          idempotency_key: `ui-${Date.now()}-${records.map((record) => record.id).sort().join("-")}`,
+        },
+      }
+    );
+    const intake = intakeData.processing_intake;
+    const sources = Array.isArray(intake?.sources) ? intake.sources : [];
+    if (sources.length !== records.length) {
+      throw new Error("项目处理接收单与所选结果数量不一致");
+    }
+    const files = await Promise.all(sources.map(async (source, index) => {
+      const response = await fetch(source.url, { cache: "no-store" });
+      if (!response.ok) throw new Error(`无法读取第 ${index + 1} 张生成图片`);
+      const blob = await response.blob();
+      const extension = PathExtensionFallback(source.file_name || source.working_relative_path);
+      const name = imageImportFileName(source.file_name || `generated_${index + 1}.${extension}`, extension);
+      return new File([blob], name, { type: blob.type || `image/${extension}` });
+    }));
+    await uploadImageFiles(files);
+    records.forEach((record) => state.aiCreation.selectedIds.delete(record.id));
+    setActiveModule("image", { announce: false });
+    setActiveImagePage("full", { announce: false, persist: false });
+    setActiveImageTool("import", { announce: false });
+    renderImageWorkflow();
+    setStatus(`已创建项目处理接收单，并将 ${files.length} 张生成图片追加到图片处理。`, "success");
+  } catch (error) {
+    setStatus(`加入图片处理失败：${error.message}`, "error");
+  }
+}
+
+function openAiDeleteDialog(recordIds) {
+  state.aiCreation.deleteIds = Array.from(new Set(recordIds)).filter((id) => aiRecordById(id));
+  if (!state.aiCreation.deleteIds.length) return;
+  els.aiDeleteSummary.textContent = `将删除 ${state.aiCreation.deleteIds.length} 条生成历史。`;
+  hideAiDeleteFileConfirmation();
+  els.aiDeleteDialog.hidden = false;
+  document.body.classList.add("modal-open");
+}
+
+function closeAiDeleteDialog() {
+  els.aiDeleteDialog.hidden = true;
+  state.aiCreation.deleteIds = [];
+  document.body.classList.remove("modal-open");
+}
+
+function showAiDeleteFileConfirmation() {
+  els.aiDeleteInitialActions.hidden = true;
+  els.aiDeleteConfirmFiles.hidden = false;
+}
+
+function hideAiDeleteFileConfirmation() {
+  els.aiDeleteInitialActions.hidden = false;
+  els.aiDeleteConfirmFiles.hidden = true;
+}
+
+async function deleteAiHistoryRecords(deleteFiles) {
+  const ids = [...state.aiCreation.deleteIds];
+  const button = deleteFiles ? els.aiDeleteConfirmFilesButton : els.aiDeleteRecordOnlyButton;
+  await withBusy(button, async () => {
+    try {
+      const data = await apiJson("/api/v1/generation/history/delete", {
+        method: "POST",
+        body: { project_id: activeProjectId(), ids, delete_files: deleteFiles },
+      });
+      const deletedIds = new Set(data.result?.deleted_ids || ids);
+      state.aiCreation.history = state.aiCreation.history.filter((record) => !deletedIds.has(record.id));
+      deletedIds.forEach((id) => {
+        state.aiCreation.selectedIds.delete(id);
+        stopAiPollingRecord(id);
+      });
+      closeAiDeleteDialog();
+      renderAiCreation();
+      setStatus(deleteFiles ? "历史记录和本地文件已删除。" : "历史记录已删除，本地文件已保留。", "success");
+    } catch (error) {
+      setStatus(`删除生成历史失败：${error.message}`, "error");
+    }
+  });
 }
 
 function runtimeCheckReady(runtime, key) {

@@ -603,7 +603,7 @@ Start or restart the local server and verify HTTP 200 JSON responses for `/api/l
 
 - [ ] **Step 3: Run browser verification**
 
-At `http://127.0.0.1:8894/app/index.html`, verify:
+At `http://127.0.0.1:8895/app/index.html`, verify:
 
 - top-level AI creation navigation and disabled video item;
 - profile edit, avatar, masked token, test and clear behavior;

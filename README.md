@@ -16,6 +16,10 @@
 
 ## 主要模块
 
+- `项目总览`：首次运行从项目列表进入；提供文件化 `Default` 项目、创建项目和打开已有项目。
+- `项目资产 / 风格探索`：以列表或画布管理风格方向、参考图、候选和项目确认风格。
+- `项目资产 / 资产生产`：按资产结构树生成图片；视频和音频生成保留待接入入口，全部结果进入项目历史。
+- `资源库 / 资产管理`：筛选、确认、标记和下载内部资产；`项目对接` 负责预检并部署到正式工程。
 - `视频转序列帧`：导入视频/GIF/图片序列，截取区间，抽帧，抠图，导出透明帧和 WebM。
 - `视频处理`：视频压缩、基础剪辑、字幕、片段拼接、预览和导出。
 - `图片处理 / 全流程`：导入单张或多张图片，抠图、拆图、命名、压缩和导出。
@@ -34,6 +38,12 @@ app/styles.css                        主界面样式
 app/favicon.png                       产品图标
 app/line-cleaner-experiment.*         实验性线稿清理页面
 docs/                                 项目生成规则和维护说明
+docs/PROJECT_FORMAT.zh-CN.md           文件化项目格式
+docs/API.zh-CN.md                      REST API 契约
+docs/AUTOMATION_WORKFLOW.zh-CN.md      Agent/CLI 自动化工作流
+docs/PROJECT_INTEGRATION.zh-CN.md      正式项目装配规则
+project_service.py                     项目领域服务
+sprite_lab_cli.py                      项目自动化 CLI
 server.py                             本地 HTTP 服务、文件 API 和处理流水线
 requirements.txt                      基础运行依赖
 requirements-ai.txt                   可选 AI 运行依赖
@@ -86,7 +96,7 @@ start_sprite_video_lab.bat
 默认访问地址：
 
 ```text
-http://127.0.0.1:8894
+http://127.0.0.1:8895
 ```
 
 如果下载依赖或模型也需要代理，可以在本机命令行临时设置：
@@ -147,7 +157,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build_portable_bundle.ps1 
 ## 环境变量
 
 - `SPRITE_VIDEO_LAB_HOST`：服务监听地址，默认 `127.0.0.1`。
-- `SPRITE_VIDEO_LAB_PORT`：服务端口，默认 `8894`。
+- `SPRITE_VIDEO_LAB_PORT`：服务端口，默认 `8895`。
 - `SPRITE_VIDEO_LAB_DATA_ROOT`：共享运行环境和模型根目录，默认 `..\sprite-video-lab-models`。
 - `SPRITE_VIDEO_LAB_PROXY`：可选代理地址，脚本会同步到 `HTTP_PROXY` 和 `HTTPS_PROXY`。
 - `SPRITE_VIDEO_LAB_FFMPEG_DIR`：包含 `ffmpeg(.exe)` 和 `ffprobe(.exe)` 的目录。
