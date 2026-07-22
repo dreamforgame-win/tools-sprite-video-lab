@@ -70,17 +70,17 @@
         </div>
       </div>
       <nav class="project-sidebar-nav">
-        <button id="projectOverviewNavButton" class="project-nav-item active" type="button" data-project-module="project">
+        <button id="projectOverviewNavButton" class="project-nav-item active" type="button" data-project-module="project" title="项目总览" aria-label="项目总览">
           <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="7" height="9" x="3" y="3" rx="1"></rect><rect width="7" height="5" x="14" y="3" rx="1"></rect><rect width="7" height="9" x="14" y="12" rx="1"></rect><rect width="7" height="5" x="3" y="16" rx="1"></rect></svg><strong>项目总览</strong>
         </button>
         <div class="project-nav-group">
           <div class="project-nav-group-title">项目资产</div>
-          <button id="projectStyleNavButton" class="project-nav-item" type="button" data-project-module="style">
+          <button id="projectStyleNavButton" class="project-nav-item" type="button" data-project-module="style" title="风格探索" aria-label="风格探索">
             <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z"></path><path d="M5 3v4"></path><path d="M3 5h4"></path></svg><strong>风格探索</strong>
           </button>
           <div class="project-nav-subgroup">
             <div class="project-nav-subgroup-title">资产生产</div>
-            <button id="aiImageViewButton" class="project-nav-item compact" type="button" data-project-module="aiCreation" data-ai-view="image" aria-pressed="false">
+            <button id="aiImageViewButton" class="project-nav-item compact" type="button" data-project-module="aiCreation" data-ai-view="image" aria-pressed="false" title="图片生成" aria-label="图片生成">
               <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h6"></path><path d="M19 2v6"></path><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><circle cx="9" cy="9" r="2"></circle><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"></path></svg><strong>图片生成</strong>
             </button>
             <button class="project-nav-item compact" type="button" disabled title="视频生成待接入">
@@ -89,40 +89,45 @@
             <button class="project-nav-item compact" type="button" disabled title="音频生成待接入">
               <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 10v4"></path><path d="M6 7v10"></path><path d="M10 4v16"></path><path d="M14 8v8"></path><path d="M18 6v12"></path><path d="M22 10v4"></path></svg><strong>音频生成</strong><small>待接入</small>
             </button>
-            <button id="aiHistoryViewButton" class="project-nav-item compact" type="button" data-project-module="aiCreation" data-ai-view="history" aria-pressed="false">
+            <button id="aiHistoryViewButton" class="project-nav-item compact" type="button" data-project-module="aiCreation" data-ai-view="history" aria-pressed="false" title="生成历史" aria-label="生成历史">
               <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"></path><path d="M3 3v5h5"></path><path d="M12 7v5l4 2"></path></svg><strong>生成历史</strong>
             </button>
           </div>
           <div class="project-nav-subgroup">
             <div class="project-nav-subgroup-title">资产处理</div>
-            <button id="projectImageProcessNavButton" class="project-nav-item compact" type="button" data-project-module="image">
+            <button id="projectImageProcessNavButton" class="project-nav-item compact" type="button" data-project-module="image" title="图片处理" aria-label="图片处理">
               <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7V5a2 2 0 0 1 2-2h2"></path><path d="M17 3h2a2 2 0 0 1 2 2v2"></path><path d="M21 17v2a2 2 0 0 1-2 2h-2"></path><path d="M7 21H5a2 2 0 0 1-2-2v-2"></path><rect width="10" height="8" x="7" y="8" rx="1"></rect></svg><strong>图片处理</strong>
             </button>
-            <button id="projectVideoProcessNavButton" class="project-nav-item compact" type="button" data-project-module="videoProcess">
+            <button id="projectVideoProcessNavButton" class="project-nav-item compact" type="button" data-project-module="videoProcess" title="视频处理" aria-label="视频处理">
               <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="14" x="3" y="7" rx="2"></rect><path d="M3 7h18"></path><path d="m7 3-2 4"></path><path d="m12 3-2 4"></path><path d="m17 3-2 4"></path><path d="m22 3-2 4"></path></svg><strong>视频处理</strong>
             </button>
-            <button id="projectSequenceNavButton" class="project-nav-item compact" type="button" data-project-module="video">
+            <button id="projectSequenceNavButton" class="project-nav-item compact" type="button" data-project-module="video" title="序列帧提取" aria-label="序列帧提取">
               <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"></rect><path d="M7 3v18"></path><path d="M17 3v18"></path><path d="M3 8h4"></path><path d="M17 8h4"></path><path d="M3 16h4"></path><path d="M17 16h4"></path></svg><strong>序列帧提取</strong>
             </button>
           </div>
         </div>
         <div class="project-nav-group">
           <div class="project-nav-group-title">资源库</div>
-          <button id="projectAssetLibraryNavButton" class="project-nav-item" type="button" data-project-module="library">
+          <button id="projectAssetLibraryNavButton" class="project-nav-item" type="button" data-project-module="library" title="资产管理" aria-label="资产管理">
             <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><rect width="20" height="5" x="2" y="3" rx="1"></rect><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8"></path><path d="M10 12h4"></path></svg><strong>资产管理</strong>
           </button>
-          <button id="projectIntegrationNavButton" class="project-nav-item" type="button" data-project-module="integration">
+          <button id="projectIntegrationNavButton" class="project-nav-item" type="button" data-project-module="integration" title="项目对接" aria-label="项目对接">
             <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-9"></path><path d="m17 4 3 3-3 3"></path><path d="M4 17h9"></path><path d="m7 20-3-3 3-3"></path></svg><strong>项目对接</strong>
           </button>
         </div>
-        <button id="projectTrashNavButton" class="project-nav-item" type="button" data-project-module="trash">
+        <button id="projectTrashNavButton" class="project-nav-item" type="button" data-project-module="trash" title="回收站" aria-label="回收站">
           <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path><path d="M19 6 18 20a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6"></path><path d="M14 11v6"></path></svg><strong>回收站</strong>
         </button>
-        <button id="projectSettingsNavButton" class="project-nav-item" type="button" data-project-module="settings">
+        <button id="projectSettingsNavButton" class="project-nav-item" type="button" data-project-module="settings" title="项目设置" aria-label="项目设置">
           <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg><strong>项目设置</strong>
         </button>
       </nav>
     </aside>
+    <div class="project-sidebar-edge-control">
+      <button id="projectSidebarCollapseButton" type="button" title="折叠项目导航" aria-label="折叠项目导航" aria-expanded="true">
+        <svg class="project-nav-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"></path></svg>
+      </button>
+    </div>
 
     <section id="projectDashboard" class="project-dashboard module-view" data-module-view="project" hidden>
       <header class="project-dashboard-head">
@@ -968,9 +973,10 @@
 
     <section id="aiCreationModule" class="ai-creation-module module-view" data-module-view="aiCreation" hidden>
       <header class="ai-production-header">
-        <div class="ai-production-title">
-          <h2>资产生产</h2>
-          <span id="aiConnectionBadge" class="ai-state-chip warning">未配置</span>
+        <span id="aiConnectionBadge" class="ai-state-chip warning">未配置</span>
+        <div class="ai-production-quick-actions" aria-label="图片生产快捷操作">
+          <button id="aiOpenGeneratePanelButton" class="primary-button tiny" type="button" title="生成图片">生成图片</button>
+          <button id="aiAddReferenceButton" class="ghost-button style-reference-icon-button" type="button" title="添加参考图" aria-label="添加参考图"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h6M19 2v6M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><circle cx="8.5" cy="9" r="1.5"></circle><path d="M3 16l4-4 4 4 2-2 7 7"></path></svg></button>
         </div>
         <div class="workbench-view-switch" role="group" aria-label="资产生产视图">
           <button id="aiProductionListViewButton" class="icon-text-button active" type="button" data-production-view="list" aria-pressed="true" title="列表视图">列表</button>
@@ -979,12 +985,12 @@
       </header>
 
       <aside class="ai-asset-tree-panel" aria-labelledby="aiAssetTreeTitle">
-        <div class="ai-asset-tree-head">
+          <div class="ai-asset-tree-head">
           <div>
             <h3 id="aiAssetTreeTitle">资产结构树</h3>
             <small id="aiAssetTreeCount">0 个节点</small>
           </div>
-          <button id="aiAssetNodeAddButton" class="icon-button" type="button" title="新建资产节点" aria-label="新建资产节点">＋</button>
+          <button id="aiAssetNodeAddButton" class="icon-button" type="button" title="新建资产节点" aria-label="新建资产节点"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg></button>
         </div>
         <input id="aiAssetTreeSearchInput" class="ai-tree-search" type="search" placeholder="搜索资产节点" aria-label="搜索资产节点">
         <div id="aiAssetTree" class="ai-asset-tree" role="tree"></div>
@@ -997,50 +1003,34 @@
 
       <main class="ai-canvas-panel">
         <section id="aiImageWorkspace" class="ai-image-workspace" data-production-panel="list">
-          <section class="ai-child-assets-section">
+          <section id="aiChildAssetsSection" class="ai-child-assets-section">
             <div class="ai-canvas-head">
               <div>
-                <p class="section-kicker">Current asset node</p>
                 <h2 id="aiCurrentNodeTitle">资产节点</h2>
               </div>
               <span id="aiCurrentNodeMeta">0 个子节点</span>
             </div>
+            <button id="aiChildAssetCreateButton" class="ai-child-asset-create-card" type="button">
+              <span class="ai-child-asset-create-icon" aria-hidden="true"><svg class="workbench-icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></svg></span>
+              <span class="ai-child-asset-create-copy"><strong id="aiChildAssetCreateLabel">创建资产</strong><small>创建完成后自动进入新节点</small></span>
+            </button>
             <div id="aiChildAssetGrid" class="ai-child-asset-grid"></div>
           </section>
           <section class="ai-node-results-section">
             <div class="ai-canvas-head">
               <div>
-                <p class="section-kicker">Generation results</p>
-                <h2>生成结果</h2>
+                <h2 id="aiResultTitle">生成结果</h2>
               </div>
-              <span id="aiResultSummary">暂无结果</span>
+              <div class="ai-result-head-actions">
+                <span id="aiResultSummary">暂无结果</span>
+              </div>
             </div>
-            <div class="ai-result-filter-row" aria-label="生成结果筛选">
-              <select id="aiResultStatusFilter" aria-label="结果状态">
-                <option value="all">全部状态</option>
-                <option value="normal">普通</option>
-                <option value="selected">已选</option>
-                <option value="in_library">已入库</option>
-                <option value="active">进行中</option>
-                <option value="failed">失败</option>
-              </select>
-              <select id="aiResultTypeFilter" aria-label="结果类型">
-                <option value="all">全部类型</option>
-                <option value="png">PNG</option>
-                <option value="jpg">JPG</option>
-                <option value="webp">WebP</option>
-              </select>
-              <select id="aiResultRatioFilter" aria-label="结果比例"><option value="all">全部比例</option></select>
-              <select id="aiResultBackgroundFilter" aria-label="结果背景">
-                <option value="all">全部背景</option><option value="transparent">透明</option><option value="solid">纯色</option><option value="scene">场景</option>
-              </select>
-              <select id="aiResultTimeFilter" aria-label="结果时间">
-                <option value="all">全部时间</option>
-                <option value="today">今天</option>
-                <option value="7d">最近 7 天</option>
-                <option value="30d">最近 30 天</option>
-              </select>
-              <select id="aiResultSortSelect" aria-label="结果排序"><option value="newest">最新优先</option><option value="oldest">最早优先</option></select>
+            <div id="aiResultSelectionBar" class="ai-result-selection-bar" hidden>
+              <strong id="aiResultSelectionCount">已选 0 项</strong>
+              <button id="aiResultAddToImageButton" class="primary-button tiny" type="button">加入图片处理</button>
+              <button id="aiResultAddToLibraryButton" class="ghost-button tiny" type="button">加入资产管理</button>
+              <button id="aiResultDeleteButton" class="ghost-button tiny danger" type="button">移入回收站</button>
+              <button id="aiResultClearSelectionButton" class="ghost-button tiny" type="button">清除选择</button>
             </div>
             <div id="aiResultGrid" class="ai-result-grid">
               <div class="ai-empty-state">生成结果会显示在这里</div>
@@ -1053,7 +1043,6 @@
           <div class="production-canvas-quickbar">
             <button type="button" data-production-canvas-action="add">加入画布</button>
             <button type="button" data-production-canvas-action="variant">生成变体</button>
-            <button type="button" data-production-canvas-action="select-result">设为已选</button>
             <button type="button" data-production-canvas-action="tag">添加标签</button>
             <button type="button" data-production-canvas-action="library">加入资产管理</button>
             <button type="button" data-production-canvas-action="download">下载</button>
@@ -1081,8 +1070,6 @@
               <option value="succeeded">已完成</option>
               <option value="failed">失败</option>
               <option value="normal">普通结果</option>
-              <option value="selected">已选结果</option>
-              <option value="confirmed">已确认结果</option>
               <option value="archived">已归档结果</option>
               <option value="in_library">已入库</option>
               <option value="trashed">回收站</option>
@@ -1103,78 +1090,71 @@
         </section>
       </main>
 
-      <aside class="ai-settings-column">
-        <section id="aiCreatePanel" class="ai-create-panel" aria-labelledby="aiCreateTitle">
-          <div class="ai-panel-head">
-            <div>
-              <p class="section-kicker">Generation settings</p>
-              <h2 id="aiCreateTitle">生成设置</h2>
-            </div>
-            <button id="aiOpenProfileButton" class="ghost-button tiny" type="button">服务配置</button>
-          </div>
+      <aside id="aiSettingsColumn" class="ai-settings-column" hidden>
+        <header class="style-inspector-head"><strong id="aiInspectorTitle">生成图片</strong><button id="aiInspectorCloseButton" class="style-inspector-close" type="button" title="关闭" aria-label="关闭资产生产浮层"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"></path></svg></button></header>
+        <div class="style-inspector-body ai-production-inspector-body">
+        <section id="aiCreatePanel" class="ai-create-panel" aria-labelledby="aiInspectorTitle">
           <div id="aiTokenNotice" class="ai-token-notice">
             <span>配置生成服务 MCP Token 后可开始生成。</span>
             <button class="ghost-button tiny" type="button" data-open-profile>配置</button>
           </div>
-          <label class="ai-field">
-            <span>当前资产</span>
-            <input id="aiCurrentAssetInput" type="text" value="未选择" readonly>
-          </label>
-          <label class="ai-field ai-prompt-field">
-            <span>描述需求</span>
-            <textarea id="aiPromptInput" rows="6" placeholder="描述主体、动作、风格、构图和背景"></textarea>
-          </label>
-          <label class="ai-field">
-            <span>资产描述</span>
-            <input id="aiAssetDescriptionInput" type="text" maxlength="200" placeholder="用途、状态或版本要求">
-          </label>
-          <label class="ai-field">
-            <span>模型</span>
-            <select id="aiModelSelect" disabled><option value="">等待模型列表</option></select>
-          </label>
-          <div class="ai-field-grid">
-            <label class="ai-field">
-              <span>宽高比</span>
-              <select id="aiAspectRatioSelect" disabled><option value="1:1">1:1</option></select>
-            </label>
-            <label class="ai-field">
-              <span>分辨率</span>
-              <select id="aiResolutionSelect" disabled><option value="1K">1K</option></select>
-            </label>
-            <label class="ai-field">
-              <span>背景</span>
-              <select id="aiBackgroundSelect"><option value="transparent">透明</option><option value="solid">纯色</option><option value="scene">场景</option></select>
-            </label>
-            <label class="ai-field">
-              <span>生成数量</span>
-              <select id="aiCountSelect"><option value="1">1 张</option><option value="2">2 张</option><option value="4" selected>4 张</option><option value="8">8 张</option></select>
-            </label>
-          </div>
-          <label class="ai-field">
-            <span>参考图</span>
-            <input id="aiReferenceImageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple>
-          </label>
-          <label class="ai-field">
-            <span>项目风格</span>
-            <input id="aiProjectStyleInput" type="text" value="尚未确认" readonly>
-          </label>
+          <div id="aiCurrentAssetSummary" class="ai-current-asset-summary"><span>生成到</span><strong id="aiCurrentAssetInput">未选择</strong><small id="aiCurrentAssetHint"></small></div>
+          <section id="aiGenerationReferencePicker" class="style-reference-picker style-reference-picker-compact ai-generation-reference-picker" aria-label="参考图">
+            <div class="style-reference-compact-head"><strong>参考图</strong><span id="aiReferenceCount">已选 0 / 0</span></div>
+            <div id="aiReferenceSummary" class="style-reference-compact-thumbs" aria-live="polite"><span class="style-reference-summary-empty">尚未选择参考图</span></div>
+            <div class="style-reference-compact-actions">
+              <label class="ghost-button style-reference-upload-button"><input id="aiReferenceImageInput" class="style-reference-file-input" type="file" accept="image/png,image/jpeg,image/webp" multiple><span>添加本地图片</span></label>
+              <button class="ghost-button" type="button" data-ai-reference-action="manage">管理参考图</button>
+            </div>
+            <p id="aiReferenceLimitHint" class="style-reference-limit-hint"></p>
+            <div id="aiReferencePickerModal" class="style-reference-picker-modal" hidden tabindex="-1">
+              <div class="style-reference-picker-backdrop" aria-hidden="true"></div>
+              <section class="style-reference-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="aiReferencePickerTitle">
+                <header><div><strong id="aiReferencePickerTitle">选择参考图</strong><span id="aiReferenceModalCount">已选 0 / 0</span></div><button type="button" data-ai-reference-action="close" title="关闭" aria-label="关闭"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"></path></svg></button></header>
+                <div class="style-reference-picker-body"><div id="aiReferenceOptionList" class="style-reference-option-list"></div></div>
+                <footer><button class="ghost-button" type="button" data-ai-reference-action="clear">清空</button><button class="primary-button" type="button" data-ai-reference-action="close">完成</button></footer>
+              </section>
+            </div>
+          </section>
+          <section class="style-generation-section ai-generation-section ai-generation-prompt-section">
+            <strong>提示词</strong>
+            <label class="ai-field style-generation-field-unlabeled"><textarea id="aiPromptInput" rows="6" aria-label="提示词" placeholder="描述主体、动作、构图和背景"></textarea></label>
+            <button id="aiPromptTemplateButton" class="ghost-button ai-prompt-template-trigger" type="button" aria-haspopup="dialog">选择提示词模板</button>
+            <div id="aiPromptTemplateModal" class="ai-prompt-template-modal" hidden tabindex="-1">
+              <div class="ai-prompt-template-backdrop" aria-hidden="true"></div>
+              <section class="ai-prompt-template-dialog" role="dialog" aria-modal="true" aria-labelledby="aiPromptTemplateTitle">
+                <header>
+                  <div><strong id="aiPromptTemplateTitle">选择提示词模板</strong><span>内置模板 · 应用后可继续编辑</span></div>
+                  <button id="aiPromptTemplateCloseButton" type="button" title="关闭" aria-label="关闭提示词模板选择器"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14M19 5L5 19"></path></svg></button>
+                </header>
+                <nav id="aiPromptTemplateCategoryTabs" class="ai-prompt-template-tabs" aria-label="提示词模板分类"></nav>
+                <div class="ai-prompt-template-body">
+                  <section class="ai-prompt-template-list-panel" aria-label="模板列表"><div id="aiPromptTemplateList" class="ai-prompt-template-list" role="listbox" aria-label="提示词模板"></div></section>
+                  <section id="aiPromptTemplatePreview" class="ai-prompt-template-preview" aria-live="polite"></section>
+                </div>
+                <footer>
+                  <span>推荐模型仅作提示，不会改变当前模型。</span>
+                  <div><button id="aiPromptTemplateCancelButton" class="ghost-button" type="button">取消</button><button id="aiPromptTemplateApplyButton" class="primary-button" type="button">应用模板</button></div>
+                </footer>
+              </section>
+            </div>
+          </section>
+          <section id="aiStyleGuideControls" class="ai-style-guide-controls" aria-label="风格指导包"></section>
+          <section class="style-generation-section ai-generation-section ai-generation-parameter-section">
+            <strong>模型和参数</strong>
+            <label class="ai-field style-generation-field-unlabeled"><select id="aiModelSelect" aria-label="模型" title="模型" disabled><option value="">等待模型列表</option></select></label>
+            <div class="ai-generation-parameter-grid">
+              <label class="ai-field style-generation-field-unlabeled"><select id="aiAspectRatioSelect" aria-label="图片比例" title="图片比例" disabled><option value="smart" selected>智能比例（1:1）</option><option value="1:1">1:1</option></select></label>
+              <label class="ai-field style-generation-field-unlabeled"><select id="aiResolutionSelect" aria-label="分辨率" title="分辨率" disabled><option value="1K">分辨率 1K</option></select></label>
+              <div id="aiBackgroundControl"></div><input id="aiBackgroundSelect" type="hidden" value="transparent">
+              <label class="ai-field style-generation-field-unlabeled"><select id="aiCountSelect" aria-label="生成数量" title="生成数量"><option value="1" selected>生成 1 张</option><option value="2">生成 2 张</option><option value="4">生成 4 张</option><option value="8">生成 8 张</option></select></label>
+            </div>
+          </section>
           <details class="ai-advanced-settings"><summary>高级设置</summary><label class="ai-field"><span>负面提示</span><textarea id="aiNegativePromptInput" rows="3" placeholder="不希望出现的内容"></textarea></label></details>
-          <div id="aiModelMeta" class="ai-model-meta">选择模型后显示可用参数</div>
           <button id="aiGenerateButton" class="primary-button large ai-generate-button" type="button" disabled>开始生成</button>
         </section>
-
-        <section class="ai-task-panel" aria-labelledby="aiTaskTitle">
-          <div class="ai-task-head">
-            <div>
-              <p class="section-kicker">Queue</p>
-              <h2 id="aiTaskTitle">任务队列</h2>
-            </div>
-            <span id="aiTaskCount">0</span>
-          </div>
-          <div id="aiTaskList" class="ai-task-list">
-            <div class="ai-empty-state compact">暂无任务</div>
-          </div>
-        </section>
+        <section id="aiResultDetailPanel" class="ai-result-detail-panel" aria-labelledby="aiInspectorTitle" hidden></section>
+        </div>
       </aside>
     </section>
 
@@ -2182,8 +2162,15 @@
     </footer>
   </div>
 
+  <section id="styleGuideVisualWizard" class="style-guide-visual-wizard" role="dialog" aria-modal="true" aria-labelledby="styleGuideVisualWizardTitle" hidden></section>
+  <section id="styleGuideVisualReferenceDialog" class="style-guide-visual-secondary" role="dialog" aria-modal="true" aria-labelledby="styleGuideVisualReferenceTitle" hidden></section>
+  <section id="styleGuideVisualPromptDialog" class="style-guide-visual-secondary" role="dialog" aria-modal="true" aria-labelledby="styleGuideVisualPromptTitle" hidden></section>
+
   <div id="imageLightbox" class="image-lightbox" hidden>
-    <div class="image-lightbox-toolbar" role="group" aria-label="大图底板">
+    <div class="image-lightbox-toolbar" role="group" aria-label="大图工具">
+      <button id="imageLightboxPromptButton" class="image-lightbox-tool-button prompt" type="button" title="查看提示词" aria-label="查看提示词" aria-expanded="false" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-5 3v-3a2 2 0 0 1-1-1.73V6a2 2 0 0 1 2-2Z"></path><path d="M7 9h10M7 13h7"></path></svg>
+      </button>
       <button id="imageLightboxTransparentButton" class="image-lightbox-mode-button checker" type="button" data-lightbox-bg-mode="transparent" title="透明底板" aria-label="透明底板"></button>
       <button id="imageLightboxOpaqueButton" class="image-lightbox-mode-button solid active" type="button" data-lightbox-bg-mode="opaque" title="不透明底板" aria-label="不透明底板"></button>
       <label id="imageLightboxColorField" class="image-lightbox-color-field" title="底板颜色">
@@ -2191,10 +2178,27 @@
       </label>
     </div>
     <button id="imageLightboxCloseButton" class="image-lightbox-close" type="button" aria-label="关闭大图">×</button>
-    <figure class="image-lightbox-frame">
-      <img id="imageLightboxImage" alt="查看大图">
-      <figcaption id="imageLightboxCaption"></figcaption>
-    </figure>
+    <div class="image-lightbox-stage">
+      <button id="imageLightboxPreviousButton" class="image-lightbox-nav-button previous" type="button" title="上一张" aria-label="上一张" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7"></path></svg>
+      </button>
+      <figure class="image-lightbox-frame">
+        <img id="imageLightboxImage" alt="查看大图">
+        <figcaption id="imageLightboxCaption"></figcaption>
+      </figure>
+      <button id="imageLightboxNextButton" class="image-lightbox-nav-button next" type="button" title="下一张" aria-label="下一张" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7"></path></svg>
+      </button>
+    </div>
+    <section id="imageLightboxGallery" class="image-lightbox-gallery" aria-label="组内快捷预览" hidden>
+      <header><strong id="imageLightboxGalleryLabel"></strong><span id="imageLightboxGalleryCount"></span></header>
+      <div id="imageLightboxGalleryTrack" class="image-lightbox-gallery-track" role="list"></div>
+    </section>
+    <aside id="imageLightboxPromptPanel" class="image-lightbox-prompt-panel" aria-label="图片提示词" hidden>
+      <header><div><span>Prompt</span><strong>提示词</strong></div><button id="imageLightboxPromptCloseButton" type="button" title="收起提示词" aria-label="收起提示词">×</button></header>
+      <pre id="imageLightboxPromptText"></pre>
+      <dl id="imageLightboxPromptMeta"></dl>
+    </aside>
     <form id="imageLightboxNamingEditor" class="image-lightbox-naming-editor" hidden>
       <label class="field image-lightbox-name-field">
         <span>命名</span>
@@ -2316,6 +2320,11 @@
     </section>
   </div>
 
+  <script src="/app/generation-utils.js"></script>
+  <script src="/app/prompt-template-utils.js"></script>
+  <script src="/app/style-guide-utils.js"></script>
+  <script src="/app/style-guide-visual-utils.js"></script>
+  <script src="/app/canvas-layout-utils.js"></script>
   <script src="/app/app.js"></script>
 </body>
 </html>

@@ -21,6 +21,8 @@ WORKFLOW_SCHEMA_VERSION = 1
 WORKFLOW_STATUSES = {"planned", "running", "succeeded", "failed", "canceled"}
 PROJECT_MARKER_DIR = ".sprite-lab"
 PROJECT_MANIFEST_NAME = "project.json"
+ASSET_LEAF_TARGET_MIGRATION_ID = "asset-leaf-generation-target-v1"
+SYSTEM_UNCATEGORIZED_ROLE = "uncategorized-generation-results"
 SLUG_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 LOCK_TIMEOUT_SECONDS = 5.0
 ASSET_CATEGORIES = (
@@ -208,6 +210,8 @@ class ProjectService:
             "manifest": marker / PROJECT_MANIFEST_NAME,
             "asset_tree": marker / "asset-tree.json",
             "style_directions": marker / "style-directions.json",
+            "style_guide_registry": marker / "style-guide-packages.json",
+            "style_guide_root": marker / "style-guides",
             "generation_history": marker / "generation-history.json",
             "library_manifest": marker / "library.json",
             "trash_manifest": marker / "trash.json",
@@ -268,7 +272,7 @@ class ProjectService:
         create_mode: str = "blank",
         template_id: str = "",
         default_background: str = "transparent",
-        default_image_count: int = 4,
+        default_image_count: int = 1,
         default_file_format: str = "png",
         is_default: bool = False,
     ) -> dict:
@@ -293,6 +297,7 @@ class ProjectService:
                 "manifest",
                 "asset_tree",
                 "style_directions",
+                "style_guide_registry",
                 "generation_history",
                 "library_manifest",
                 "trash_manifest",
@@ -313,12 +318,14 @@ class ProjectService:
             "description": str(description or "").strip(),
             "style_status": "unconfirmed",
             "current_style_direction_id": "",
+            "default_style_guide_package_id": "",
             "style_tags": [str(tag).strip()[:30] for tag in (style_tags or []) if str(tag).strip()][:20],
             "create_mode": str(create_mode or "blank"),
             "template_id": str(template_id or "").strip()[:80],
             "cover_relative_path": "",
             "default_background": str(default_background or "transparent"),
-            "default_image_count": max(1, min(int(default_image_count or 4), 16)),
+            "default_image_count": max(1, min(int(default_image_count or 1), 16)),
+            "generation_defaults_version": 2,
             "default_file_format": str(default_file_format or "png"),
             "default_aspect_ratio": str(aspect_ratio or "1:1").strip(),
             "is_default": bool(is_default),
@@ -349,6 +356,11 @@ class ProjectService:
             paths["style_directions"],
             {"schema_version": 1, "project_id": project_id, "directions": []},
         )
+        self._atomic_write_json(
+            paths["style_guide_registry"],
+            {"schema_version": 1, "project_id": project_id, "packages": []},
+        )
+        paths["style_guide_root"].mkdir(parents=True, exist_ok=True)
         self._atomic_write_json(
             paths["generation_history"],
             {"schema_version": 1, "project_id": project_id, "records": []},
@@ -391,16 +403,30 @@ class ProjectService:
         slug = str(manifest.get("slug") or "").strip()
         if not project_id or not SLUG_PATTERN.fullmatch(slug):
             raise ProjectError(f"Invalid project manifest: {manifest_path}")
-        manifest.setdefault("style_status", "unconfirmed")
-        manifest.setdefault("current_style_direction_id", "")
+        manifest_changed = False
+        for key, default in (
+            ("style_status", "unconfirmed"),
+            ("current_style_direction_id", ""),
+            ("default_style_guide_package_id", ""),
+        ):
+            if key not in manifest:
+                manifest[key] = default
+                manifest_changed = True
         manifest.setdefault("style_tags", [])
         manifest.setdefault("create_mode", "blank")
         manifest.setdefault("template_id", "")
         manifest.setdefault("cover_relative_path", "")
         manifest.setdefault("default_background", "transparent")
-        manifest.setdefault("default_image_count", 4)
+        manifest.setdefault("default_image_count", 1)
         manifest.setdefault("default_file_format", "png")
         manifest.setdefault("default_aspect_ratio", manifest.get("aspect_ratio") or "1:1")
+        if int(manifest.get("generation_defaults_version") or 0) < 2:
+            manifest["default_image_count"] = 1
+            manifest["generation_defaults_version"] = 2
+            manifest["updated_at"] = utc_now()
+            manifest_changed = True
+        if manifest_changed:
+            self._atomic_write_json(manifest_path, manifest)
         return manifest
 
     def _register_project_unlocked(self, registry: dict, root: Path, manifest: dict) -> None:
@@ -436,7 +462,8 @@ class ProjectService:
             (entry for entry in registry["projects"] if entry.get("id") == "default"),
             None,
         )
-        if existing is None:
+        existing_root = Path(str(existing.get("root_path") or "")) if existing else None
+        if existing is None or existing_root.resolve() != root.resolve():
             self._register_project_unlocked(registry, root, manifest)
         if not registry.get("active_project_id"):
             registry["active_project_id"] = ""
@@ -496,7 +523,7 @@ class ProjectService:
         create_mode: str = "blank",
         template_id: str = "",
         default_background: str = "transparent",
-        default_image_count: int = 4,
+        default_image_count: int = 1,
         default_file_format: str = "png",
     ) -> dict:
         display_name = str(display_name or "").strip()
@@ -641,6 +668,160 @@ class ProjectService:
                 raise ProjectError("Asset node cannot be its own parent")
         return tree
 
+    @staticmethod
+    def _uncategorized_asset_node_id(container_id: str) -> str:
+        digest = hashlib.sha256(str(container_id or "").encode("utf-8")).hexdigest()[:16]
+        return f"asset_uncategorized_{digest}"
+
+    def _ensure_uncategorized_asset_node_unlocked(
+        self,
+        tree: dict,
+        container: dict,
+    ) -> tuple[dict, bool]:
+        container_id = str(container.get("id") or "")
+        for node in tree["nodes"]:
+            if (
+                str(node.get("parent_id") or "") == container_id
+                and node.get("type") == "asset"
+                and node.get("system_role") == SYSTEM_UNCATEGORIZED_ROLE
+            ):
+                return node, False
+
+        node_id = self._uncategorized_asset_node_id(container_id)
+        conflicting = next(
+            (node for node in tree["nodes"] if str(node.get("id") or "") == node_id),
+            None,
+        )
+        if conflicting is not None:
+            raise ProjectError(f"System uncategorized asset id is already in use: {node_id}")
+
+        siblings = [
+            node
+            for node in tree["nodes"]
+            if str(node.get("parent_id") or "") == container_id
+        ]
+        sibling_names = {str(node.get("name") or "").casefold() for node in siblings}
+        name = "未分类"
+        suffix = 1
+        while name.casefold() in sibling_names:
+            suffix += 1
+            name = f"未分类（系统 {suffix}）"
+        now = utc_now()
+        node = {
+            "id": node_id,
+            "project_id": str(tree.get("project_id") or container.get("project_id") or ""),
+            "parent_id": container_id,
+            "name": name,
+            "type": "asset",
+            "category": str(container.get("category") or "other"),
+            "generated_count": 0,
+            "completed_count": 0,
+            "selected_count": 0,
+            "target_count": 0,
+            "order": len(siblings),
+            "system_role": SYSTEM_UNCATEGORIZED_ROLE,
+            "created_at": now,
+            "updated_at": now,
+        }
+        tree["nodes"].append(node)
+        return node, True
+
+    def _migrate_generation_targets_to_assets_unlocked(
+        self,
+        root: Path,
+        *,
+        actor: str = "system",
+    ) -> dict:
+        paths = self._project_paths(root)
+        tree = self._read_asset_tree_unlocked(root)
+        history = self._read_json(
+            paths["generation_history"],
+            {"schema_version": 1, "project_id": tree.get("project_id"), "records": []},
+        )
+        records = history.get("records") if isinstance(history.get("records"), list) else []
+        containers = {
+            str(node.get("id") or ""): node
+            for node in tree["nodes"]
+            if node.get("type") in {"category", "group"}
+        }
+        records_by_container: dict[str, list[dict]] = {}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            container_id = str(record.get("asset_node_id") or "")
+            if container_id in containers:
+                records_by_container.setdefault(container_id, []).append(record)
+        if not records_by_container:
+            return {"changed": False, "record_count": 0, "created_node_ids": []}
+
+        original_tree = copy.deepcopy(tree)
+        original_history = copy.deepcopy(history)
+        migration_root = paths["marker"] / "migrations" / ASSET_LEAF_TARGET_MIGRATION_ID
+        tree_backup = migration_root / "asset-tree.before.json"
+        history_backup = migration_root / "generation-history.before.json"
+        if not tree_backup.exists():
+            self._atomic_write_json(tree_backup, original_tree)
+        if not history_backup.exists():
+            self._atomic_write_json(history_backup, original_history)
+
+        migrated_at = utc_now()
+        created_node_ids = []
+        migrated_record_ids = []
+        target_by_container = {}
+        for container_id, container_records in records_by_container.items():
+            target, created = self._ensure_uncategorized_asset_node_unlocked(
+                tree,
+                containers[container_id],
+            )
+            target_by_container[container_id] = target["id"]
+            if created:
+                created_node_ids.append(target["id"])
+            for record in container_records:
+                record["asset_node_id"] = target["id"]
+                record["asset_node_migration"] = {
+                    "migration_id": ASSET_LEAF_TARGET_MIGRATION_ID,
+                    "previous_asset_node_id": container_id,
+                    "migrated_at": migrated_at,
+                }
+                migrated_record_ids.append(str(record.get("id") or ""))
+
+        try:
+            self._atomic_write_json(paths["asset_tree"], tree)
+            self._atomic_write_json(paths["generation_history"], history)
+        except Exception:
+            self._atomic_write_json(paths["asset_tree"], original_tree)
+            self._atomic_write_json(paths["generation_history"], original_history)
+            raise
+
+        summary = {
+            "migration_id": ASSET_LEAF_TARGET_MIGRATION_ID,
+            "project_id": str(tree.get("project_id") or ""),
+            "migrated_at": migrated_at,
+            "record_count": len(migrated_record_ids),
+            "record_ids": migrated_record_ids,
+            "created_node_ids": created_node_ids,
+            "target_by_container": target_by_container,
+            "backups": {
+                "asset_tree": str(tree_backup.relative_to(root)).replace("\\", "/"),
+                "generation_history": str(history_backup.relative_to(root)).replace("\\", "/"),
+            },
+        }
+        self._atomic_write_json(migration_root / "migration.json", summary)
+        self._append_event_unlocked(
+            root,
+            {
+                "type": "generation.asset-targets-migrated",
+                "actor": str(actor or "system"),
+                "project_id": str(tree.get("project_id") or ""),
+                "data": {
+                    "migration_id": ASSET_LEAF_TARGET_MIGRATION_ID,
+                    "record_count": len(migrated_record_ids),
+                    "created_node_ids": created_node_ids,
+                },
+            },
+        )
+        return {"changed": True, **summary}
+
     def _asset_tree_with_counts_unlocked(self, root: Path) -> dict:
         tree = copy.deepcopy(self._read_asset_tree_unlocked(root))
         history = self._read_json(
@@ -671,6 +852,7 @@ class ProjectService:
     def list_asset_tree(self, project_id: str) -> dict:
         with self._locked():
             root = self._project_root_unlocked(project_id)
+            self._migrate_generation_targets_to_assets_unlocked(root)
             return self._asset_tree_with_counts_unlocked(root)
 
     def get_asset_node(self, project_id: str, node_id: str) -> dict:
@@ -685,6 +867,47 @@ class ProjectService:
             if node is None:
                 raise ProjectError(f"Asset node does not exist: {node_id}")
             return copy.deepcopy(node)
+
+    def resolve_generation_target(
+        self,
+        project_id: str,
+        node_id: str,
+        *,
+        allow_container_fallback: bool = False,
+        actor: str = "system",
+    ) -> dict:
+        node_id = str(node_id or "").strip() or "category-other"
+        with self._locked():
+            root = self._project_root_unlocked(project_id)
+            tree = self._read_asset_tree_unlocked(root)
+            node = next(
+                (item for item in tree["nodes"] if str(item.get("id") or "") == node_id),
+                None,
+            )
+            if node is None:
+                raise ProjectError(f"Asset node does not exist: {node_id}")
+            if node.get("type") == "asset":
+                return copy.deepcopy(node)
+            if node.get("type") not in {"category", "group"} or not allow_container_fallback:
+                raise ProjectError("请选择具体资产后再生成。分类和分组不能作为生成目标。")
+            target, created = self._ensure_uncategorized_asset_node_unlocked(tree, node)
+            if created:
+                self._atomic_write_json(self._project_paths(root)["asset_tree"], tree)
+                self._append_event_unlocked(
+                    root,
+                    {
+                        "type": "asset-node.created",
+                        "actor": str(actor or "system"),
+                        "project_id": project_id,
+                        "data": {
+                            "node_id": target["id"],
+                            "parent_id": node_id,
+                            "name": target["name"],
+                            "system_role": SYSTEM_UNCATEGORIZED_ROLE,
+                        },
+                    },
+                )
+            return copy.deepcopy(target)
 
     def create_asset_node(
         self,
@@ -771,6 +994,8 @@ class ProjectService:
             )
             if node is None:
                 raise ProjectError(f"Asset node does not exist: {node_id}")
+            if node.get("system_role"):
+                raise ProjectError("System asset nodes cannot be edited")
             if name is not None:
                 normalized_name = str(name or "").strip()
                 if not 1 <= len(normalized_name) <= 60:
@@ -817,6 +1042,8 @@ class ProjectService:
                 raise ProjectError(f"Asset node does not exist: {node_id}")
             if node.get("type") == "category":
                 raise ProjectError("Built-in asset categories cannot be deleted")
+            if node.get("system_role"):
+                raise ProjectError("System asset nodes cannot be deleted")
             if any(item.get("parent_id") == node_id for item in tree["nodes"]):
                 raise ProjectError("Asset node must be empty before deletion")
             history = self._read_json(
@@ -854,6 +1081,8 @@ class ProjectService:
                 raise ProjectError(f"Asset node does not exist: {node_id}")
             if node.get("type") == "category":
                 raise ProjectError("Built-in asset categories cannot be deleted")
+            if node.get("system_role"):
+                raise ProjectError("System asset nodes cannot be deleted")
             if any(item.get("parent_id") == node_id for item in tree["nodes"]):
                 raise ProjectError("Asset node must be empty before deletion")
             history = self._read_json(
@@ -910,8 +1139,7 @@ class ProjectService:
             "default_background",
             "default_image_count",
             "default_file_format",
-            "style_status",
-            "current_style_direction_id",
+            "default_style_guide_package_id",
         }
         with self._locked():
             root = self._project_root_unlocked(project_id)
@@ -930,10 +1158,6 @@ class ProjectService:
                     value = self._normalized_tags(value)
                 elif key == "default_image_count":
                     value = max(1, min(int(value or 4), 16))
-                elif key == "style_status":
-                    value = str(value or "unconfirmed")
-                    if value not in {"unconfirmed", "confirmed"}:
-                        raise ProjectError("Invalid project style status")
                 else:
                     value = str(value or "").strip()
                 manifest[key] = value
@@ -998,12 +1222,13 @@ class ProjectService:
                 manifest["cover_relative_path"] = relative
             else:
                 references = list(manifest.get("reference_images") or [])
-                references.append({"relative_path": relative, "file_name": str(file_name or target.name)[:160], "created_at": utc_now()})
+                display_name = str(file_name or target.name)[:160]
+                references.append({"relative_path": relative, "file_name": display_name, "original_name": display_name, "display_name": display_name, "created_at": utc_now()})
                 manifest["reference_images"] = references[-20:]
             manifest["updated_at"] = utc_now()
             self._atomic_write_json(self._project_paths(root)["manifest"], manifest)
             self._append_event_unlocked(root, {"type": "project.image-imported", "actor": actor, "project_id": project_id, "data": {"role": role, "relative_path": relative}})
-            return {"role": role, "relative_path": relative, "file_name": target.name}
+            return {"role": role, "relative_path": relative, "file_name": display_name, "original_name": display_name, "display_name": display_name, "stored_file_name": target.name}
 
     def project_dashboard(self, project_id: str) -> dict:
         with self._locked():
@@ -1111,6 +1336,8 @@ class ProjectService:
                     {
                         "relative_path": str(item.get("relative_path") or "")[:500],
                         "file_name": str(item.get("file_name") or "")[:160],
+                        "original_name": str(item.get("original_name") or item.get("file_name") or "")[:160],
+                        "display_name": str(item.get("display_name") or item.get("file_name") or "")[:160],
                     }
                     for item in references[:20]
                     if isinstance(item, dict) and str(item.get("relative_path") or "")
@@ -1120,20 +1347,111 @@ class ProjectService:
                 if status not in {"normal", "selected", "confirmed", "archived"}:
                     raise ProjectError("Invalid style direction status")
                 direction["status"] = status
-                if status == "confirmed":
-                    for item in payload["directions"]:
-                        if item.get("id") != direction_id and item.get("status") == "confirmed":
-                            item["status"] = "archived"
-                            item["updated_at"] = utc_now()
-                    manifest = self._read_project_manifest_unlocked(root)
-                    manifest["style_status"] = "confirmed"
-                    manifest["current_style_direction_id"] = direction_id
-                    manifest["updated_at"] = utc_now()
-                    self._atomic_write_json(self._project_paths(root)["manifest"], manifest)
             direction["updated_at"] = utc_now()
             self._atomic_write_json(self._project_paths(root)["style_directions"], payload)
             self._append_event_unlocked(root, {"type": "style.updated", "actor": actor, "project_id": project_id, "data": {"style_direction_id": direction_id, "status": direction.get("status")}})
             return copy.deepcopy(direction)
+
+    def transfer_style_content(
+        self,
+        project_id: str,
+        *,
+        source_style_id: str,
+        target_style_id: str,
+        reference_paths: list[str] | None = None,
+        record_ids: list[str] | None = None,
+        mode: str = "move",
+        actor: str = "user",
+    ) -> dict:
+        mode = str(mode or "move").strip().lower()
+        if mode not in {"move", "copy"}:
+            raise ProjectError("Style content transfer mode must be move or copy")
+        if not source_style_id or not target_style_id or source_style_id == target_style_id:
+            raise ProjectError("Source and target style directions must be different")
+        requested_paths = list(dict.fromkeys(str(item or "").strip() for item in (reference_paths or []) if str(item or "").strip()))
+        requested_ids = list(dict.fromkeys(str(item or "").strip() for item in (record_ids or []) if str(item or "").strip()))
+        if not requested_paths and not requested_ids:
+            raise ProjectError("At least one style content item is required")
+        with self._locked():
+            root = self._project_root_unlocked(project_id)
+            paths = self._project_paths(root)
+            styles = self._read_style_directions_unlocked(root)
+            source_style = next((item for item in styles["directions"] if item.get("id") == source_style_id), None)
+            target_style = next((item for item in styles["directions"] if item.get("id") == target_style_id), None)
+            if source_style is None or target_style is None:
+                raise ProjectError("Source or target style direction does not exist")
+
+            source_references = list(source_style.get("reference_images") or [])
+            selected_references = [item for item in source_references if str(item.get("relative_path") or "") in requested_paths]
+            if len(selected_references) != len(requested_paths):
+                raise ProjectError("One or more reference images do not belong to the source direction")
+            target_references = list(target_style.get("reference_images") or [])
+            existing_paths = {str(item.get("relative_path") or "") for item in target_references}
+            additions = [copy.deepcopy(item) for item in selected_references if str(item.get("relative_path") or "") not in existing_paths]
+            if len(target_references) + len(additions) > 20:
+                raise ProjectError("Target style direction supports at most 20 reference images")
+            target_style["reference_images"] = target_references + additions
+            if mode == "move" and requested_paths:
+                source_style["reference_images"] = [item for item in source_references if str(item.get("relative_path") or "") not in requested_paths]
+
+            history = self._read_json(paths["generation_history"], {"schema_version": 1, "records": []})
+            records_by_id = {str(item.get("id") or ""): item for item in history.get("records", []) if isinstance(item, dict)}
+            selected_records = []
+            for record_id in requested_ids:
+                record = records_by_id.get(record_id)
+                if record is None or str(record.get("style_direction_id") or "") != source_style_id:
+                    raise ProjectError("One or more generation records do not belong to the source direction")
+                selected_records.append(record)
+
+            changed_records = []
+            copied_records = []
+            copied_files: list[Path] = []
+            now = utc_now()
+            try:
+                for record in selected_records:
+                    if mode == "move":
+                        record["style_direction_id"] = target_style_id
+                        record["updated_at"] = now
+                        changed_records.append(copy.deepcopy(record))
+                        continue
+                    if record.get("status") != "succeeded":
+                        raise ProjectError("Only completed generation results can be copied")
+                    source_path = Path(str(record.get("local_path") or "")).resolve()
+                    production_root = paths["production_images"].resolve()
+                    if not source_path.is_file() or not source_path.is_relative_to(production_root):
+                        raise ProjectError("Generation result file is unavailable for copying")
+                    new_id = str(uuid.uuid4())
+                    target_path = production_root / f"{new_id}{source_path.suffix.lower() or '.png'}"
+                    shutil.copy2(source_path, target_path)
+                    copied_files.append(target_path)
+                    cloned = copy.deepcopy(record)
+                    cloned.update({
+                        "id": new_id,
+                        "task_id": "",
+                        "style_direction_id": target_style_id,
+                        "source_record_id": record.get("id"),
+                        "local_path": str(target_path),
+                        "local_url": f"/api/v1/projects/{project_id}/files/production/images/{target_path.name}",
+                        "relative_path": f"production/images/{target_path.name}",
+                        "lifecycle_status": "normal",
+                        "created_at": now,
+                        "updated_at": now,
+                    })
+                    copied_records.append(cloned)
+                    changed_records.append(copy.deepcopy(cloned))
+                if copied_records:
+                    history["records"] = copied_records + history.get("records", [])
+                source_style["updated_at"] = now
+                target_style["updated_at"] = now
+                self._atomic_write_json(paths["style_directions"], styles)
+                self._atomic_write_json(paths["generation_history"], history)
+            except Exception:
+                for path in copied_files:
+                    path.unlink(missing_ok=True)
+                raise
+
+            self._append_event_unlocked(root, {"type": "style.content-transferred", "actor": actor, "project_id": project_id, "data": {"source_style_id": source_style_id, "target_style_id": target_style_id, "mode": mode, "reference_count": len(selected_references), "record_count": len(selected_records)}})
+            return {"source_style": copy.deepcopy(source_style), "target_style": copy.deepcopy(target_style), "records": changed_records}
 
     def _read_trash_unlocked(self, root: Path) -> dict:
         payload = self._read_json(self._project_paths(root)["trash_manifest"], {"schema_version": 1, "items": []})
@@ -1180,9 +1498,25 @@ class ProjectService:
             styles["directions"] = [item for item in styles["directions"] if item.get("id") != direction_id]
             self._atomic_write_json(self._project_paths(root)["style_directions"], styles)
             manifest = self._read_project_manifest_unlocked(root)
-            if manifest.get("current_style_direction_id") == direction_id:
-                manifest["style_status"] = "unconfirmed"
-                manifest["current_style_direction_id"] = ""
+            registry_path = self._project_paths(root)["style_guide_registry"]
+            registry = self._read_json(
+                registry_path,
+                {"schema_version": 1, "project_id": project_id, "packages": []},
+            )
+            detached_package_ids = []
+            detached_at = utc_now()
+            for package in registry.get("packages", []):
+                if package.get("style_direction_id") != direction_id:
+                    continue
+                package["detached_style_direction_id"] = direction_id
+                package["style_direction_id"] = ""
+                package["trashed_at"] = detached_at
+                package["updated_at"] = detached_at
+                detached_package_ids.append(str(package.get("id") or ""))
+            if detached_package_ids:
+                self._atomic_write_json(registry_path, registry)
+            if manifest.get("default_style_guide_package_id") in detached_package_ids:
+                manifest["default_style_guide_package_id"] = ""
                 manifest["updated_at"] = utc_now()
                 self._atomic_write_json(self._project_paths(root)["manifest"], manifest)
             item = self._add_trash_item_unlocked(root, object_type="style_direction", object_id=direction_id, name=direction.get("name", ""), source_module="style", payload=direction)
@@ -1195,7 +1529,7 @@ class ProjectService:
             raise ProjectError("Canvas type is required")
         with self._locked():
             root = self._project_root_unlocked(project_id)
-            return self._read_json(self._project_paths(root)["canvases"] / f"{canvas_type}.json", {"schema_version": 1, "project_id": project_id, "canvas_type": canvas_type, "viewport": {"x": 0, "y": 0, "zoom": 1}, "nodes": [], "updated_at": ""})
+            return self._read_json(self._project_paths(root)["canvases"] / f"{canvas_type}.json", {"schema_version": 1, "project_id": project_id, "canvas_type": canvas_type, "viewport": {"x": 0, "y": 0, "zoom": 1}, "nodes": [], "groups": [], "updated_at": ""})
 
     def save_canvas(self, project_id: str, canvas_type: str, *, canvas: dict, actor: str = "user") -> dict:
         if not isinstance(canvas, dict) or not isinstance(canvas.get("nodes", []), list):
@@ -1219,8 +1553,22 @@ class ProjectService:
                 "locked": bool(raw.get("locked")), "z_index": int(raw.get("z_index") or 0),
                 "group_id": str(raw.get("group_id") or ""),
             })
+        groups = []
+        seen_group_ids = set()
+        raw_groups = canvas.get("groups", []) if isinstance(canvas.get("groups", []), list) else []
+        for raw in raw_groups[:500]:
+            if not isinstance(raw, dict):
+                continue
+            group_id = str(raw.get("id") or "")[:120]
+            if not group_id or group_id in seen_group_ids:
+                continue
+            seen_group_ids.add(group_id)
+            groups.append({"id": group_id, "name": str(raw.get("name") or "分组")[:120]})
+        for group_id in sorted({str(node.get("group_id") or "") for node in nodes if node.get("group_id")}):
+            if group_id not in seen_group_ids:
+                groups.append({"id": group_id, "name": "分组"})
         viewport = canvas.get("viewport") if isinstance(canvas.get("viewport"), dict) else {}
-        payload = {"schema_version": 1, "project_id": project_id, "canvas_type": canvas_type, "viewport": {"x": float(viewport.get("x") or 0), "y": float(viewport.get("y") or 0), "zoom": max(0.1, min(float(viewport.get("zoom") or 1), 4))}, "nodes": nodes, "updated_at": utc_now()}
+        payload = {"schema_version": 1, "project_id": project_id, "canvas_type": canvas_type, "viewport": {"x": float(viewport.get("x") or 0), "y": float(viewport.get("y") or 0), "zoom": max(0.1, min(float(viewport.get("zoom") or 1), 4))}, "nodes": nodes, "groups": groups, "updated_at": utc_now()}
         with self._locked():
             root = self._project_root_unlocked(project_id)
             self._atomic_write_json(self._project_paths(root)["canvases"] / f"{canvas_type}.json", payload)

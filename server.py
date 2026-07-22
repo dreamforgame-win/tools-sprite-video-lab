@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import cgi
+import copy
 import gc
 import importlib.util
 import json
@@ -29,6 +30,8 @@ from PIL import Image, ImageChops, ImageFilter
 
 from omnigen_service import OmniGenError, OmniGenService, redact_secret
 from project_service import ProjectError, ProjectService
+from style_guide_service import StyleGuideService
+from style_guide_visual_service import StyleGuideVisualService
 
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -36,6 +39,10 @@ APP_DIR = ROOT_DIR / "app"
 WORK_DIR = ROOT_DIR / "work"
 GENERATION_PROVIDER = OmniGenService(WORK_DIR)
 PROJECT_SERVICE = ProjectService(WORK_DIR)
+STYLE_GUIDE_SERVICE = StyleGuideService(PROJECT_SERVICE)
+STYLE_GUIDE_VISUAL_SERVICE = StyleGuideVisualService(
+    PROJECT_SERVICE, STYLE_GUIDE_SERVICE
+)
 PROJECT_GENERATION_SERVICES: dict[str, OmniGenService] = {}
 PROJECT_GENERATION_SERVICES_LOCK = threading.RLock()
 UPLOADS_DIR = WORK_DIR / "uploads"
@@ -84,6 +91,37 @@ def required_project_id(value: object) -> str:
         raise ProjectError("project_id is required")
     PROJECT_SERVICE.get_project(project_id)
     return project_id
+
+
+def generation_asset_type(project_id: str, asset_node: dict) -> str:
+    parts = []
+    node = asset_node
+    visited = set()
+    while isinstance(node, dict) and node.get("id") not in visited:
+        visited.add(node.get("id"))
+        parts.extend(
+            str(node.get(key) or "") for key in ("id", "name", "asset_type")
+        )
+        parent_id = str(node.get("parent_id") or "")
+        if not parent_id:
+            break
+        try:
+            node = PROJECT_SERVICE.get_asset_node(project_id, parent_id)
+        except ProjectError:
+            break
+    value = " ".join(parts).casefold()
+    routes = (
+        (("skill-icon", "skill_icon", "技能图标"), "skill_icon"),
+        (("character", "creature", "npc", "enemy", "角色", "人物", "生物", "敌人"), "character"),
+        (("scene", "environment", "architecture", "场景", "环境", "建筑"), "scene"),
+        (("effect", "vfx", "skill", "spell", "特效", "技能", "法术"), "effect"),
+        (("prop", "equipment", "weapon", "道具", "装备", "武器"), "equipment"),
+        (("ui", "hud", "panel", "control", "icon", "界面", "面板", "控件", "图标"), "ui"),
+    )
+    for terms, asset_type in routes:
+        if any(term in value for term in terms):
+            return asset_type
+    return "unknown"
 
 
 def migrate_legacy_generation_history_to_default() -> None:
@@ -6962,6 +7000,111 @@ class AppHandler(BaseHTTPRequestHandler):
                 if len(parts) == 5 and parts[4] == "styles":
                     self.send_json({"ok": True, "styles": PROJECT_SERVICE.list_style_directions(parts[3])})
                     return
+                if len(parts) == 5 and parts[4] == "style-guides":
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "style_guides": STYLE_GUIDE_SERVICE.list_packages(parts[3]),
+                            "capabilities": STYLE_GUIDE_SERVICE.capability_state(),
+                        }
+                    )
+                    return
+                if (
+                    len(parts) == 6
+                    and parts[4] == "style-guides"
+                    and parts[5] == "capabilities"
+                ):
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "capabilities": STYLE_GUIDE_SERVICE.capability_state(),
+                        }
+                    )
+                    return
+                if len(parts) == 6 and parts[4] == "style-guides":
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "style_guide": STYLE_GUIDE_SERVICE.get_package(
+                                parts[3], unquote(parts[5])
+                            ),
+                        }
+                    )
+                    return
+                if (
+                    len(parts) == 7
+                    and parts[4] == "style-guides"
+                    and parts[6] == "draft"
+                ):
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "draft": STYLE_GUIDE_SERVICE.get_draft(
+                                parts[3], unquote(parts[5])
+                            ),
+                        }
+                    )
+                    return
+                if (
+                    len(parts) == 8
+                    and parts[4] == "style-guides"
+                    and parts[6] == "versions"
+                ):
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "version": STYLE_GUIDE_SERVICE.get_version(
+                                parts[3], unquote(parts[5]), unquote(parts[7])
+                            ),
+                        }
+                    )
+                    return
+                if (
+                    len(parts) == 7
+                    and parts[4] == "style-guides"
+                    and parts[6] == "visual-runs"
+                ):
+                    runs = STYLE_GUIDE_VISUAL_SERVICE.list_runs(
+                        parts[3], unquote(parts[5])
+                    )
+                    active = str(
+                        (parse_qs(parsed.query).get("active") or [""])[0]
+                    ).lower() in {"1", "true", "yes"}
+                    if active:
+                        runs = [
+                            run
+                            for run in runs
+                            if run.get("status") in {"running", "canceling", "failed", "finalize_failed"}
+                        ]
+                    self.send_json({"ok": True, "visual_runs": runs})
+                    return
+                if (
+                    len(parts) == 7
+                    and parts[4] == "style-guides"
+                    and parts[6] == "versions"
+                ):
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "versions": STYLE_GUIDE_SERVICE.list_versions(
+                                parts[3], unquote(parts[5])
+                            ),
+                        }
+                    )
+                    return
+                if (
+                    len(parts) == 8
+                    and parts[4] == "style-guides"
+                    and parts[6] == "visual-runs"
+                ):
+                    run = STYLE_GUIDE_VISUAL_SERVICE.refresh_run(
+                        parts[3],
+                        unquote(parts[5]),
+                        unquote(parts[7]),
+                        generation_service=project_generation_service(parts[3]),
+                    )
+                    self.send_json({"ok": True, "visual_run": run})
+                    return
                 if len(parts) == 6 and parts[4] == "canvases":
                     self.send_json({"ok": True, "canvas": PROJECT_SERVICE.load_canvas(parts[3], unquote(parts[5]))})
                     return
@@ -7121,7 +7264,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     create_mode=payload.get("create_mode") or "blank",
                     template_id=payload.get("template_id") or "",
                     default_background=payload.get("default_background") or "transparent",
-                    default_image_count=payload.get("default_image_count") or 4,
+                    default_image_count=payload.get("default_image_count") or 1,
                     default_file_format=payload.get("default_file_format") or "png",
                 )
                 self.send_json({"ok": True, "project": project}, status=HTTPStatus.CREATED)
@@ -7186,6 +7329,112 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path.startswith("/api/v1/projects/"):
                 parts = [part for part in parsed.path.split("/") if part]
+                if (
+                    len(parts) == 8
+                    and parts[4] == "styles"
+                    and parts[6] == "style-guide"
+                    and parts[7] == "draft"
+                ):
+                    package = STYLE_GUIDE_SERVICE.create_draft(
+                        parts[3], unquote(parts[5])
+                    )
+                    self.send_json(
+                        {"ok": True, "style_guide": package},
+                        status=HTTPStatus.CREATED,
+                    )
+                    return
+                if (
+                    len(parts) == 7
+                    and parts[4] == "style-guides"
+                    and parts[6] == "visual-runs"
+                ):
+                    payload = self.read_json_body()
+                    run = STYLE_GUIDE_VISUAL_SERVICE.create_run(
+                        parts[3],
+                        unquote(parts[5]),
+                        payload,
+                        generation_service=project_generation_service(parts[3]),
+                    )
+                    response = {"ok": True, "visual_run": run}
+                    if run.get("preview_only"):
+                        response["preview"] = run
+                    self.send_json(response, status=HTTPStatus.CREATED)
+                    return
+                if (
+                    len(parts) == 9
+                    and parts[4] == "style-guides"
+                    and parts[6] == "visual-runs"
+                    and parts[8] == "cancel"
+                ):
+                    run = STYLE_GUIDE_VISUAL_SERVICE.cancel_run(
+                        parts[3], unquote(parts[5]), unquote(parts[7])
+                    )
+                    self.send_json({"ok": True, "visual_run": run})
+                    return
+                if (
+                    len(parts) == 11
+                    and parts[4] == "style-guides"
+                    and parts[6] == "visual-runs"
+                    and parts[8] == "nodes"
+                    and parts[10] == "retry"
+                ):
+                    run = STYLE_GUIDE_VISUAL_SERVICE.retry_node(
+                        parts[3],
+                        unquote(parts[5]),
+                        unquote(parts[7]),
+                        unquote(parts[9]),
+                        generation_service=project_generation_service(parts[3]),
+                    )
+                    self.send_json({"ok": True, "visual_run": run})
+                    return
+                if (
+                    len(parts) == 9
+                    and parts[4] == "style-guides"
+                    and parts[6] == "visual-runs"
+                    and parts[8] == "apply"
+                ):
+                    result = STYLE_GUIDE_VISUAL_SERVICE.apply_run(
+                        parts[3], unquote(parts[5]), unquote(parts[7])
+                    )
+                    self.send_json({"ok": True, **result})
+                    return
+                if len(parts) == 7 and parts[4] == "style-guides":
+                    payload = self.read_json_body()
+                    package_id = unquote(parts[5])
+                    operation = parts[6]
+                    if operation == "publish":
+                        version = STYLE_GUIDE_SERVICE.publish(
+                            parts[3], package_id
+                        )
+                        self.send_json({"ok": True, "version": version})
+                        return
+                    if operation == "default":
+                        package = STYLE_GUIDE_SERVICE.set_default(
+                            parts[3], package_id
+                        )
+                        self.send_json({"ok": True, "style_guide": package})
+                        return
+                    if operation == "confirm-version":
+                        package = STYLE_GUIDE_SERVICE.set_confirmed_version(
+                            parts[3], package_id, payload.get("version_id")
+                        )
+                        self.send_json({"ok": True, "style_guide": package})
+                        return
+                    if operation == "compile-preview":
+                        capability = project_generation_service(
+                            parts[3]
+                        ).image_model_capability(payload.get("model") or "")
+                        compile_request = dict(payload)
+                        compile_request["model_reference_limit"] = int(
+                            capability.get("max_reference_images") or 0
+                        )
+                        compiled = STYLE_GUIDE_SERVICE.compile_preview(
+                            parts[3],
+                            package_id=package_id,
+                            request=compile_request,
+                        )
+                        self.send_json({"ok": True, "compiled": compiled})
+                        return
                 if len(parts) == 5 and parts[4] == "styles":
                     payload = self.read_json_body()
                     direction = PROJECT_SERVICE.create_style_direction(
@@ -7193,6 +7442,19 @@ class AppHandler(BaseHTTPRequestHandler):
                         tags=payload.get("tags"), group_id=payload.get("group_id") or "", actor=payload.get("actor") or "user",
                     )
                     self.send_json({"ok": True, "style": direction}, status=HTTPStatus.CREATED)
+                    return
+                if len(parts) == 6 and parts[4] == "styles" and parts[5] == "content-transfer":
+                    payload = self.read_json_body()
+                    result = PROJECT_SERVICE.transfer_style_content(
+                        parts[3],
+                        source_style_id=payload.get("source_style_id") or "",
+                        target_style_id=payload.get("target_style_id") or "",
+                        mode=payload.get("mode") or "move",
+                        reference_paths=payload.get("reference_paths"),
+                        record_ids=payload.get("record_ids"),
+                        actor=payload.get("actor") or "user",
+                    )
+                    self.send_json({"ok": True, **result})
                     return
                 if len(parts) == 6 and parts[4] == "canvases":
                     payload = self.read_json_body()
@@ -7281,8 +7543,11 @@ class AppHandler(BaseHTTPRequestHandler):
             if parsed.path in {"/api/omnigen/generate", "/api/v1/generation/tasks"}:
                 payload = self.read_json_body()
                 project_id = required_project_id(payload.get("project_id"))
-                asset_node = PROJECT_SERVICE.get_asset_node(
-                    project_id, payload.get("asset_node_id")
+                asset_node = PROJECT_SERVICE.resolve_generation_target(
+                    project_id,
+                    payload.get("asset_node_id"),
+                    allow_container_fallback=bool(payload.get("style_direction_id")),
+                    actor=payload.get("actor") or "user",
                 )
                 service = project_generation_service(project_id)
                 generation_context = {
@@ -7293,10 +7558,118 @@ class AppHandler(BaseHTTPRequestHandler):
                 }
                 if payload.get("style_direction_id"):
                     generation_context["style_direction_id"] = payload.get("style_direction_id")
+                retry_snapshot = payload.get("style_guide_snapshot")
+                if isinstance(retry_snapshot, dict):
+                    for key in (
+                        "style_guide_package_id",
+                        "style_guide_version_id",
+                        "style_guide_mode",
+                        "style_guide_module_types",
+                        "style_guide_reference_snapshot",
+                        "style_guide_prompt_snapshot",
+                        "style_guide_negative_prompt_snapshot",
+                        "style_guide_overrides",
+                        "style_guide_warnings",
+                        "style_guide_budget",
+                    ):
+                        if key in retry_snapshot:
+                            generation_context[key] = copy.deepcopy(retry_snapshot[key])
+                prompt = str(payload.get("prompt") or "")
+                params = copy.deepcopy(payload.get("params") or {})
+                style_guide = payload.get("style_guide")
+                if isinstance(style_guide, dict) and style_guide.get("package_id"):
+                    package_id = str(style_guide.get("package_id") or "").strip()
+                    version_id = str(style_guide.get("version_id") or "").strip()
+                    if not version_id:
+                        self.send_json(
+                            {
+                                "ok": False,
+                                "error": "所选指导包缺少明确的发布版本。",
+                                "warnings": [
+                                    {
+                                        "code": "missing_published_version",
+                                        "severity": "error",
+                                        "message": "所选指导包缺少明确的发布版本。",
+                                        "details": {"package_id": package_id},
+                                    }
+                                ],
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    capability = service.image_model_capability(
+                        payload.get("model") or ""
+                    )
+                    overrides = {
+                        "module_types": style_guide.get("module_types"),
+                        "reference_ids": style_guide.get("reference_ids"),
+                        "style_strength": style_guide.get("style_strength", 70),
+                        "prompt_override": style_guide.get("prompt_override") or "",
+                        "negative_override": style_guide.get("negative_override") or "",
+                        "conflict_resolutions": style_guide.get("conflict_resolutions") or {},
+                        "user_negative_prompt": params.get("negative_prompt") or "",
+                    }
+                    try:
+                        compiled = STYLE_GUIDE_SERVICE.compile_for_generation(
+                            project_id,
+                            package_id=package_id,
+                            version_id=version_id,
+                            asset_type=generation_asset_type(project_id, asset_node),
+                            prompt=prompt,
+                            mode=str(style_guide.get("mode") or "balanced"),
+                            model_reference_limit=int(
+                                capability.get("max_reference_images") or 0
+                            ),
+                            overrides=overrides,
+                        )
+                    except ProjectError as exc:
+                        warning = {
+                            "code": "missing_published_version",
+                            "severity": "error",
+                            "message": str(exc),
+                            "details": {
+                                "package_id": package_id,
+                                "version_id": version_id,
+                            },
+                        }
+                        self.send_json(
+                            {
+                                "ok": False,
+                                "error": str(exc),
+                                "warnings": [warning],
+                                "blocking_warnings": [warning],
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    if not compiled.get("can_continue"):
+                        self.send_json(
+                            {
+                                "ok": False,
+                                "error": "风格指导编译存在未解决的阻断项。",
+                                "warnings": compiled.get("warnings") or [],
+                                "blocking_warnings": compiled.get("blocking_warnings") or [],
+                            },
+                            status=HTTPStatus.BAD_REQUEST,
+                        )
+                        return
+                    prompt = compiled["final_prompt"]
+                    params["negative_prompt"] = compiled["final_negative_prompt"]
+                    params["reference_images"] = [
+                        *(params.get("reference_images") or []),
+                        *(compiled.get("reference_paths") or []),
+                    ]
+                    generation_context.update(compiled.get("snapshot") or {})
+                    generation_context["style_guide_warnings"] = copy.deepcopy(
+                        compiled.get("warnings") or []
+                    )
+                    generation_context["style_guide_budget"] = copy.deepcopy(
+                        compiled.get("budget") or {}
+                    )
                 record = service.submit_image(
-                    payload.get("prompt"),
+                    prompt,
                     payload.get("model"),
-                    payload.get("params"),
+                    params,
                     context=generation_context,
                 )
                 PROJECT_SERVICE.append_event(
@@ -7872,6 +8245,17 @@ class AppHandler(BaseHTTPRequestHandler):
                     payload = self.read_json_body()
                     style = PROJECT_SERVICE.update_style_direction(parts[3], unquote(parts[5]), changes=payload, actor=payload.get("actor") or "user")
                     self.send_json({"ok": True, "style": style})
+                    return
+                if (
+                    len(parts) == 7
+                    and parts[4] == "style-guides"
+                    and parts[6] == "draft"
+                ):
+                    payload = self.read_json_body()
+                    draft = STYLE_GUIDE_SERVICE.save_draft(
+                        parts[3], unquote(parts[5]), payload.get("draft") or payload
+                    )
+                    self.send_json({"ok": True, "draft": draft})
                     return
                 if len(parts) == 6 and parts[4] == "library":
                     payload = self.read_json_body()

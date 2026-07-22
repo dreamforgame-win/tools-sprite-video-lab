@@ -1,10 +1,12 @@
 import base64
 import binascii
 import copy
+import hashlib
 import http.client
 import ipaddress
 import io
 import json
+import mimetypes
 import os
 import socket
 import tempfile
@@ -36,6 +38,24 @@ IMAGE_EXTENSIONS = {
     "JPEG": ".jpg",
     "WEBP": ".webp",
     "BMP": ".bmp",
+}
+IMAGE_BACKGROUND_PROMPT_SUFFIXES = {
+    "magenta": (
+        "Use a clean, solid magenta background (#FF00FF), evenly filled edge to edge, "
+        "with no gradient, texture, scenery, shadows, or extra background elements."
+    ),
+    "green_screen": (
+        "Use a clean, solid chroma key green background (#00FF00), evenly filled edge to edge, "
+        "with no gradient, texture, scenery, shadows, or extra background elements."
+    ),
+    "white": (
+        "Use a clean, solid pure white background (#FFFFFF), evenly filled edge to edge, "
+        "with no gradient, texture, scenery, shadows, or extra background elements."
+    ),
+    "black": (
+        "Use a clean, solid pure black background (#000000), evenly filled edge to edge, "
+        "with no gradient, texture, scenery, shadows, or extra background elements."
+    ),
 }
 DOWNLOAD_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -94,6 +114,9 @@ class OmniGenService:
         self.omnigen_dir = Path(omnigen_dir or (self.work_dir / "omnigen")).resolve()
         self.settings_path = Path(settings_path or (self.work_dir / "settings.json")).resolve()
         self.history_path = Path(history_path or (self.omnigen_dir / "history.json")).resolve()
+        self.reference_assets_path = (
+            self.omnigen_dir / "reference-assets.json"
+        ).resolve()
         self.results_dir = Path(results_dir or (self.omnigen_dir / "results")).resolve()
         self.trash_dir = Path(trash_dir or (self.omnigen_dir / ".trash")).resolve()
         self.transaction_lock_path = Path(
@@ -639,10 +662,32 @@ class OmniGenService:
             "created_at": timestamp,
             "updated_at": timestamp,
         }
-        for key in ("project_id", "asset_node_id", "style_direction_id", "workflow_run_id", "actor"):
+        for key in (
+            "project_id",
+            "asset_node_id",
+            "style_direction_id",
+            "workflow_run_id",
+            "style_guide_visual_run_id",
+            "style_guide_visual_node_id",
+            "actor",
+        ):
             value = (context or {}).get(key)
             if value is not None and str(value).strip():
                 record[key] = str(value).strip()
+        for key in (
+            "style_guide_package_id",
+            "style_guide_version_id",
+            "style_guide_mode",
+            "style_guide_module_types",
+            "style_guide_reference_snapshot",
+            "style_guide_prompt_snapshot",
+            "style_guide_negative_prompt_snapshot",
+            "style_guide_overrides",
+            "style_guide_warnings",
+            "style_guide_budget",
+        ):
+            if key in (context or {}):
+                record[key] = copy.deepcopy(context[key])
         history = self._read_history_unlocked()
         history["records"].insert(0, record)
         self._atomic_write_json(self.history_path, history)
@@ -1033,6 +1078,15 @@ class OmniGenService:
         progress = self._normalize_task_progress(
             task_payload.get("progress"), record.get("progress", 0)
         )
+        result_asset_id = self._direct_asset_id(
+            task_payload, "result_asset_id", "output_asset_id"
+        ) or self._direct_asset_id(
+            payload, "result_asset_id", "output_asset_id"
+        )
+        if result_asset_id and result_asset_id != record.get("result_asset_id"):
+            record = self.update_record(
+                record_id, result_asset_id=result_asset_id
+            )
 
         if status in {"failed", "canceled"}:
             raw_error = task_payload.get("error")
@@ -1236,6 +1290,13 @@ class OmniGenService:
                             return copy.deepcopy(source[key])
                 return []
 
+            def first_nonnegative_int(*keys):
+                value = first_value(*keys)
+                try:
+                    return max(0, int(value))
+                except (TypeError, ValueError):
+                    return 0
+
             normalized.append(
                 {
                     "id": model_id,
@@ -1254,6 +1315,11 @@ class OmniGenService:
                     "supported_resolutions": first_value(
                         "supported_resolutions", "resolutions", "sizes"
                     ),
+                    "max_reference_images": first_nonnegative_int(
+                        "max_reference_images",
+                        "reference_image_limit",
+                        "max_input_images",
+                    ),
                 }
             )
         return normalized
@@ -1263,6 +1329,19 @@ class OmniGenService:
             "list_generation_models", {"modality": "image"}
         )
         return self._normalize_image_models(payload)
+
+    def image_model_capability(self, model_id: str) -> dict:
+        model_id = str(model_id or "").strip()
+        if not model_id:
+            return {}
+        return next(
+            (
+                copy.deepcopy(model)
+                for model in self.list_image_models()
+                if str(model.get("id") or "") == model_id
+            ),
+            {},
+        )
 
     def test_connection(self) -> dict:
         try:
@@ -1293,6 +1372,272 @@ class OmniGenService:
             self._write_settings(settings)
         return self.public_profile()
 
+    @staticmethod
+    def _direct_asset_id(payload, *keys: str) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        candidates = [payload]
+        for envelope in ("task", "asset", "data", "result"):
+            nested = payload.get(envelope)
+            if isinstance(nested, dict):
+                candidates.append(nested)
+        for candidate in candidates:
+            for key in keys:
+                value = str(candidate.get(key) or "").strip()
+                if value:
+                    return value
+        return ""
+
+    def _resolve_project_reference_path(self, raw_path: object) -> Path:
+        path_text = str(raw_path or "").strip()
+        if not path_text:
+            raise ValueError("Reference image path is required")
+        candidate = Path(path_text)
+        if not candidate.is_absolute():
+            candidate = self.work_dir / candidate
+        candidate = Path(os.path.abspath(os.path.normpath(str(candidate))))
+        project_root = Path(os.path.abspath(str(self.work_dir)))
+        if candidate == project_root or not candidate.is_relative_to(project_root):
+            raise ValueError("Reference image must be inside the project")
+        cursor = project_root
+        for part in candidate.relative_to(project_root).parts:
+            cursor = cursor / part
+            self._reject_link_or_junction(cursor, "reference image path")
+        resolved = candidate.resolve()
+        resolved_root = project_root.resolve()
+        if resolved == resolved_root or not resolved.is_relative_to(resolved_root):
+            raise ValueError("Reference image must be inside the project")
+        if not resolved.is_file():
+            raise ValueError(f"Reference image was not found: {path_text}")
+        return resolved
+
+    @staticmethod
+    def _reference_image_mime_type(path: Path) -> str:
+        try:
+            with Image.open(path) as image:
+                image.verify()
+                image_format = str(image.format or "").upper()
+        except (OSError, UnidentifiedImageError) as exc:
+            raise ValueError(f"Reference image is invalid: {path.name}") from exc
+        mime_types = {
+            "PNG": "image/png",
+            "JPEG": "image/jpeg",
+            "WEBP": "image/webp",
+            "BMP": "image/bmp",
+        }
+        mime_type = mime_types.get(image_format)
+        if not mime_type:
+            mime_type = str(mimetypes.guess_type(path.name)[0] or "")
+        if not mime_type.startswith("image/"):
+            raise ValueError(f"Reference image type is unsupported: {path.name}")
+        return mime_type
+
+    @staticmethod
+    def _reference_fingerprint(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _read_reference_asset_cache(self) -> dict:
+        cache = self._read_json(
+            self.reference_assets_path,
+            {"schema_version": 1, "assets": {}},
+        )
+        if not isinstance(cache, dict):
+            cache = {}
+        assets = cache.get("assets")
+        if not isinstance(assets, dict):
+            assets = {}
+        return {"schema_version": 1, "assets": assets}
+
+    def _cache_reference_asset(self, fingerprint: str, marker: dict) -> None:
+        with self._lock:
+            cache = self._read_reference_asset_cache()
+            cache["assets"][fingerprint] = copy.deepcopy(marker)
+            self._atomic_write_json(self.reference_assets_path, cache)
+
+    def _generated_record_for_reference(
+        self, reference_path: Path, current_record_id: str
+    ) -> dict | None:
+        for record in self.list_history():
+            if record.get("id") == current_record_id:
+                continue
+            local_path = str(record.get("local_path") or "").strip()
+            if not local_path:
+                continue
+            try:
+                candidate = Path(local_path).resolve()
+            except OSError:
+                continue
+            if candidate == reference_path:
+                return record
+        return None
+
+    def _generated_reference_asset_id(self, record: dict) -> str:
+        asset_id = str(record.get("result_asset_id") or "").strip()
+        if asset_id:
+            return asset_id
+        task_id = str(record.get("task_id") or "").strip()
+        if not task_id:
+            return ""
+        payload = self.call_tool("get_generation_task", {"task_id": task_id})
+        asset_id = self._direct_asset_id(
+            payload, "result_asset_id", "output_asset_id"
+        )
+        if asset_id:
+            self.update_record(record["id"], result_asset_id=asset_id)
+        return asset_id
+
+    def _reference_input(
+        self, raw_reference: object, current_record_id: str
+    ) -> tuple[dict, dict]:
+        if isinstance(raw_reference, dict):
+            asset_id = str(
+                raw_reference.get("remote_asset_id")
+                or raw_reference.get("asset_id")
+                or ""
+            ).strip()
+            if asset_id:
+                marker = {
+                    "relative_path": str(raw_reference.get("relative_path") or ""),
+                    "asset_id": asset_id,
+                    "source": "style-guide-remote",
+                    "record_id": str(raw_reference.get("source_record_id") or ""),
+                    "content_sha256": str(raw_reference.get("content_sha256") or ""),
+                    "updated_at": self._utc_timestamp(),
+                }
+                return (
+                    {
+                        "type": "asset_id",
+                        "asset_id": asset_id,
+                        "role": "reference",
+                    },
+                    marker,
+                )
+            raw_reference = raw_reference.get("relative_path") or ""
+        reference_text = str(raw_reference or "").strip()
+        parsed = urllib.parse.urlparse(reference_text)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            marker = {
+                "reference": reference_text,
+                "source": "public-url",
+                "url": reference_text,
+            }
+            return (
+                {"type": "url", "url": reference_text, "role": "reference"},
+                marker,
+            )
+
+        reference_path = self._resolve_project_reference_path(reference_text)
+        relative_path = reference_path.relative_to(self.work_dir).as_posix()
+        fingerprint = self._reference_fingerprint(reference_path)
+        generated_record = self._generated_record_for_reference(
+            reference_path, current_record_id
+        )
+        if generated_record is not None:
+            asset_id = self._generated_reference_asset_id(generated_record)
+            if asset_id:
+                marker = {
+                    "relative_path": relative_path,
+                    "asset_id": asset_id,
+                    "source": "mcp-generate",
+                    "record_id": generated_record["id"],
+                    "content_sha256": fingerprint,
+                    "updated_at": self._utc_timestamp(),
+                }
+                self._cache_reference_asset(fingerprint, marker)
+                return (
+                    {
+                        "type": "asset_id",
+                        "asset_id": asset_id,
+                        "role": "reference",
+                    },
+                    marker,
+                )
+
+        cache = self._read_reference_asset_cache()
+        cached = cache["assets"].get(fingerprint)
+        cached_asset_id = (
+            str(cached.get("asset_id") or "").strip()
+            if isinstance(cached, dict)
+            else ""
+        )
+        if cached_asset_id:
+            marker = {
+                **copy.deepcopy(cached),
+                "relative_path": relative_path,
+                "asset_id": cached_asset_id,
+            }
+            return (
+                {
+                    "type": "asset_id",
+                    "asset_id": cached_asset_id,
+                    "role": "reference",
+                },
+                marker,
+            )
+
+        mime_type = self._reference_image_mime_type(reference_path)
+        payload = self.call_tool(
+            "upload_asset",
+            {
+                "filename": reference_path.name,
+                "mime_type": mime_type,
+                "data_base64": base64.b64encode(reference_path.read_bytes()).decode(
+                    "ascii"
+                ),
+                "role": "reference",
+                "kind": "image",
+            },
+        )
+        asset_id = self._direct_asset_id(payload, "asset_id")
+        if not asset_id:
+            raise OmniGenError(
+                f"OmniGen returned no asset ID for reference image: {reference_path.name}"
+            )
+        marker = {
+            "relative_path": relative_path,
+            "asset_id": asset_id,
+            "source": "mcp-upload",
+            "content_sha256": fingerprint,
+            "updated_at": self._utc_timestamp(),
+        }
+        self._cache_reference_asset(fingerprint, marker)
+        return (
+            {
+                "type": "asset_id",
+                "asset_id": asset_id,
+                "role": "reference",
+            },
+            marker,
+        )
+
+    def _prepare_reference_inputs(
+        self, params: dict, current_record_id: str
+    ) -> tuple[list[dict], list[dict], dict]:
+        remote_params = copy.deepcopy(params)
+        raw_references = remote_params.pop("reference_images", [])
+        if raw_references is None:
+            raw_references = []
+        if not isinstance(raw_references, list):
+            raise ValueError("Reference images must be an array")
+        inputs = []
+        markers = []
+        for raw_reference in raw_references:
+            input_item, marker = self._reference_input(
+                raw_reference, current_record_id
+            )
+            inputs.append(input_item)
+            markers.append(marker)
+        return inputs, markers, remote_params
+
+    @staticmethod
+    def _remote_prompt(prompt: str, background: object) -> str:
+        suffix = IMAGE_BACKGROUND_PROMPT_SUFFIXES.get(str(background or "").strip())
+        return f"{prompt}\n\n{suffix}" if suffix else prompt
+
     def submit_image(
         self,
         prompt: str,
@@ -1312,9 +1657,23 @@ class OmniGenService:
 
         record = self.create_record(prompt, model, params, context=context)
         try:
+            inputs, reference_assets, remote_params = (
+                self._prepare_reference_inputs(params, record["id"])
+            )
+            if reference_assets:
+                record = self.update_record(
+                    record["id"], reference_assets=reference_assets
+                )
+            arguments = {
+                "model": model,
+                "prompt": self._remote_prompt(prompt, remote_params.get("background")),
+                "params": remote_params,
+            }
+            if inputs:
+                arguments["inputs"] = inputs
             payload = self.call_tool(
                 "generate_image",
-                {"model": model, "prompt": prompt, "params": params},
+                arguments,
             )
             task = payload.get("task") if isinstance(payload, dict) else None
             if not isinstance(task, dict):
@@ -1329,11 +1688,13 @@ class OmniGenService:
             return self.update_record(
                 record["id"], task_id=task_id, status=status, error=""
             )
-        except OmniGenError as exc:
+        except (OmniGenError, ValueError, OSError) as exc:
             safe_error = redact_secret(exc, self._token())
             self.update_record(
                 record["id"], status="failed", error=safe_error
             )
+            if isinstance(exc, ValueError):
+                raise
             raise OmniGenError(safe_error) from None
 
     def set_token(self, token: str) -> dict:

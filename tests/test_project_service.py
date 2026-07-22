@@ -28,6 +28,37 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertTrue((root / "processing" / "videos").is_dir())
         self.assertTrue((root / "library" / "assets").is_dir())
 
+    def test_rebases_stale_default_project_path_to_current_work_dir(self):
+        other_work = Path(self.temporary_directory.name) / "other-work"
+        old_default = other_work / "projects" / "default"
+        registry_path = other_work / "project-registry.json"
+        other_work.mkdir(parents=True)
+        registry_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_project_id": "",
+                    "projects": [
+                        {
+                            "id": "default",
+                            "root_path": str(self.work_dir / "stale-worktree" / "projects" / "default"),
+                            "added_at": "2026-01-01T00:00:00+00:00",
+                            "last_opened_at": "2026-01-01T00:00:00+00:00",
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+        service = ProjectService(other_work)
+        default_project = service.list_projects()["projects"][0]
+
+        self.assertEqual(default_project["id"], "default")
+        self.assertTrue(default_project["available"])
+        self.assertEqual(Path(default_project["root_path"]), old_default)
+
     def test_creates_project_under_english_slug(self):
         project = self.service.create_project(
             display_name="星球防线",
@@ -40,6 +71,35 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(project["slug"], "planet-defense")
         self.assertEqual(Path(project["root_path"]).name, "planet-defense")
         self.assertEqual(self.service.list_projects()["active_project_id"], project["id"])
+
+    def test_generation_count_defaults_to_one(self):
+        default_project = self.service.get_project("default")
+        project = self.service.create_project(
+            display_name="Single Image",
+            slug="single-image",
+        )
+
+        self.assertEqual(default_project["default_image_count"], 1)
+        self.assertEqual(project["default_image_count"], 1)
+
+    def test_legacy_generation_count_default_is_migrated_to_one(self):
+        manifest_path = (
+            self.work_dir / "projects" / "default" / ".sprite-lab" / "project.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["default_image_count"] = 4
+        manifest.pop("generation_defaults_version", None)
+        manifest_path.write_text(
+            json.dumps(manifest, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        project = self.service.get_project("default")
+        persisted = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(project["default_image_count"], 1)
+        self.assertEqual(persisted["default_image_count"], 1)
+        self.assertEqual(persisted["generation_defaults_version"], 2)
 
     def test_template_project_creates_expected_asset_nodes_and_custom_ratio(self):
         project = self.service.create_project(
@@ -156,6 +216,105 @@ class ProjectServiceTests(unittest.TestCase):
         with self.assertRaises(ProjectError):
             self.service.delete_asset_node("default", node["id"])
 
+    def test_container_generation_records_migrate_to_uncategorized_assets_idempotently(self):
+        group = self.service.create_asset_node(
+            "default",
+            parent_id="category-character",
+            name="主角组",
+            node_type="group",
+        )
+        paths = self.service.project_paths("default")
+        history = json.loads(paths["generation_history"].read_text(encoding="utf-8"))
+        history["records"].extend(
+            [
+                {
+                    "id": "legacy-category-result",
+                    "asset_node_id": "category-character",
+                    "status": "succeeded",
+                    "lifecycle_status": "confirmed",
+                    "created_at": "2026-07-01T00:00:00+00:00",
+                    "local_path": "production/images/category.png",
+                },
+                {
+                    "id": "legacy-group-result",
+                    "asset_node_id": group["id"],
+                    "status": "succeeded",
+                    "lifecycle_status": "selected",
+                    "created_at": "2026-07-02T00:00:00+00:00",
+                    "local_path": "production/images/group.png",
+                },
+            ]
+        )
+        paths["generation_history"].write_text(
+            json.dumps(history, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        tree = self.service.list_asset_tree("default")
+        uncategorized = [
+            node
+            for node in tree["nodes"]
+            if node.get("system_role") == "uncategorized-generation-results"
+        ]
+        self.assertEqual(len(uncategorized), 2)
+        targets = {node["parent_id"]: node["id"] for node in uncategorized}
+        migrated = json.loads(paths["generation_history"].read_text(encoding="utf-8"))
+        migrated_by_id = {record["id"]: record for record in migrated["records"]}
+        category_record = migrated_by_id["legacy-category-result"]
+        group_record = migrated_by_id["legacy-group-result"]
+        self.assertEqual(category_record["asset_node_id"], targets["category-character"])
+        self.assertEqual(group_record["asset_node_id"], targets[group["id"]])
+        self.assertEqual(category_record["lifecycle_status"], "confirmed")
+        self.assertEqual(category_record["created_at"], "2026-07-01T00:00:00+00:00")
+        self.assertEqual(category_record["local_path"], "production/images/category.png")
+        self.assertEqual(
+            category_record["asset_node_migration"]["previous_asset_node_id"],
+            "category-character",
+        )
+
+        migration_root = paths["marker"] / "migrations" / "asset-leaf-generation-target-v1"
+        self.assertTrue((migration_root / "asset-tree.before.json").is_file())
+        self.assertTrue((migration_root / "generation-history.before.json").is_file())
+        self.assertTrue((migration_root / "migration.json").is_file())
+        first_node_ids = [node["id"] for node in tree["nodes"]]
+        second_tree = self.service.list_asset_tree("default")
+        self.assertEqual([node["id"] for node in second_tree["nodes"]], first_node_ids)
+        self.assertTrue(
+            any(
+                event.get("type") == "generation.asset-targets-migrated"
+                for event in self.service.list_events("default")
+            )
+        )
+
+    def test_generation_target_requires_asset_with_internal_container_fallback(self):
+        asset = self.service.create_asset_node(
+            "default",
+            parent_id="category-character",
+            name="主角",
+        )
+        resolved = self.service.resolve_generation_target("default", asset["id"])
+        self.assertEqual(resolved["id"], asset["id"])
+
+        with self.assertRaisesRegex(ProjectError, "请选择具体资产"):
+            self.service.resolve_generation_target("default", "category-character")
+
+        fallback = self.service.resolve_generation_target(
+            "default",
+            "category-other",
+            allow_container_fallback=True,
+        )
+        repeated = self.service.resolve_generation_target(
+            "default",
+            "category-other",
+            allow_container_fallback=True,
+        )
+        self.assertEqual(fallback["type"], "asset")
+        self.assertEqual(fallback["parent_id"], "category-other")
+        self.assertEqual(fallback["system_role"], "uncategorized-generation-results")
+        self.assertEqual(repeated["id"], fallback["id"])
+        with self.assertRaisesRegex(ProjectError, "System asset nodes cannot be edited"):
+            self.service.update_asset_node("default", fallback["id"], name="改名")
+
     def test_processing_intake_copies_sources_and_preserves_lineage(self):
         paths = self.service.project_paths("default")
         source = paths["production_images"] / "generated.png"
@@ -221,7 +380,129 @@ class ProjectServiceTests(unittest.TestCase):
         self.assertEqual(project["description"], "A file-backed project")
         self.assertEqual(canvas["nodes"][0]["ref_id"], direction["id"])
         self.assertEqual(self.service.load_canvas("default", "style")["viewport"]["zoom"], 1.25)
-        self.assertEqual(self.service.get_project("default")["style_status"], "confirmed")
+        self.assertEqual(self.service.get_project("default")["style_status"], "unconfirmed")
+
+    def test_confirming_a_direction_no_longer_archives_siblings(self):
+        first = self.service.create_style_direction("default", name="First")
+        second = self.service.create_style_direction("default", name="Second")
+        self.service.update_style_direction(
+            "default", first["id"], changes={"status": "confirmed"}
+        )
+        self.service.update_style_direction(
+            "default", second["id"], changes={"status": "confirmed"}
+        )
+        styles = {
+            item["id"]: item
+            for item in self.service.list_style_directions("default")
+        }
+        self.assertEqual(styles[first["id"]]["status"], "confirmed")
+        self.assertEqual(styles[second["id"]]["status"], "confirmed")
+        self.assertEqual(
+            self.service.get_project("default")["current_style_direction_id"],
+            "",
+        )
+
+    def test_style_content_transfer_moves_references_and_generation_results(self):
+        source = self.service.create_style_direction("default", name="Source")
+        target = self.service.create_style_direction("default", name="Target")
+        reference = {
+            "relative_path": "production/images/reference.png",
+            "file_name": "reference.png",
+            "original_name": "reference.png",
+            "display_name": "Reference",
+        }
+        self.service.update_style_direction(
+            "default", source["id"], changes={"reference_images": [reference]}
+        )
+        paths = self.service.project_paths("default")
+        generated = paths["production_images"] / "move-result.png"
+        generated.write_bytes(b"move-result")
+        history = json.loads(paths["generation_history"].read_text(encoding="utf-8"))
+        history["records"].append(
+            {
+                "id": "move-result",
+                "status": "succeeded",
+                "style_direction_id": source["id"],
+                "local_path": str(generated),
+            }
+        )
+        paths["generation_history"].write_text(
+            json.dumps(history, ensure_ascii=False), encoding="utf-8"
+        )
+
+        result = self.service.transfer_style_content(
+            "default",
+            source_style_id=source["id"],
+            target_style_id=target["id"],
+            reference_paths=[reference["relative_path"]],
+            record_ids=["move-result"],
+            mode="move",
+        )
+
+        self.assertEqual(result["source_style"]["reference_images"], [])
+        self.assertEqual(
+            result["target_style"]["reference_images"][0]["relative_path"],
+            reference["relative_path"],
+        )
+        moved = next(
+            item for item in self.service.list_generation_results("default")
+            if item["id"] == "move-result"
+        )
+        self.assertEqual(moved["style_direction_id"], target["id"])
+        self.assertTrue(generated.is_file())
+
+    def test_style_content_transfer_copies_completed_result_and_checks_ownership(self):
+        source = self.service.create_style_direction("default", name="Source")
+        target = self.service.create_style_direction("default", name="Target")
+        other = self.service.create_style_direction("default", name="Other")
+        paths = self.service.project_paths("default")
+        generated = paths["production_images"] / "copy-result.png"
+        generated.write_bytes(b"copy-result")
+        history = json.loads(paths["generation_history"].read_text(encoding="utf-8"))
+        history["records"].append(
+            {
+                "id": "copy-result",
+                "status": "succeeded",
+                "style_direction_id": source["id"],
+                "local_path": str(generated),
+                "lifecycle_status": "selected",
+            }
+        )
+        paths["generation_history"].write_text(
+            json.dumps(history, ensure_ascii=False), encoding="utf-8"
+        )
+
+        result = self.service.transfer_style_content(
+            "default",
+            source_style_id=source["id"],
+            target_style_id=target["id"],
+            record_ids=["copy-result"],
+            mode="copy",
+        )
+
+        copied = result["records"][0]
+        copied_path = Path(copied["local_path"])
+        self.assertNotEqual(copied["id"], "copy-result")
+        self.assertEqual(copied["source_record_id"], "copy-result")
+        self.assertEqual(copied["style_direction_id"], target["id"])
+        self.assertEqual(copied["lifecycle_status"], "normal")
+        self.assertNotEqual(copied_path, generated)
+        self.assertEqual(copied_path.read_bytes(), generated.read_bytes())
+        self.assertTrue(generated.is_file())
+        source_record = next(
+            item for item in self.service.list_generation_results("default")
+            if item["id"] == "copy-result"
+        )
+        self.assertEqual(source_record["style_direction_id"], source["id"])
+
+        with self.assertRaises(ProjectError):
+            self.service.transfer_style_content(
+                "default",
+                source_style_id=other["id"],
+                target_style_id=target["id"],
+                record_ids=["copy-result"],
+                mode="move",
+            )
 
     def test_generation_lifecycle_library_trash_and_restore(self):
         paths = self.service.project_paths("default")
