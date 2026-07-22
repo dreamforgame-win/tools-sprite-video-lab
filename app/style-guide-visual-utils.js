@@ -10,6 +10,7 @@
     "skill_vfx",
     "props_equipment",
   ]);
+  const TEMPLATE_VARIANTS = Object.freeze(["compact", "detailed"]);
 
   const STATUS_LABELS = Object.freeze({
     pending: "等待中",
@@ -19,9 +20,10 @@
     succeeded: "已完成",
     failed: "失败",
     canceled: "已取消",
+    cancel_requested: "取消中",
     invalidated: "需重新生成",
   });
-  const ACTIVE_NODE_STATUSES = new Set(["submitting", "queued", "running"]);
+  const ACTIVE_NODE_STATUSES = new Set(["submitting", "queued", "running", "cancel_requested"]);
 
   function normalizeVisualGuideModules(values) {
     const requested = Array.isArray(values) ? values : PROFESSIONAL_MODULES;
@@ -29,19 +31,55 @@
     return PROFESSIONAL_MODULES.filter((value) => selected.has(value));
   }
 
-  function visualGuideNodePlan(mode, moduleTypes) {
+  function normalizeVisualGuideVariants(values = ["compact"]) {
+    const selected = new Set(
+      (Array.isArray(values) ? values : []).map((value) => String(value || "").trim()),
+    );
+    const result = TEMPLATE_VARIANTS.filter((value) => selected.has(value));
+    if (!result.length) throw new Error("至少选择一种模板规格");
+    return result;
+  }
+
+  function visualGuideNodePlan(mode, moduleTypes, variants = ["compact"]) {
     const normalizedMode = String(mode || "").trim().toLowerCase();
     const modules = normalizeVisualGuideModules(moduleTypes);
     if (normalizedMode === "overall") {
       if (!modules.length) throw new Error("整体生成至少选择一个模块");
-      return ["overall", "template"];
     }
-    if (normalizedMode === "modular") return ["anchor", ...modules, "template"];
-    throw new Error(`未知生成模式：${normalizedMode}`);
+    if (!["overall", "modular"].includes(normalizedMode)) {
+      throw new Error(`未知生成模式：${normalizedMode}`);
+    }
+    return normalizeVisualGuideVariants(variants).flatMap((variant) => {
+      const remote = normalizedMode === "overall" ? ["overall"] : ["anchor", ...modules];
+      const local = variant === "detailed" ? ["template"] : [];
+      return [...remote, ...local].map((nodeKey) => `${variant}:${nodeKey}`);
+    });
   }
 
-  function visualGuideTaskCount(mode, moduleTypes) {
-    return visualGuideNodePlan(mode, moduleTypes).filter((value) => value !== "template").length;
+  function visualGuideTaskCount(mode, moduleTypes, variants = ["compact"]) {
+    return visualGuideNodePlan(mode, moduleTypes, variants)
+      .filter((value) => !value.endsWith(":template")).length;
+  }
+
+  function visualGuideCostEstimateInput(mode, moduleTypes, referenceCount, referenceLimit) {
+    const selectedCount = Math.max(0, Math.floor(Number(referenceCount) || 0));
+    const limit = Math.max(0, Math.floor(Number(referenceLimit) || 0));
+    return {
+      originalCount: limit ? Math.min(selectedCount, limit) : selectedCount,
+      optimizationEnabled: true,
+      taskCount: visualGuideTaskCount(mode, moduleTypes, ["detailed"]),
+    };
+  }
+
+  function visualGuideCostEstimateInputs(mode, moduleTypes, variants, referenceCount, referenceLimit) {
+    const selectedCount = Math.max(0, Math.floor(Number(referenceCount) || 0));
+    const limit = Math.max(0, Math.floor(Number(referenceLimit) || 0));
+    return normalizeVisualGuideVariants(variants).map((variant) => ({
+      variant,
+      originalCount: limit ? Math.min(selectedCount, limit) : selectedCount,
+      optimizationEnabled: true,
+      taskCount: visualGuideTaskCount(mode, moduleTypes, [variant]),
+    }));
   }
 
   function visualGuideStepState(step, activeStep, { runStarted = false } = {}) {
@@ -132,13 +170,17 @@
 
   return {
     PROFESSIONAL_MODULES,
+    TEMPLATE_VARIANTS,
     canRetryVisualGuideNode,
     isStyleDirectionResourceRecord,
     isVisualGuideRunActive,
     isVisualGuideRunLocked,
+    normalizeVisualGuideVariants,
     normalizeVisualGuideModules,
     preserveScrollPosition,
     preserveScrollPositions,
+    visualGuideCostEstimateInput,
+    visualGuideCostEstimateInputs,
     visualGuideNodePlan,
     visualGuideNodeStatusLabel,
     visualGuideRunIndicator,

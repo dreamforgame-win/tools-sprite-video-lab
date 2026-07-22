@@ -6,24 +6,75 @@ const {
   isStyleDirectionResourceRecord,
   isVisualGuideRunActive,
   isVisualGuideRunLocked,
+  normalizeVisualGuideVariants,
   normalizeVisualGuideModules,
   preserveScrollPosition,
   preserveScrollPositions,
   visualGuideNodePlan,
   visualGuideNodeStatusLabel,
+  visualGuideCostEstimateInput,
+  visualGuideCostEstimateInputs,
   visualGuideRunIndicator,
   visualGuideStepState,
   visualGuideTaskCount,
 } = require("../app/style-guide-visual-utils.js");
 
+test("template variants default to compact and never normalize to empty", () => {
+  assert.deepEqual(normalizeVisualGuideVariants(), ["compact"]);
+  assert.deepEqual(normalizeVisualGuideVariants(["detailed", "compact"]), ["compact", "detailed"]);
+  assert.throws(() => normalizeVisualGuideVariants([]), /至少选择一种模板规格/);
+});
+
+test("compact and detailed modular graphs remain independent", () => {
+  assert.deepEqual(
+    visualGuideNodePlan("modular", ["character"], ["compact", "detailed"]),
+    [
+      "compact:anchor",
+      "compact:character",
+      "detailed:anchor",
+      "detailed:character",
+      "detailed:template",
+    ],
+  );
+  assert.equal(visualGuideTaskCount("modular", ["character"], ["compact", "detailed"]), 4);
+});
+
+test("variant quote inputs exclude the detailed local renderer", () => {
+  assert.deepEqual(
+    visualGuideCostEstimateInputs("overall", ["environment"], ["compact", "detailed"], 4, 2),
+    [
+      { variant: "compact", originalCount: 2, optimizationEnabled: true, taskCount: 1 },
+      { variant: "detailed", originalCount: 2, optimizationEnabled: true, taskCount: 1 },
+    ],
+  );
+});
+
+test("visual guide cost input counts only paid image tasks and caps selected references", () => {
+  assert.equal(typeof visualGuideCostEstimateInput, "function");
+  assert.deepEqual(
+    visualGuideCostEstimateInput("overall", ["environment"], 4, 2),
+    { originalCount: 2, optimizationEnabled: true, taskCount: 1 },
+  );
+  assert.deepEqual(
+    visualGuideCostEstimateInput("modular", PROFESSIONAL_MODULES, 4, 3),
+    { originalCount: 3, optimizationEnabled: true, taskCount: 6 },
+  );
+});
+
 test("overall mode has one image node and one local template node", () => {
-  assert.deepEqual(visualGuideNodePlan("overall", ["environment", "ui_hud"]), ["overall", "template"]);
-  assert.equal(visualGuideTaskCount("overall", ["environment", "ui_hud"]), 1);
+  assert.deepEqual(
+    visualGuideNodePlan("overall", ["environment", "ui_hud"], ["detailed"]),
+    ["detailed:overall", "detailed:template"],
+  );
+  assert.equal(visualGuideTaskCount("overall", ["environment", "ui_hud"], ["detailed"]), 1);
 });
 
 test("modular mode has anchor selected modules and template", () => {
-  assert.deepEqual(visualGuideNodePlan("modular", ["ui_hud", "environment"]), ["anchor", "environment", "ui_hud", "template"]);
-  assert.equal(visualGuideTaskCount("modular", ["ui_hud", "environment"]), 3);
+  assert.deepEqual(
+    visualGuideNodePlan("modular", ["ui_hud", "environment"], ["detailed"]),
+    ["detailed:anchor", "detailed:environment", "detailed:ui_hud", "detailed:template"],
+  );
+  assert.equal(visualGuideTaskCount("modular", ["ui_hud", "environment"], ["detailed"]), 3);
 });
 
 test("future steps remain locked", () => {
