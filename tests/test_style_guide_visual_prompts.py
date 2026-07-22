@@ -4,11 +4,62 @@ from style_guide_visual_prompts import (
     build_anchor_prompt,
     build_module_prompt,
     build_overall_prompt,
+    normalize_template_variants,
     prompt_bundle,
 )
 
 
 class StyleGuideVisualPromptTests(unittest.TestCase):
+    def test_template_variants_default_to_compact_and_are_canonical(self):
+        self.assertEqual(normalize_template_variants(None), ["compact"])
+        self.assertEqual(
+            normalize_template_variants(["detailed", "compact", "detailed"]),
+            ["compact", "detailed"],
+        )
+
+    def test_template_variants_reject_empty_and_unknown_values(self):
+        with self.assertRaisesRegex(ValueError, "至少选择一种模板规格"):
+            normalize_template_variants([])
+        with self.assertRaisesRegex(ValueError, "Unknown style template variant"):
+            normalize_template_variants(["poster"])
+
+    def test_compact_character_is_one_clean_sample_without_board_layout(self):
+        bundle = prompt_bundle(
+            title="软陶奇幻",
+            description="圆润低饱和",
+            mode="modular",
+            module_types=["character"],
+            detail_profile="rich",
+            template_variant="compact",
+        )
+        text = bundle["modules"]["character"]
+        self.assertEqual(bundle["template_variant"], "compact")
+        self.assertIn("一个原创完整角色", text)
+        for forbidden in (
+            "色卡",
+            "文字",
+            "多格排版",
+            "转面",
+            "表情合集",
+            "局部放大",
+            "资产堆叠",
+        ):
+            self.assertIn(f"禁止{forbidden}", text)
+        self.assertEqual(bundle["detail_profile"], "rich")
+
+    def test_detailed_prompt_preserves_existing_guide_board_contract(self):
+        bundle = prompt_bundle(
+            title="软陶奇幻",
+            description="圆润低饱和",
+            mode="modular",
+            module_types=["character"],
+            detail_profile="compact",
+            template_variant="detailed",
+        )
+        self.assertEqual(bundle["template_variant"], "detailed")
+        self.assertIn("设计展示", bundle["modules"]["character"])
+        self.assertIn("视觉基因锚点图", bundle["anchor"])
+
     def test_anchor_prompt_requires_visual_specimen_without_text(self):
         prompt = build_anchor_prompt("像素田园", "温暖、手工感")
         self.assertIn("像素田园", prompt)

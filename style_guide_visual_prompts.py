@@ -19,6 +19,12 @@ MODULE_DIRECTIONS = {
     "props_equipment": "道具与装备设计展示，包含轮廓、材料、稀有度、功能结构与使用痕迹",
 }
 
+TEMPLATE_VARIANTS = ("compact", "detailed")
+TEMPLATE_VARIANT_LABELS = {
+    "compact": "简略版",
+    "detailed": "详细版",
+}
+
 DETAIL_PROFILE_DEFAULT = "compact"
 DETAIL_PROFILES = {
     "compact": {
@@ -66,9 +72,39 @@ NEGATIVE_CONSTRAINTS = (
     "不相关题材、重复主体、裁切主体和低清晰度。"
 )
 
+COMPACT_SAMPLE_DIRECTIONS = {
+    "anchor": "生成一个统一世界观的完整代表性画面",
+    "environment": "生成一个完整、可读的原创游戏场景",
+    "character": "生成一个原创完整角色或生物，使用单一自然姿态和简单背景",
+    "ui_hud": "生成一个完整代表性界面组件或局部界面，不包含可读文字",
+    "skill_vfx": "生成一个完整独立特效，并让背景与效果保持清楚对比",
+    "props_equipment": "生成一个完整原创道具或装备，居中清楚展示",
+}
+
+COMPACT_LAYOUT_BANS = (
+    "禁止色卡；禁止文字；禁止多格排版；禁止转面；禁止表情合集；"
+    "禁止局部放大；禁止资产堆叠；禁止照搬参考图主体、身份、姿势、构图和背景。"
+)
+
 
 def _clean(value: object) -> str:
     return " ".join(str(value or "").strip().split())
+
+
+def normalize_template_variants(values: object = None) -> list[str]:
+    requested = ["compact"] if values is None else values
+    if not isinstance(requested, (list, tuple, set)):
+        raise ValueError("Style template variants must be an array")
+    normalized = {
+        _clean(value).lower() for value in requested if _clean(value)
+    }
+    unknown = normalized.difference(TEMPLATE_VARIANTS)
+    if unknown:
+        raise ValueError(f"Unknown style template variant: {sorted(unknown)[0]}")
+    result = [value for value in TEMPLATE_VARIANTS if value in normalized]
+    if not result:
+        raise ValueError("至少选择一种模板规格")
+    return result
 
 
 def _validate_modules(module_types: list[str] | tuple[str, ...]) -> list[str]:
@@ -179,6 +215,28 @@ def build_overall_prompt(
     )
 
 
+def _compact_sample_prompt(
+    title: str,
+    description: str,
+    node_key: str,
+    detail_profile: object = DETAIL_PROFILE_DEFAULT,
+) -> str:
+    if node_key not in COMPACT_SAMPLE_DIRECTIONS:
+        raise ValueError(f"Unknown compact style template node: {node_key}")
+    title_text = _clean(title) or "未命名风格方向"
+    description_text = _clean(description)
+    direction_text = f"方向说明：{description_text}。" if description_text else ""
+    module_type = node_key if node_key in MODULE_LABELS else ""
+    return (
+        f"为游戏美术生产创建纯净风格样例。风格方向：{title_text}。{direction_text}"
+        f"{COMPACT_SAMPLE_DIRECTIONS[node_key]}。只继承参考图的比例体系、形状语言、线条、"
+        "色彩关系、明暗、材质表达和细节密度，不继承参考图的内容职责。"
+        f"{detail_profile_prompt(detail_profile, module_type)}"
+        f"{COMPACT_LAYOUT_BANS}{NEGATIVE_CONSTRAINTS}"
+        f"{detail_profile_negative(detail_profile)}"
+    )
+
+
 def prompt_bundle(
     *,
     title: str,
@@ -186,6 +244,7 @@ def prompt_bundle(
     mode: str,
     module_types: list[str],
     detail_profile: object = DETAIL_PROFILE_DEFAULT,
+    template_variant: object = "detailed",
 ) -> dict:
     normalized_mode = _clean(mode).lower()
     if normalized_mode not in {"overall", "modular"}:
@@ -194,27 +253,65 @@ def prompt_bundle(
     if normalized_mode == "overall" and not modules:
         raise ValueError("Overall visual guide requires at least one module")
     profile = normalize_detail_profile(detail_profile)
-    master = _master_prompt(title, description, profile)
+    variant = normalize_template_variants([template_variant])[0]
+    master = (
+        _compact_sample_prompt(title, description, "anchor", profile)
+        if variant == "compact"
+        else _master_prompt(title, description, profile)
+    )
     negative = f"{NEGATIVE_CONSTRAINTS}{detail_profile_negative(profile)}"
+    if variant == "compact":
+        anchor = (
+            _compact_sample_prompt(title, description, "anchor", profile)
+            if normalized_mode == "modular"
+            else ""
+        )
+        overall = (
+            _compact_sample_prompt(title, description, "anchor", profile)
+            if normalized_mode == "overall"
+            else ""
+        )
+        module_prompts = (
+            {
+                value: _compact_sample_prompt(
+                    title, description, value, profile
+                )
+                for value in modules
+            }
+            if normalized_mode == "modular"
+            else {value: MODULE_LABELS[value] for value in modules}
+        )
+    else:
+        anchor = (
+            build_anchor_prompt(title, description, profile)
+            if normalized_mode == "modular"
+            else ""
+        )
+        overall = (
+            build_overall_prompt(title, description, modules, profile)
+            if normalized_mode == "overall"
+            else ""
+        )
+        module_prompts = (
+            {
+                value: build_module_prompt(title, description, value, profile)
+                for value in modules
+            }
+            if normalized_mode == "modular"
+            else {value: MODULE_LABELS[value] for value in modules}
+        )
     return {
+        "template_variant": variant,
+        "prompt_version": "style-template-variants-v1",
         "mode": normalized_mode,
         "detail_profile": profile,
         "detail_label": DETAIL_PROFILES[profile]["label"],
         "detail_prompt": detail_profile_prompt(profile),
         "detail_negative": detail_profile_negative(profile),
         "master": master,
-        "anchor": build_anchor_prompt(title, description, profile)
-        if normalized_mode == "modular"
-        else "",
-        "overall": build_overall_prompt(title, description, modules, profile)
-        if normalized_mode == "overall"
-        else "",
-        "modules": {
-            value: build_module_prompt(title, description, value, profile)
-            for value in modules
-        }
-        if normalized_mode == "modular"
-        else {value: MODULE_LABELS[value] for value in modules},
+        "anchor": anchor,
+        "overall": overall,
+        "modules": module_prompts,
         "negative": negative,
         "reference_order": [],
     }
@@ -225,11 +322,14 @@ __all__ = [
     "DETAIL_PROFILES",
     "MODULE_LABELS",
     "NEGATIVE_CONSTRAINTS",
+    "TEMPLATE_VARIANTS",
+    "TEMPLATE_VARIANT_LABELS",
     "build_anchor_prompt",
     "build_module_prompt",
     "build_overall_prompt",
     "detail_profile_negative",
     "detail_profile_prompt",
     "normalize_detail_profile",
+    "normalize_template_variants",
     "prompt_bundle",
 ]
