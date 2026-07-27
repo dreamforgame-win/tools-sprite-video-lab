@@ -6,6 +6,10 @@ const DEFAULT_IMAGE_NAMING_SIZE_PRESETS = [
 const SMART_ASPECT_RATIO = "smart";
 const {
   closestSupportedAspectRatio,
+  effectiveReferenceCount,
+  effectiveReferenceCountByRole,
+  formatGenerationCostEstimate,
+  generationOptimizationText,
   generationReferencePaths,
   styleDragContentKeys,
   styleGroupMoveKeys,
@@ -28,8 +32,11 @@ const {
   isVisualGuideRunActive,
   isVisualGuideRunLocked,
   normalizeVisualGuideModules,
+  normalizeVisualGuideVariants,
   preserveScrollPosition,
   preserveScrollPositions,
+  visualGuideCostEstimateInput,
+  visualGuideCostEstimateInputs,
   visualGuideNodeStatusLabel,
   visualGuideRunIndicator,
   visualGuideStepState,
@@ -107,6 +114,9 @@ const state = {
       step: 1,
       mode: "modular",
       detailProfile: "compact",
+      requestedVariants: ["compact"],
+      activeVariantTab: "compact",
+      sourceVersionId: "",
       moduleTypes: [...PROFESSIONAL_MODULES],
       referenceSources: [],
       referenceDraft: [],
@@ -122,6 +132,10 @@ const state = {
       promptPreview: null,
       promptPreviewRequestId: 0,
       promptPreviewTimer: null,
+      styleGuideVisualCostEstimate: null,
+      variantCostEstimates: {},
+      styleGuideVisualCostEstimateRequestId: 0,
+      styleGuideVisualCostEstimateTimer: null,
       pollTimer: null,
       submittingRun: false,
       submitError: "",
@@ -157,6 +171,14 @@ const state = {
     styleGuidePreviewRequestId: 0,
     styleGuidePreviewTimer: null,
     referenceRecordIds: new Set(),
+    referenceOptimizationEnabled: true,
+    styleReferenceOptimizationEnabled: true,
+    costEstimate: null,
+    styleCostEstimate: null,
+    costEstimateRequestId: 0,
+    styleCostEstimateRequestId: 0,
+    costEstimateTimer: null,
+    styleCostEstimateTimer: null,
     selectedIds: new Set(),
     pollingIds: new Set(),
     pollTimers: new Map(),
@@ -627,17 +649,22 @@ function bindElements() {
     "aiReferenceCount",
     "aiReferenceSummary",
     "aiReferenceLimitHint",
+    "aiReferenceOptimizationInput",
+    "aiReferenceOptimizationHint",
     "aiReferencePickerModal",
     "aiReferenceModalCount",
     "aiReferenceOptionList",
     "aiStyleGuideControls",
     "aiNegativePromptInput",
     "aiGenerateButton",
+    "aiGenerationCostEstimate",
     "aiImageWorkspace",
     "aiProductionListViewButton",
     "aiProductionCanvasViewButton",
     "aiProductionCanvasWorkspace",
     "aiProductionCanvasHost",
+    "aiProductionCanvasTitle",
+    "aiProductionCanvasSummary",
     "aiHistoryWorkspace",
     "aiResultSummary",
     "aiResultGrid",
@@ -858,6 +885,7 @@ function bindElements() {
     "uploadDropzone",
     "uploadInput",
     "localProfileButton",
+    "agentAccessButton",
     "accountName",
     "localProfileAvatar",
     "localProfileAvatarFallback",
@@ -874,6 +902,17 @@ function bindElements() {
     "localProfileClearTokenButton",
     "localProfileTestButton",
     "localProfileSaveButton",
+    "agentAccessDialog",
+    "agentAccessCloseButton",
+    "agentAccessManifestStatus",
+    "agentAccessProtocolVersion",
+    "agentAccessProjectId",
+    "agentAccessManifestLink",
+    "agentAccessNativeDescription",
+    "agentAccessMcpDescription",
+    "agentAccessPrompt",
+    "agentAccessCopyButton",
+    "agentAccessCopyStatus",
     "aiPreviewDialog",
     "aiPreviewDialogTitle",
     "aiPreviewCloseButton",
@@ -2563,7 +2602,7 @@ function workspaceQuickActionItems(scope) {
     ];
   }
   if (scope === "style-guides") {
-    return [{ command: "style-guide", label: "生成视觉指导图", icon: "refresh" }];
+    return [{ command: "style-guide", label: "生成风格模板", icon: "refresh" }];
   }
   if (scope === "production") {
     const disabled = !isAiAssetGenerationTarget();
@@ -2593,6 +2632,7 @@ function runWorkspaceQuickAction(command) {
 function openWorkspaceQuickActionContextMenu(scope, point) {
   const actions = workspaceQuickActionItems(scope);
   if (!actions.length) return null;
+  ensureStyleContentContextMenuBindings();
   closeStyleContentContextMenus();
   closeProjectCanvasContextMenus();
   const menu = document.createElement("div");
@@ -2658,7 +2698,7 @@ function renderStyleContentToolbar(style, { noteCount = 0, groupStatus = "" } = 
   const activeTab = state.projectAssets.styleContentTab || "resources";
   const guideAction = guide
     ? styleGuideVisualActionMarkup(guide.id, { className: "secondary-button" })
-    : `<button class="secondary-button" type="button" data-project-action="style-guide-create" data-id="${escapeHtml(style?.id || "")}"><span>生成视觉指导图</span></button>`;
+    : `<button class="secondary-button" type="button" data-project-action="style-guide-create" data-id="${escapeHtml(style?.id || "")}"><span>生成风格模板</span></button>`;
   return `<div class="style-content-toolbar">
     <div class="style-content-heading"><span class="style-content-title-row"><strong>${escapeHtml(style?.name || "未选择方向")}</strong>${style ? `<em class="style-guide-status ${guide?.is_default ? "is-default" : ""}">${escapeHtml(guideStatus)}</em>` : ""}</span><span>${items.length} 个内容${noteCount ? ` · ${noteCount} 个便签` : ""}${groupStatus}</span></div>
     ${style && activeTab === "resources" ? `<div class="style-content-actions">
@@ -2671,7 +2711,7 @@ function renderStyleContentToolbar(style, { noteCount = 0, groupStatus = "" } = 
     </div>` : ""}
     <nav class="style-content-tabs" aria-label="风格方向内容">
       <button class="${activeTab === "resources" ? "active" : ""}" type="button" data-project-action="style-content-tab" data-tab="resources">方向资源 <span>${items.length + noteCount}</span></button>
-      <button class="${activeTab === "guides" ? "active" : ""}" type="button" data-project-action="style-content-tab" data-tab="guides">指导图仓库 <span>${Number(guide?.latest_published_version || 0)}</span></button>
+      <button class="${activeTab === "guides" ? "active" : ""}" type="button" data-project-action="style-content-tab" data-tab="guides">风格模板仓库 <span>${Number(guide?.latest_published_version || 0)}</span></button>
     </nav>
     ${style && activeTab === "resources" ? projectModuleViewSwitch("style") : ""}
     ${style && activeTab === "guides" ? `<div class="style-content-actions style-guide-content-actions">${guideAction}</div>` : ""}
@@ -2688,7 +2728,7 @@ function styleGuideVersionPreviewItems(version) {
   const visual = version?.visual_guide || {};
   const missingResources = version?.missing_resources || [];
   const items = [];
-  const append = (resource, label, meta, kind) => {
+  const append = (resource, label, meta, kind, variant = "") => {
     const path = String(resource?.relative_path || "");
     if (!path) return;
     const missing = resource?.availability === "missing"
@@ -2701,9 +2741,26 @@ function styleGuideVersionPreviewItems(version) {
       label,
       meta,
       kind,
-      key: path,
+      variant,
+      key: `${variant}:${path}`,
     });
   };
+  const variants = version?.variants && typeof version.variants === "object"
+    ? version.variants
+    : {};
+  if (Object.keys(variants).length) {
+    ["compact", "detailed"].forEach((variant) => {
+      const snapshot = variants[variant];
+      if (!snapshot) return;
+      const variantLabel = variant === "compact" ? "简略版" : "详细版";
+      append(snapshot.local_template, `${variantLabel}模板总览`, variantLabel, "template", variant);
+      append(snapshot.anchor, `${variantLabel}视觉基因锚点`, `${variantLabel} · 核心参考`, "core", variant);
+      STYLE_GUIDE_MODULES.forEach((module) => {
+        append(snapshot.modules?.[module.id], `${variantLabel} · ${module.label}`, `${variantLabel} · 模块图`, module.id, variant);
+      });
+    });
+    return items;
+  }
   append(
     { relative_path: visual.template_relative_path || version?.style_board_relative_path || "" },
     "综合视觉指导图",
@@ -2745,12 +2802,19 @@ function renderStyleGuideVersionGroup(version, guide) {
   const visual = version.visual_guide || {};
   const primary = styleGuideVersionPreviewItems(version).find((item) => item.kind === "template");
   const mode = visual.mode === "overall" ? "整体生成" : visual.mode === "modular" ? "分模块生成" : "手动版本";
+  const availableVariants = Array.isArray(version.available_variants)
+    ? version.available_variants
+    : Object.keys(version.variants || {});
+  const variantBadges = availableVariants.map((variant) => `<em class="style-guide-variant-status is-${escapeHtml(version.variants?.[variant]?.status || "succeeded")}">${variant === "compact" ? "简略版" : "详细版"}</em>`).join("");
+  const backfill = availableVariants.includes("detailed") && !availableVariants.includes("compact")
+    ? `<button class="ghost-button" type="button" data-project-action="style-guide-version-backfill" data-id="${escapeHtml(version.id)}">补生成简略版</button>`
+    : "";
   return `<article class="style-guide-version ${confirmed ? "is-confirmed" : ""} ${collapsed ? "collapsed" : ""}">
     <header>
       <button class="style-guide-version-toggle" type="button" data-project-action="style-guide-version-toggle" data-id="${escapeHtml(version.id)}" title="${collapsed ? "展开版本" : "折叠版本"}" aria-label="${collapsed ? "展开版本" : "折叠版本"}">${workbenchIcon("chevron")}</button>
-      <div class="style-guide-version-title"><strong>v${Number(version.version || 0)}</strong>${confirmed ? '<em>当前使用</em>' : ""}</div>
+      <div class="style-guide-version-title"><strong>v${Number(version.version || 0)}</strong>${confirmed ? '<em>当前使用</em>' : ""}${variantBadges || '<em>仅详细版</em>'}</div>
       <div class="style-guide-version-meta"><span><b>生成时间</b>${escapeHtml(aiRecordDate({ created_at: version.published_at }))}</span><span><b>模式</b>${escapeHtml(mode)}</span><span><b>模型</b>${escapeHtml(visual.model || "-")}</span><span><b>资源</b>${Number(version.resource_count || 0)} 张</span></div>
-      <div class="style-guide-version-action">${confirmed ? `<span>${workbenchIcon("check")}已确认使用</span>` : `<button class="ghost-button" type="button" data-project-action="style-guide-version-confirm" data-id="${escapeHtml(version.id)}" ${version.resource_state === "missing" ? "disabled" : ""}>确认使用</button>`}</div>
+      <div class="style-guide-version-action">${backfill}${confirmed ? `<span>${workbenchIcon("check")}已确认使用</span>` : `<button class="ghost-button" type="button" data-project-action="style-guide-version-confirm" data-id="${escapeHtml(version.id)}" ${version.resource_state === "missing" ? "disabled" : ""}>确认使用</button>`}</div>
     </header>
     <div class="style-guide-version-body">
       <div class="style-guide-version-primary">${primary ? styleGuideVersionImageCard(primary.resource, primary.label, primary.meta, version.id) : ""}</div>
@@ -2764,12 +2828,12 @@ function renderStyleGuideRepositoryPanel(style) {
   const packageMatches = guide && state.projectAssets.styleGuideVersionsPackageId === guide.id;
   const versions = packageMatches ? state.projectAssets.styleGuideVersions : [];
   const body = !guide
-    ? '<div class="asset-table-empty">当前方向还没有视觉指导图。点击“生成视觉指导图”开始创建。</div>'
+    ? '<div class="asset-table-empty">当前方向还没有风格模板。点击“生成风格模板”开始创建。</div>'
     : state.projectAssets.styleGuideVersionsLoading && !packageMatches
       ? '<div class="project-tool-loading">正在读取指导图版本...</div>'
       : versions.length
         ? versions.map((version) => renderStyleGuideVersionGroup(version, guide)).join("")
-        : '<div class="asset-table-empty">当前方向还没有已完成的视觉指导图版本。</div>';
+        : '<div class="asset-table-empty">当前方向还没有已完成的风格模板版本。</div>';
   return `<section class="style-content-panel style-guide-repository-panel">
     ${renderStyleContentToolbar(style)}
     <div class="style-guide-repository-list">${body}</div>
@@ -3164,6 +3228,15 @@ function styleGuideVisualState() {
   const wizard = state.projectAssets.styleGuideVisualWizard;
   if (!(wizard.collapsedReferenceGroups instanceof Set)) wizard.collapsedReferenceGroups = new Set(wizard.collapsedReferenceGroups || []);
   if (!STYLE_GUIDE_DETAIL_PROFILES.some((profile) => profile.id === wizard.detailProfile)) wizard.detailProfile = "compact";
+  try {
+    wizard.requestedVariants = normalizeVisualGuideVariants(wizard.requestedVariants);
+  } catch (_error) {
+    wizard.requestedVariants = ["compact"];
+  }
+  if (!wizard.requestedVariants.includes(wizard.activeVariantTab)) {
+    [wizard.activeVariantTab] = wizard.requestedVariants;
+  }
+  if (!wizard.variantCostEstimates || typeof wizard.variantCostEstimates !== "object") wizard.variantCostEstimates = {};
   return wizard;
 }
 
@@ -3174,14 +3247,14 @@ function styleGuideVisualIndicatorForPackage(packageId) {
 }
 
 function styleGuideVisualActionContent(indicator) {
-  if (!indicator) return "<span>生成视觉指导图</span>";
+  if (!indicator) return "<span>生成风格模板</span>";
   return `<span class="style-guide-visual-entry-label"><i aria-hidden="true"></i>${escapeHtml(indicator.label)}</span><small class="style-guide-visual-entry-progress" aria-hidden="true">${escapeHtml(indicator.progress)}</small>`;
 }
 
 function styleGuideVisualActionMarkup(packageId, { className = "secondary-button", disabled = false } = {}) {
   const indicator = styleGuideVisualIndicatorForPackage(packageId);
   const toneClass = indicator ? ` is-${indicator.tone}` : "";
-  const ariaLabel = indicator?.ariaLabel || "生成视觉指导图";
+  const ariaLabel = indicator?.ariaLabel || "生成风格模板";
   return `<button class="${className} style-guide-visual-run-entry${toneClass}" type="button" data-project-action="style-guide-visual-open" data-id="${escapeHtml(packageId)}" data-style-guide-visual-run="${escapeHtml(packageId)}" aria-label="${escapeHtml(ariaLabel)}" ${disabled && !indicator ? "disabled" : ""}>${styleGuideVisualActionContent(indicator)}</button>`;
 }
 
@@ -3194,7 +3267,7 @@ function updateStyleGuideVisualRunIndicators(packageId = styleGuideVisualState()
     button.classList.toggle("is-canceling", indicator?.tone === "canceling");
     button.classList.toggle("is-failed", indicator?.tone === "failed");
     button.innerHTML = styleGuideVisualActionContent(indicator);
-    button.setAttribute("aria-label", indicator?.ariaLabel || "生成视觉指导图");
+    button.setAttribute("aria-label", indicator?.ariaLabel || "生成风格模板");
     button.disabled = !indicator && state.projectAssets.styleGuideCapabilities.visual_generation === false;
   });
 }
@@ -3251,6 +3324,8 @@ function styleGuideVisualInputKey() {
   return JSON.stringify({
     mode: wizard.mode,
     detail_profile: wizard.detailProfile,
+    requested_variants: normalizeVisualGuideVariants(wizard.requestedVariants),
+    source_version_id: wizard.sourceVersionId || "",
     module_types: normalizeVisualGuideModules(wizard.moduleTypes),
     model: wizard.model,
     params: {
@@ -3277,8 +3352,8 @@ function styleGuideVisualMarkInputChanged() {
 
 function styleGuideVisualStepMarkup() {
   const wizard = styleGuideVisualState();
-  const labels = ["选择参考图", "生成设置", "生成指导图"];
-  return `<nav class="style-guide-visual-stepper" aria-label="视觉指导图生成步骤">${labels.map((label, index) => {
+  const labels = ["选择参考图", "生成设置", "生成模板"];
+  return `<nav class="style-guide-visual-stepper" aria-label="风格模板生成步骤">${labels.map((label, index) => {
     const step = index + 1;
     const status = visualGuideStepState(step, wizard.step, { runStarted: Boolean(wizard.run) });
     return `<button type="button" class="${status}" data-visual-guide-step="${step}" aria-current="${status === "current" ? "step" : "false"}"><b>${step}</b><span>${label}</span></button>`;
@@ -3299,6 +3374,105 @@ function styleGuideVisualStepOneMarkup() {
   return `<div class="style-guide-visual-section"><div class="style-guide-visual-intro"><strong>选择能够代表当前方向的参考图</strong><span>优先选择构图、色彩、材质和造型语言清晰的图片。通过二级弹窗查看完整分组。</span></div>${styleGuideVisualReferenceStrip()}</div>`;
 }
 
+function scheduleStyleGuideVisualCostEstimate() {
+  const wizard = styleGuideVisualState();
+  if (wizard.styleGuideVisualCostEstimateTimer) clearTimeout(wizard.styleGuideVisualCostEstimateTimer);
+  const requestId = ++wizard.styleGuideVisualCostEstimateRequestId;
+  const host = document.getElementById("styleGuideVisualCostEstimate");
+  if (!host) return;
+  const model = styleGuideVisualModel();
+  if (!model?.id) {
+    wizard.styleGuideVisualCostEstimate = null;
+    paintGenerationCostEstimate(host, { total: null, unavailable_reason: "请先选择可用模型" });
+    return;
+  }
+  const quoteInput = visualGuideCostEstimateInput(
+    wizard.mode,
+    wizard.moduleTypes,
+    wizard.referenceSources.length,
+    styleModelReferenceLimit(model),
+  );
+  setGenerationCostEstimateLoading(host);
+  wizard.styleGuideVisualCostEstimateTimer = setTimeout(async () => {
+    wizard.styleGuideVisualCostEstimateTimer = null;
+    try {
+      const estimate = await requestGenerationCostEstimate({
+        model: model.id,
+        params: {
+          aspect_ratio: styleGuideVisualResolvedRatio(),
+          resolution: wizard.params.resolution || "1K",
+          background: wizard.params.background || "transparent",
+        },
+        ...quoteInput,
+      });
+      if (requestId !== wizard.styleGuideVisualCostEstimateRequestId) return;
+      wizard.styleGuideVisualCostEstimate = estimate;
+      paintGenerationCostEstimate(document.getElementById("styleGuideVisualCostEstimate"), estimate);
+    } catch (error) {
+      if (requestId !== wizard.styleGuideVisualCostEstimateRequestId) return;
+      wizard.styleGuideVisualCostEstimate = null;
+      paintGenerationCostEstimateError(document.getElementById("styleGuideVisualCostEstimate"), error);
+    }
+  }, 160);
+}
+
+function scheduleStyleGuideVariantCostEstimates() {
+  const wizard = styleGuideVisualState();
+  if (wizard.styleGuideVisualCostEstimateTimer) clearTimeout(wizard.styleGuideVisualCostEstimateTimer);
+  const requestId = ++wizard.styleGuideVisualCostEstimateRequestId;
+  const host = document.getElementById("styleGuideVisualCostEstimate");
+  if (!host) return;
+  const model = styleGuideVisualModel();
+  const inputs = visualGuideCostEstimateInputs(
+    wizard.mode,
+    wizard.moduleTypes,
+    wizard.requestedVariants,
+    wizard.referenceSources.length,
+    styleModelReferenceLimit(model),
+  );
+  host.className = "style-guide-variant-estimates";
+  host.innerHTML = `${inputs.map(({ variant }) => `<div class="style-guide-variant-estimate-row"><strong>${variant === "compact" ? "简略版预计" : "详细版预计"}</strong><div class="generation-cost-estimate" data-visual-variant-estimate="${variant}"><span>正在计算预计价格…</span></div></div>`).join("")}<div class="style-guide-variant-estimate-total" data-visual-variant-estimate-total>${inputs.length > 1 ? "合计预计正在计算…" : ""}</div>`;
+  if (!model?.id) {
+    host.querySelectorAll("[data-visual-variant-estimate]").forEach((row) => {
+      row.textContent = "请先选择可用模型";
+    });
+    return;
+  }
+  wizard.styleGuideVisualCostEstimateTimer = setTimeout(async () => {
+    wizard.styleGuideVisualCostEstimateTimer = null;
+    try {
+      const rows = await Promise.all(inputs.map(async (input) => ({
+        variant: input.variant,
+        estimate: await requestGenerationCostEstimate({
+          model: model.id,
+          params: {
+            aspect_ratio: styleGuideVisualResolvedRatio(),
+            resolution: wizard.params.resolution || "1K",
+            background: wizard.params.background || "transparent",
+          },
+          ...input,
+        }),
+      })));
+      if (requestId !== wizard.styleGuideVisualCostEstimateRequestId) return;
+      wizard.variantCostEstimates = Object.fromEntries(rows.map(({ variant, estimate }) => [variant, estimate]));
+      rows.forEach(({ variant, estimate }) => paintGenerationCostEstimate(
+        host.querySelector(`[data-visual-variant-estimate="${variant}"]`), estimate,
+      ));
+      const totals = rows.map(({ estimate }) => Number(estimate?.total));
+      const currencies = new Set(rows.map(({ estimate }) => String(estimate?.currency || "")).filter(Boolean));
+      const total = host.querySelector("[data-visual-variant-estimate-total]");
+      if (total && rows.length > 1) {
+        total.textContent = totals.every(Number.isFinite) && currencies.size === 1
+          ? `合计预计 ${[...currencies][0]} ${totals.reduce((sum, value) => sum + value, 0).toFixed(4)}`
+          : "合计将在各规格报价可用后显示";
+      }
+    } catch (error) {
+      if (requestId !== wizard.styleGuideVisualCostEstimateRequestId) return;
+      host.querySelectorAll("[data-visual-variant-estimate]").forEach((row) => paintGenerationCostEstimateError(row, error));
+    }
+  }, 160);
+}
+
 function styleGuideVisualStepTwoMarkup() {
   const wizard = styleGuideVisualState();
   const locked = isVisualGuideRunLocked(wizard.run);
@@ -3306,14 +3480,20 @@ function styleGuideVisualStepTwoMarkup() {
   const ratios = styleModelCapabilityValues(model, "supported_aspect_ratios", ["1:1", "16:9"]);
   const resolutions = styleModelCapabilityValues(model, "supported_resolutions", ["1K"]);
   const backgrounds = styleModelCapabilityValues(model, "supported_backgrounds", ["transparent", "solid", "scene"]);
-  const calls = visualGuideTaskCount(wizard.mode, wizard.moduleTypes);
+  const calls = visualGuideTaskCount(wizard.mode, wizard.moduleTypes, wizard.requestedVariants);
   const moduleRows = [
     `<label class="style-guide-visual-module fixed"><input type="checkbox" checked disabled><span><strong>视觉基因</strong><small>贯穿所有模块的色板、造型、材质与光照锚点</small></span><em>固定</em></label>`,
     ...STYLE_GUIDE_MODULES.map((module) => `<label class="style-guide-visual-module ${wizard.moduleTypes.includes(module.id) ? "selected" : ""}"><input type="checkbox" data-visual-module="${module.id}" ${wizard.moduleTypes.includes(module.id) ? "checked" : ""} ${locked ? "disabled" : ""}><span><strong>${escapeHtml(module.label)}</strong><small>生成独立专业指导图</small></span></label>`),
   ].join("");
   const detailProfiles = STYLE_GUIDE_DETAIL_PROFILES.map((profile) => `<button type="button" data-visual-detail-profile="${profile.id}" class="${wizard.detailProfile === profile.id ? "active" : ""}" ${locked ? "disabled" : ""}><strong>${profile.label}</strong><small>${profile.note}</small></button>`).join("");
+  const variantOptions = [
+    ["compact", "简略版", "默认给 AI 使用：单张纯净风格样例"],
+    ["detailed", "详细版", "用于人工查看：包含指导板与模块细节"],
+  ].map(([variant, label, note]) => `<label class="style-guide-template-variant ${wizard.requestedVariants.includes(variant) ? "selected" : ""}"><input type="checkbox" data-visual-template-variant="${variant}" ${wizard.requestedVariants.includes(variant) ? "checked" : ""} ${locked ? "disabled" : ""}><span><strong>${label}</strong><small>${note}</small></span></label>`).join("");
+  const estimateRows = wizard.requestedVariants.map((variant) => `<div class="style-guide-variant-estimate-row"><strong>${variant === "compact" ? "简略版预计" : "详细版预计"}</strong><div data-visual-variant-estimate="${variant}" class="generation-cost-estimate"><span>正在计算预计价格…</span></div></div>`).join("");
   return `<div class="style-guide-visual-section style-guide-visual-settings-grid ${locked ? "is-readonly" : ""}">
     <div class="style-guide-visual-settings-column">
+      <section class="style-guide-visual-setting"><header><strong>模板规格</strong><span>可选其中一个，也可同时生成</span></header><div class="style-guide-template-variants">${variantOptions}</div></section>
       <section class="style-guide-visual-setting"><header><strong>生成模式</strong><span>${locked ? "生成期间设置只读" : "选择成本与精度的平衡方式"}</span></header><div class="style-guide-visual-segmented"><button type="button" data-visual-mode="overall" class="${wizard.mode === "overall" ? "active" : ""}" ${locked ? "disabled" : ""}>整体生成<small>1 张综合视觉图</small></button><button type="button" data-visual-mode="modular" class="${wizard.mode === "modular" ? "active" : ""}" ${locked ? "disabled" : ""}>分模块生成<small>锚点图 + 所选模块图</small></button></div></section>
       <section class="style-guide-visual-setting"><header><strong>细节密度</strong><span>控制生产规格，不降低图片清晰度</span></header><div class="style-guide-visual-detail-segmented">${detailProfiles}</div></section>
       <section class="style-guide-visual-setting"><header><strong>生成参数</strong><span>每个视觉节点固定生成 1 张</span></header><div class="style-guide-visual-params">
@@ -3321,7 +3501,7 @@ function styleGuideVisualStepTwoMarkup() {
       <label><span>比例</span><select data-visual-param="aspect_ratio" ${locked ? "disabled" : ""}>${generationAspectRatioOptions(ratios, wizard.params.aspect_ratio, wizard.smartRatio)}</select></label>
       <label><span>分辨率</span><select data-visual-param="resolution" ${locked ? "disabled" : ""}>${styleCapabilityOptions(resolutions, wizard.params.resolution)}</select></label>
       <label><span>背景</span><select data-visual-param="background" ${locked ? "disabled" : ""}>${styleCapabilityOptions(backgrounds, wizard.params.background, { transparent: "透明", solid: "纯色", scene: "场景" })}</select></label>
-      </div><div class="style-guide-visual-cost"><strong>${calls} 个远端图片任务</strong><span>每个任务 1 张 · 本地模板整理不消耗生成额度</span></div></section>
+      </div><div class="style-guide-visual-cost"><strong>${calls} 个远端图片任务</strong><span>每个任务 1 张 · 本地模板整理不消耗生成额度</span></div><div id="styleGuideVisualCostEstimate" class="generation-cost-estimate style-guide-visual-cost-estimate" aria-live="polite"><span>正在计算预计价格…</span></div></section>
     </div>
     <section class="style-guide-visual-setting style-guide-visual-module-setting"><header><strong>包含模块</strong><button class="ghost-button" type="button" data-visual-action="open-prompt">查看提示词</button></header><div class="style-guide-visual-modules">${moduleRows}</div></section>
     ${wizard.submitError ? `<div class="style-guide-visual-submit-error" role="alert">${escapeHtml(wizard.submitError)}</div>` : ""}
@@ -3344,9 +3524,13 @@ function styleGuideVisualRunMarkup() {
     : wizard.submittedInputKey && wizard.submittedInputKey !== styleGuideVisualInputKey()
       ? '<em>输入已变化，本次结果仍会作为独立版本保存</em>'
       : "";
-  return `<section class="style-guide-visual-run"><header><div><strong>${run.mode === "overall" ? "整体视觉指导图" : "分模块视觉指导图"}</strong><span>${escapeHtml(runStatus)} · ${run.nodes?.length || 0} 个节点</span></div>${notice}</header><div class="style-guide-visual-nodes">${(run.nodes || []).map((node, index) => {
+  const variants = normalizeVisualGuideVariants(run.requested_variants || ["detailed"]);
+  if (!variants.includes(wizard.activeVariantTab)) [wizard.activeVariantTab] = variants;
+  const visibleNodes = (run.nodes || []).filter((node) => String(node.variant || "detailed") === wizard.activeVariantTab);
+  const variantTabs = `<div class="style-guide-variant-tabs">${variants.map((variant) => `<button type="button" data-visual-variant-tab="${variant}" class="${wizard.activeVariantTab === variant ? "active" : ""}">${variant === "compact" ? "简略版" : "详细版"}<small>${escapeHtml(run.variant_states?.[variant]?.status || "")}</small></button>`).join("")}${isVisualGuideRunLocked(run) ? `<button type="button" class="danger" data-visual-cancel-variant="${wizard.activeVariantTab}">取消${wizard.activeVariantTab === "compact" ? "简略版" : "详细版"}</button>` : ""}</div>`;
+  return `<section class="style-guide-visual-run"><header><div><strong>${run.mode === "overall" ? "整体风格模板" : "分模块风格模板"}</strong><span>${escapeHtml(runStatus)} · ${run.nodes?.length || 0} 个节点</span></div>${notice}</header>${variantTabs}<div class="style-guide-visual-nodes">${visibleNodes.map((node, index) => {
     const resultUrl = node.result_relative_path ? styleReferenceUrl({ relative_path: node.result_relative_path }) : "";
-    const retryable = run.status !== "applied" && (canRetryVisualGuideNode(node) || (node.id === "anchor" && node.status === "succeeded"));
+    const retryable = canRetryVisualGuideNode(node) || ((node.node_key === "anchor" || String(node.id).endsWith(":anchor")) && node.status === "succeeded");
     const active = ["submitting", "queued", "running"].includes(String(node.status || ""));
     return `<article class="status-${escapeHtml(node.status || "pending")} ${active ? "is-active" : ""}"><div class="style-guide-visual-node-marker"><b>${index + 1}</b></div><div class="style-guide-visual-node-copy"><strong>${escapeHtml(node.label || node.id)}</strong><span>${escapeHtml(visualGuideNodeStatusLabel(node.status))}${node.attempt ? ` · 第 ${Number(node.attempt)} 次` : ""}</span>${node.error ? `<small>${escapeHtml(node.error)}</small>` : ""}</div><div class="style-guide-visual-node-actions">${resultUrl ? `<button type="button" data-visual-action="preview-node" data-node-id="${escapeHtml(node.id)}" title="查看大图" aria-label="查看大图">${workbenchIcon("expand")}</button>` : ""}${retryable ? `<button type="button" data-visual-node-retry="${escapeHtml(node.id)}" title="重新生成此节点" aria-label="重新生成此节点">${workbenchIcon("refresh")}</button>` : ""}</div></article>`;
   }).join("")}</div></section>`;
@@ -3385,10 +3569,16 @@ function renderStyleGuideVisualWizard() {
     : wizard.run?.status === "finalize_failed"
       ? '<button class="primary-button" type="button" data-visual-action="retry-finalize">重试保存版本</button>'
       : "";
-  dialog.innerHTML = `<div class="style-guide-visual-panel"><header class="style-guide-visual-head"><div><strong id="styleGuideVisualWizardTitle">生成视觉指导图</strong><span>使用当前图片模型生成游戏美术生产指导</span></div><button type="button" data-visual-action="close" title="关闭" aria-label="关闭">${workbenchIcon("close")}</button></header>${styleGuideVisualStepMarkup()}<div class="style-guide-visual-body">${body}</div><footer class="style-guide-visual-footer"><div>${wizard.step === 3 && wizard.run ? `<span>运行 ${escapeHtml(wizard.run.id)}</span>` : `<span>步骤 ${wizard.step} / 3</span>`}</div><div>${wizard.step > 1 && wizard.step < 3 ? '<button class="ghost-button" type="button" data-visual-action="back">上一步</button>' : ""}${wizard.step === 1 ? `<button class="primary-button" type="button" data-visual-action="next" ${canNext ? "" : "disabled"}>下一步</button>` : ""}${wizard.step === 2 ? locked ? '<button class="primary-button" type="button" data-visual-action="view-progress">查看生成进度</button>' : `<button class="primary-button" type="button" data-visual-action="start" ${wizard.moduleTypes.length && wizard.model ? "" : "disabled"}>开始生成</button>` : ""}${wizard.step === 3 ? completionAction : ""}</div></footer>${styleGuideVisualSubmitOverlayMarkup()}</div>`;
+  dialog.innerHTML = `<div class="style-guide-visual-panel"><header class="style-guide-visual-head"><div><strong id="styleGuideVisualWizardTitle">生成风格模板</strong><span>使用当前图片模型生成可稳定复用的游戏美术风格模板</span></div><button type="button" data-visual-action="close" title="关闭" aria-label="关闭">${workbenchIcon("close")}</button></header>${styleGuideVisualStepMarkup()}<div class="style-guide-visual-body">${body}</div><footer class="style-guide-visual-footer"><div>${wizard.step === 3 && wizard.run ? `<span>运行 ${escapeHtml(wizard.run.id)}</span>` : `<span>步骤 ${wizard.step} / 3</span>`}</div><div>${wizard.step > 1 && wizard.step < 3 ? '<button class="ghost-button" type="button" data-visual-action="back">上一步</button>' : ""}${wizard.step === 1 ? `<button class="primary-button" type="button" data-visual-action="next" ${canNext ? "" : "disabled"}>下一步</button>` : ""}${wizard.step === 2 ? locked ? '<button class="primary-button" type="button" data-visual-action="view-progress">查看生成进度</button>' : `<button class="primary-button" type="button" data-visual-action="start" ${wizard.moduleTypes.length && wizard.model ? "" : "disabled"}>开始生成</button>` : ""}${wizard.step === 3 ? completionAction : ""}</div></footer>${styleGuideVisualSubmitOverlayMarkup()}</div>`;
+  if (wizard.step === 2) scheduleStyleGuideVariantCostEstimates();
+  else if (wizard.styleGuideVisualCostEstimateTimer) {
+    clearTimeout(wizard.styleGuideVisualCostEstimateTimer);
+    wizard.styleGuideVisualCostEstimateTimer = null;
+    wizard.styleGuideVisualCostEstimateRequestId += 1;
+  }
 }
 
-async function openStyleGuideVisualWizard(requestedPackageId = "") {
+async function openStyleGuideVisualWizard(requestedPackageId = "", options = {}) {
   await ensureAiCreationLoaded();
   const wizard = styleGuideVisualState();
   const packageId = requestedPackageId || state.projectAssets.selectedStyleGuidePackageId;
@@ -3404,6 +3594,9 @@ async function openStyleGuideVisualWizard(requestedPackageId = "") {
       step: 1,
       mode: "modular",
       detailProfile: "compact",
+      requestedVariants: ["compact"],
+      activeVariantTab: "compact",
+      sourceVersionId: "",
       moduleTypes: [...PROFESSIONAL_MODULES],
       referenceSources: [],
       referenceDraft: [],
@@ -3417,10 +3610,26 @@ async function openStyleGuideVisualWizard(requestedPackageId = "") {
       pollTimer: null,
       submittingRun: false,
       submitError: "",
+      variantCostEstimates: {},
     });
   }
   if (!wizard.model) wizard.model = state.aiCreation.selectedModel || state.aiCreation.models[0]?.id || "";
   await resumeStyleGuideVisualRun(packageId).catch(() => {});
+  if (options.backfillVersion) {
+    const source = options.backfillVersion;
+    const reusable = source.variants?.detailed?.reference_sources
+      || source.variants?.compact?.reference_sources
+      || [];
+    wizard.run = null;
+    wizard.step = reusable.length ? 2 : 1;
+    wizard.requestedVariants = ["compact"];
+    wizard.activeVariantTab = "compact";
+    wizard.sourceVersionId = source.id || "";
+    wizard.referenceSources = styleGuideVisualHydrateSources(reusable);
+    wizard.submittedInputKey = "";
+    wizard.supersedesRunId = "";
+    if (!reusable.length) setStatus("原版本缺少可复用参考图，请重新选择。", "error");
+  }
   wizard.open = true;
   renderStyleGuideVisualWizard();
 }
@@ -3520,6 +3729,8 @@ function styleGuideVisualRequestBody({ previewOnly = false } = {}) {
   return {
     mode: wizard.mode,
     detail_profile: wizard.detailProfile,
+    requested_variants: normalizeVisualGuideVariants(wizard.requestedVariants),
+    source_version_id: wizard.sourceVersionId || "",
     module_types: normalizeVisualGuideModules(wizard.moduleTypes),
     model: wizard.model,
     params: {
@@ -3565,7 +3776,9 @@ function scheduleStyleGuideVisualPromptPreview() {
 async function openStyleGuideVisualPrompt() {
   const preview = await requestStyleGuideVisualPromptPreview();
   if (!preview) throw new Error("请先完成参考图与生成设置");
-  const bundle = preview.prompt_bundle || {};
+  const bundle = preview.prompt_bundles?.[styleGuideVisualState().activeVariantTab]
+    || preview.prompt_bundle
+    || {};
   const dialog = document.getElementById("styleGuideVisualPromptDialog");
   const block = (title, value) => `<section><header><strong>${title}</strong><button type="button" data-visual-prompt-copy="${escapeHtml(title)}">复制</button></header><pre data-visual-prompt-value="${escapeHtml(title)}">${escapeHtml(value || "无")}</pre></section>`;
   dialog.hidden = false;
@@ -3607,13 +3820,13 @@ async function startStyleGuideVisualRun() {
   }
 }
 
-async function cancelStyleGuideVisualRun() {
+async function cancelStyleGuideVisualRun(variant = "") {
   const wizard = styleGuideVisualState();
   if (!wizard.run?.id || wizard.run.status === "canceling") return;
   if (!window.confirm("将停止尚未提交的后续任务；已提交的远端任务可能继续完成并计费。已生成图片会保留。是否继续？")) return;
   const data = await apiJson(`/api/v1/projects/${encodeURIComponent(activeProjectId())}/style-guides/${encodeURIComponent(wizard.packageId)}/visual-runs/${encodeURIComponent(wizard.run.id)}/cancel`, {
     method: "POST",
-    body: {},
+    body: variant ? { variant } : {},
   });
   wizard.run = data.visual_run;
   wizard.step = 3;
@@ -3680,6 +3893,11 @@ async function resumeStyleGuideVisualRun(packageId) {
   }
   wizard.mode = run.mode;
   wizard.detailProfile = run.detail_profile || "compact";
+  wizard.requestedVariants = normalizeVisualGuideVariants(run.requested_variants || ["detailed"]);
+  wizard.activeVariantTab = wizard.requestedVariants.includes(wizard.activeVariantTab)
+    ? wizard.activeVariantTab
+    : wizard.requestedVariants[0];
+  wizard.sourceVersionId = run.source_version_id || "";
   wizard.moduleTypes = normalizeVisualGuideModules(run.module_types);
   wizard.referenceSources = styleGuideVisualHydrateSources(run.reference_sources);
   wizard.referenceDraft = [];
@@ -3736,6 +3954,19 @@ function bindStyleGuideVisualDialogs() {
       else { wizard.step = step; renderStyleGuideVisualWizard(); }
       return;
     }
+    const variantTab = event.target.closest("[data-visual-variant-tab]");
+    if (variantTab) {
+      const wizard = styleGuideVisualState();
+      wizard.activeVariantTab = variantTab.dataset.visualVariantTab;
+      renderStyleGuideVisualWizard();
+      return;
+    }
+    const cancelVariant = event.target.closest("[data-visual-cancel-variant]");
+    if (cancelVariant) {
+      void cancelStyleGuideVisualRun(cancelVariant.dataset.visualCancelVariant)
+        .catch((error) => setStatus(error.message, "error"));
+      return;
+    }
     const retry = event.target.closest("[data-visual-node-retry]");
     if (retry) { void retryStyleGuideVisualNode(retry.dataset.visualNodeRetry).catch((error) => setStatus(error.message, "error")); return; }
     const button = event.target.closest("[data-visual-action]");
@@ -3771,7 +4002,22 @@ function bindStyleGuideVisualDialogs() {
   main?.addEventListener("change", (event) => {
     const wizard = styleGuideVisualState();
     if (isVisualGuideRunLocked(wizard.run)) return;
-    if (event.target.matches("[data-visual-module]")) {
+    if (event.target.matches("[data-visual-template-variant]")) {
+      const variant = event.target.dataset.visualTemplateVariant;
+      const next = event.target.checked
+        ? [...wizard.requestedVariants, variant]
+        : wizard.requestedVariants.filter((item) => item !== variant);
+      try {
+        wizard.requestedVariants = normalizeVisualGuideVariants(next);
+      } catch (_error) {
+        event.target.checked = true;
+        setStatus("至少保留一种模板规格。", "error");
+        return;
+      }
+      wizard.activeVariantTab = wizard.requestedVariants.includes(wizard.activeVariantTab)
+        ? wizard.activeVariantTab
+        : wizard.requestedVariants[0];
+    } else if (event.target.matches("[data-visual-module]")) {
       const id = event.target.dataset.visualModule;
       wizard.moduleTypes = normalizeVisualGuideModules(event.target.checked ? [...wizard.moduleTypes, id] : wizard.moduleTypes.filter((item) => item !== id));
       if (!wizard.moduleTypes.length) { wizard.moduleTypes = [id]; event.target.checked = true; setStatus("整体生成至少选择一个模块。", "error"); }
@@ -4485,12 +4731,6 @@ const STYLE_GENERATION_BACKGROUNDS = [
   { value: "black", label: "黑底", swatch: "black" },
 ];
 
-const ASSET_GENERATION_BACKGROUNDS = [
-  { value: "transparent", label: "透明", swatch: "default" },
-  { value: "solid", label: "纯色", swatch: "white" },
-  { value: "scene", label: "场景", swatch: "scene" },
-];
-
 function normalizeStyleGenerationBackground(value) {
   const normalized = String(value || "").trim();
   return STYLE_GENERATION_BACKGROUNDS.some((item) => item.value === normalized) ? normalized : "default";
@@ -4616,9 +4856,14 @@ function syncStyleGenerationReferenceState() {
   const picker = document.getElementById("styleGenerationReferencePicker");
   const selectedInputs = Array.from(document.querySelectorAll("[data-style-reference-item]:checked"));
   const localFiles = Array.from(document.getElementById("styleReferenceInput")?.files || []);
-  const selected = selectedStyleReferencePaths().length + localFiles.length;
+  const selected = styleGenerationReferenceKeys().length;
+  const optimizationEnabled = styleReferenceOptimizationEnabled();
+  const effectiveCount = effectiveReferenceCountByRole(
+    aiGenerationReferenceRoleCounts(), optimizationEnabled,
+  );
   const limit = styleModelReferenceLimit();
   const hint = document.getElementById("styleReferenceLimitHint");
+  const optimizationHint = document.getElementById("styleReferenceOptimizationHint");
   const submit = document.querySelector('[data-project-action="style-generate"]');
   const modelAvailable = Boolean(styleGenerationModel());
   document.querySelectorAll("[data-style-reference-count]").forEach((count) => { count.textContent = `已选 ${selected} / ${limit}`; });
@@ -4649,11 +4894,13 @@ function syncStyleGenerationReferenceState() {
     summary.innerHTML = visible.join("") || '<span class="style-reference-summary-empty">尚未选择参考图</span>';
   }
   if (hint) {
-    hint.textContent = selected > limit ? `已超出当前模型上限，请减少 ${selected - limit} 张。` : "";
-    hint.classList.toggle("error", selected > limit);
+    hint.textContent = effectiveCount > limit ? `优化后仍超出当前模型上限，请减少 ${effectiveCount - limit} 张实际输入。` : "";
+    hint.classList.toggle("error", effectiveCount > limit);
   }
-  if (submit) submit.disabled = !modelAvailable || selected > limit;
-  void syncStyleSmartAspectRatio();
+  if (optimizationHint) optimizationHint.textContent = generationOptimizationText(selected, effectiveCount, optimizationEnabled);
+  state.aiCreation.styleReferenceOptimizationEnabled = optimizationEnabled;
+  if (submit) submit.disabled = !modelAvailable || effectiveCount > limit;
+  void syncStyleSmartAspectRatio().then(scheduleStyleGenerationCostEstimate);
 }
 
 function bindStyleGenerationReferencePicker() {
@@ -4710,6 +4957,7 @@ function bindStyleGenerationReferencePicker() {
     }
   });
   document.getElementById("styleReferenceInput")?.addEventListener("change", syncStyleGenerationReferenceState);
+  document.getElementById("styleReferenceOptimizationInput")?.addEventListener("change", syncStyleGenerationReferenceState);
   picker.querySelector("[data-style-reference-modal]")?.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -4760,7 +5008,10 @@ function bindGenerationBackgroundControl(control, onChange = null) {
 }
 
 function bindStyleGenerationBackgroundControl() {
-  bindGenerationBackgroundControl(document.querySelector('[data-generation-background-control="style"]'));
+  bindGenerationBackgroundControl(
+    document.querySelector('[data-generation-background-control="style"]'),
+    scheduleStyleGenerationCostEstimate,
+  );
 }
 
 function selectedStyleReferencePaths() {
@@ -4787,14 +5038,202 @@ async function syncStyleSmartAspectRatio() {
   return ratio;
 }
 
+function renderGenerationReferenceOptimizationControl(scope, enabled = true) {
+  const inputId = scope === "style" ? "styleReferenceOptimizationInput" : "aiReferenceOptimizationInput";
+  const hintId = scope === "style" ? "styleReferenceOptimizationHint" : "aiReferenceOptimizationHint";
+  return `<label class="generation-reference-optimization"><input id="${inputId}" type="checkbox" ${enabled ? "checked" : ""}><span><strong>合并参考图以节省费用</strong><small id="${hintId}">当前无需合并</small></span></label>`;
+}
+
+function renderGenerationCostEstimateContainer(scope) {
+  const id = scope === "style" ? "styleGenerationCostEstimate" : "aiGenerationCostEstimate";
+  return `<div id="${id}" class="generation-cost-estimate" aria-live="polite"><span>正在计算预计价格…</span></div>`;
+}
+
+function styleReferenceOptimizationEnabled() {
+  return document.getElementById("styleReferenceOptimizationInput")?.checked
+    ?? state.aiCreation.styleReferenceOptimizationEnabled;
+}
+
+function aiReferenceOptimizationEnabled() {
+  return els.aiReferenceOptimizationInput?.checked
+    ?? state.aiCreation.referenceOptimizationEnabled;
+}
+
+function generationLocalFileKey(file, index) {
+  return `local:${index}:${file?.name || "image"}:${Number(file?.size || 0)}:${Number(file?.lastModified || 0)}`;
+}
+
+function styleGenerationReferenceKeys() {
+  return Array.from(new Set([
+    ...selectedStyleReferencePaths().map((path) => `path:${path}`),
+    ...Array.from(document.getElementById("styleReferenceInput")?.files || []).map(generationLocalFileKey),
+  ]));
+}
+
+function aiGenerationReferenceKeys() {
+  const keys = [
+    ...selectedAiReferenceRecords().map((record) => `path:${aiReferenceRecordPath(record)}`),
+    ...Array.from(els.aiReferenceImageInput?.files || []).map(generationLocalFileKey),
+    ...(state.aiCreation.styleGuidePreview?.references || []).map((reference) => (
+      `path:${reference.relative_path || reference.id || reference.remote_asset_id || ""}`
+    )),
+  ].filter((key) => key !== "path:");
+  return Array.from(new Set(keys));
+}
+
+function aiGenerationReferenceRoleCounts() {
+  const content = new Set([
+    ...selectedAiReferenceRecords().map((record) => `path:${aiReferenceRecordPath(record)}`),
+    ...Array.from(els.aiReferenceImageInput?.files || []).map(generationLocalFileKey),
+  ].filter((key) => key !== "path:"));
+  const style = new Set(
+    (state.aiCreation.styleGuidePreview?.references || [])
+      .map((reference) => reference.relative_path || reference.id || reference.remote_asset_id || "")
+      .filter(Boolean),
+  );
+  return { content: content.size, style: style.size };
+}
+
+async function requestGenerationCostEstimate({ model, params, originalCount, optimizationEnabled, taskCount, roleCounts = null }) {
+  const effectiveCount = roleCounts
+    ? effectiveReferenceCountByRole(roleCounts, optimizationEnabled)
+    : effectiveReferenceCount(originalCount, optimizationEnabled);
+  const data = await apiJson("/api/v1/generation/estimate", {
+    method: "POST",
+    body: {
+      model,
+      params,
+      original_reference_count: originalCount,
+      effective_reference_count: effectiveCount,
+      task_count: taskCount,
+    },
+  });
+  return data.estimate;
+}
+
+function paintGenerationCostEstimate(host, estimate, options = {}) {
+  if (!host) return;
+  const formatted = formatGenerationCostEstimate(estimate, options);
+  host.classList.remove("is-error", "is-unavailable", "is-approximate");
+  if (formatted.tone === "unavailable") host.classList.add("is-unavailable");
+  if (formatted.tone === "approximate") host.classList.add("is-approximate");
+  const formula = document.createElement("span");
+  formula.textContent = formatted.formula;
+  host.replaceChildren(formula);
+  if (formatted.detail) {
+    const detail = document.createElement("small");
+    detail.textContent = formatted.detail;
+    host.append(detail);
+  }
+}
+
+function setGenerationCostEstimateLoading(host) {
+  if (!host) return;
+  host.classList.remove("is-error", "is-unavailable", "is-approximate");
+  host.textContent = "正在计算预计价格…";
+}
+
+function paintGenerationCostEstimateError(host, error) {
+  if (!host) return;
+  host.classList.remove("is-unavailable", "is-approximate");
+  host.classList.add("is-error");
+  host.textContent = `价格预估失败：${String(error?.message || "请稍后重试")}`;
+}
+
+function scheduleStyleGenerationCostEstimate() {
+  if (state.aiCreation.styleCostEstimateTimer) clearTimeout(state.aiCreation.styleCostEstimateTimer);
+  const requestId = ++state.aiCreation.styleCostEstimateRequestId;
+  const host = document.getElementById("styleGenerationCostEstimate");
+  if (!host) return;
+  const model = styleGenerationModel(document.getElementById("styleModelSelect")?.value);
+  if (!model?.id) {
+    state.aiCreation.styleCostEstimate = null;
+    paintGenerationCostEstimate(host, { total: null, unavailable_reason: "请先选择可用模型" });
+    return;
+  }
+  setGenerationCostEstimateLoading(host);
+  state.aiCreation.styleCostEstimateTimer = setTimeout(async () => {
+    state.aiCreation.styleCostEstimateTimer = null;
+    try {
+      const originalCount = styleGenerationReferenceKeys().length;
+      const optimizationEnabled = styleReferenceOptimizationEnabled();
+      const estimate = await requestGenerationCostEstimate({
+        model: model.id,
+        params: {
+          aspect_ratio: resolvedAspectRatio(document.getElementById("styleRatioSelect")),
+          resolution: document.getElementById("styleResolutionSelect")?.value || "1K",
+          background: document.getElementById("styleBackgroundSelect")?.value || "transparent",
+        },
+        originalCount,
+        optimizationEnabled,
+        taskCount: 1,
+      });
+      if (requestId !== state.aiCreation.styleCostEstimateRequestId) return;
+      state.aiCreation.styleCostEstimate = estimate;
+      paintGenerationCostEstimate(document.getElementById("styleGenerationCostEstimate"), estimate);
+    } catch (error) {
+      if (requestId !== state.aiCreation.styleCostEstimateRequestId) return;
+      state.aiCreation.styleCostEstimate = null;
+      paintGenerationCostEstimateError(document.getElementById("styleGenerationCostEstimate"), error);
+    }
+  }, 160);
+}
+
+function scheduleAiGenerationCostEstimate() {
+  if (state.aiCreation.costEstimateTimer) clearTimeout(state.aiCreation.costEstimateTimer);
+  const requestId = ++state.aiCreation.costEstimateRequestId;
+  const host = els.aiGenerationCostEstimate;
+  if (!host) return;
+  const model = selectedGenerationModel();
+  if (!model?.id) {
+    state.aiCreation.costEstimate = null;
+    paintGenerationCostEstimate(host, { total: null, unavailable_reason: "请先选择可用模型" });
+    return;
+  }
+  setGenerationCostEstimateLoading(host);
+  state.aiCreation.costEstimateTimer = setTimeout(async () => {
+    state.aiCreation.costEstimateTimer = null;
+    try {
+      const originalCount = aiGenerationReferenceKeys().length;
+      const optimizationEnabled = aiReferenceOptimizationEnabled();
+      const roleCounts = aiGenerationReferenceRoleCounts();
+      const estimate = await requestGenerationCostEstimate({
+        model: model.id,
+        params: {
+          aspect_ratio: resolvedAspectRatio(els.aiAspectRatioSelect),
+          resolution: els.aiResolutionSelect?.value || "1K",
+          background: els.aiBackgroundSelect?.value || "transparent",
+        },
+        originalCount,
+        optimizationEnabled,
+        roleCounts,
+        taskCount: Math.max(1, Math.min(8, Number(els.aiCountSelect?.value || 1))),
+      });
+      if (requestId !== state.aiCreation.costEstimateRequestId) return;
+      state.aiCreation.costEstimate = estimate;
+      const referenceLabel = roleCounts.content > 0 && roleCounts.style > 0
+        ? "内容参考 + 风格模板"
+        : roleCounts.style > 0 ? "风格模板" : "内容参考";
+      paintGenerationCostEstimate(els.aiGenerationCostEstimate, estimate, { referenceLabel });
+    } catch (error) {
+      if (requestId !== state.aiCreation.costEstimateRequestId) return;
+      state.aiCreation.costEstimate = null;
+      paintGenerationCostEstimateError(els.aiGenerationCostEstimate, error);
+    }
+  }, 160);
+}
+
 function renderStyleGenerationPanel(style) {
   const model = styleGenerationModel();
   const seedRecord = state.aiCreation.history.find((item) => item.id === state.projectAssets.styleGenerationSeedRecordId);
   const ratios = styleModelCapabilityValues(model, "supported_aspect_ratios", ["1:1"]);
   const resolutions = styleModelCapabilityValues(model, "supported_resolutions", ["1K"]);
   const preferredBackground = normalizeStyleGenerationBackground(seedRecord?.params?.background || activeProject()?.default_background);
+  const optimizationEnabled = seedRecord?.params?.optimize_reference_images
+    ?? state.aiCreation.styleReferenceOptimizationEnabled;
   return `
     ${renderStyleGenerationReferencePicker(style)}
+    ${renderGenerationReferenceOptimizationControl("style", optimizationEnabled)}
     <section class="style-generation-section style-generation-prompt-section">
       <strong>提示词</strong>
       <label class="ai-field style-generation-field-unlabeled"><textarea id="stylePromptEditor" rows="6" aria-label="提示词" placeholder="描述希望继续探索的视觉方向">${escapeHtml(seedRecord?.prompt || style.description || "")}</textarea></label>
@@ -4809,7 +5248,7 @@ function renderStyleGenerationPanel(style) {
       </div>
     </section>
     <details class="ai-advanced-settings"><summary>高级设置</summary><label class="ai-field"><span>负面提示</span><textarea id="styleNegativePromptInput" rows="3" ${model?.supports_negative_prompt === false ? "disabled" : ""}></textarea></label></details>
-    <div class="asset-detail-actions style-generation-actions"><button class="primary-button" type="button" data-project-action="style-generate" data-id="${escapeHtml(style.id)}" ${model ? "" : "disabled"}>提交生成</button><button class="ghost-button" type="button" data-project-action="style-close-inspector">取消</button></div>`;
+    <div class="asset-detail-actions style-generation-actions"><button class="primary-button" type="button" data-project-action="style-generate" data-id="${escapeHtml(style.id)}" ${model ? "" : "disabled"}>提交生成</button>${renderGenerationCostEstimateContainer("style")}</div>`;
 }
 
 function syncStyleGenerationCapabilityControls() {
@@ -4875,7 +5314,7 @@ function renderStyleDirectionDetail(style) {
     <label class="ai-field"><span>参考图</span><input id="styleReferenceInput" type="file" accept="image/png,image/jpeg,image/webp" multiple></label>
     <dl class="asset-detail-meta"><div><dt>指导包</dt><dd>${escapeHtml(guideStatusLabel(guide, { isDefault: Boolean(guide?.is_default) }))}</dd></div><div><dt>创建时间</dt><dd>${escapeHtml(aiRecordDate({ created_at: style.created_at }))}</dd></div><div><dt>更新时间</dt><dd>${escapeHtml(aiRecordDate({ created_at: style.updated_at }))}</dd></div></dl>
     <div class="asset-detail-actions"><button class="primary-button" type="button" data-project-action="style-save" data-id="${escapeHtml(style.id)}">保存方向</button><button class="ghost-button" type="button" data-project-action="style-open-generate">生成图片</button></div>
-    <div class="asset-detail-actions">${guide ? `${styleGuideVisualActionMarkup(guide.id)}${guide.confirmed_version_id && !guide.is_default ? `<button class="ghost-button" type="button" data-project-action="style-guide-set-default" data-id="${escapeHtml(guide.id)}">设为默认</button>` : ""}` : `<button class="secondary-button" type="button" data-project-action="style-guide-create" data-id="${escapeHtml(style.id)}">生成视觉指导图</button>`}</div>
+    <div class="asset-detail-actions">${guide ? `${styleGuideVisualActionMarkup(guide.id)}${guide.confirmed_version_id && !guide.is_default ? `<button class="ghost-button" type="button" data-project-action="style-guide-set-default" data-id="${escapeHtml(guide.id)}">设为默认</button>` : ""}` : `<button class="secondary-button" type="button" data-project-action="style-guide-create" data-id="${escapeHtml(style.id)}">生成风格模板</button>`}</div>
     <div class="asset-detail-actions"><button class="ghost-button" type="button" data-project-action="style-status" data-status="archived" data-id="${escapeHtml(style.id)}">归档方向</button><button class="ghost-button danger" type="button" data-project-action="style-delete" data-id="${escapeHtml(style.id)}">移入回收站</button></div>`;
 }
 
@@ -6002,6 +6441,13 @@ function selectedProductionCanvasRecords() {
 }
 
 async function handleProductionCanvasQuickAction(event) {
+  const productionAction = event.target.closest("[data-ai-production-action]");
+  if (productionAction) {
+    if (productionAction.disabled) return;
+    if (productionAction.dataset.aiProductionAction === "generate") openAiProductionInspector("generation");
+    else if (productionAction.dataset.aiProductionAction === "reference") openAiProductionReferencePicker();
+    return;
+  }
   const button = event.target.closest("[data-production-canvas-action]");
   if (!button) return;
   const action = button.dataset.productionCanvasAction;
@@ -6071,6 +6517,10 @@ function handleProjectAssetModuleChange(event) {
     syncStyleGenerationCapabilityControls();
     return;
   }
+  if (event.target.id === "styleRatioSelect" || event.target.id === "styleResolutionSelect") {
+    scheduleStyleGenerationCostEstimate();
+    return;
+  }
   handleProjectAssetModuleInput(event);
 }
 
@@ -6103,7 +6553,13 @@ async function generateStyleImage(style, seedRecord = null) {
   const selectedReferencePaths = seedRecord ? (seedRecord.params?.reference_images || []) : selectedStyleReferencePaths();
   const referenceLimit = styleModelReferenceLimit(styleGenerationModel(model));
   const files = Array.from(document.getElementById("styleReferenceInput")?.files || []);
-  if (selectedReferencePaths.length + files.length > referenceLimit) throw new Error(`当前模型最多支持 ${referenceLimit} 张参考图`);
+  const optimizationEnabled = seedRecord?.params?.optimize_reference_images
+    ?? styleReferenceOptimizationEnabled();
+  const initialReferenceCount = new Set([
+    ...selectedReferencePaths.map((path) => `path:${path}`),
+    ...files.map(generationLocalFileKey),
+  ]).size;
+  if (effectiveReferenceCount(initialReferenceCount, optimizationEnabled) > referenceLimit) throw new Error(`当前模型最多支持 ${referenceLimit} 张实际参考输入`);
   let uploadedReferencePaths = [];
   if (files.length) {
     const references = await uploadProjectReferenceImages(activeProjectId(), files, `style-reference-${style.id}`);
@@ -6111,7 +6567,8 @@ async function generateStyleImage(style, seedRecord = null) {
     style = await patchStyle(style.id, { reference_images: [...(style.reference_images || []), ...references].slice(-20) });
   }
   const referenceImages = Array.from(new Set([...selectedReferencePaths, ...uploadedReferencePaths].filter(Boolean)));
-  if (referenceImages.length > referenceLimit) throw new Error(`当前模型最多支持 ${referenceLimit} 张参考图，本次共选择 ${referenceImages.length} 张`);
+  const effectiveCount = effectiveReferenceCount(referenceImages.length, optimizationEnabled);
+  if (effectiveCount > referenceLimit) throw new Error(`当前模型最多支持 ${referenceLimit} 张实际参考输入，本次优化后为 ${effectiveCount} 张`);
   const count = 1;
   if (!seedRecord) await syncStyleSmartAspectRatio();
   const params = {
@@ -6121,6 +6578,8 @@ async function generateStyleImage(style, seedRecord = null) {
     background: normalizeStyleGenerationBackground(seedRecord?.params?.background || document.getElementById("styleBackgroundSelect")?.value),
     negative_prompt: document.getElementById("styleNegativePromptInput")?.value.trim() || seedRecord?.params?.negative_prompt || "",
     reference_images: referenceImages,
+    optimize_reference_images: seedRecord?.params?.optimize_reference_images
+      ?? styleReferenceOptimizationEnabled(),
   };
   const records = [];
   for (let index = 0; index < count; index += 1) {
@@ -6261,6 +6720,11 @@ async function runProjectAssetAction(action, target) {
       if (state.projectAssets.styleGuideCollapsedVersions.has(id)) state.projectAssets.styleGuideCollapsedVersions.delete(id);
       else state.projectAssets.styleGuideCollapsedVersions.add(id);
       rerenderStyleModulePreservingScroll();
+    } else if (action === "style-guide-version-backfill") {
+      const guide = styleGuideForDirection(selectedStyleDirection());
+      const version = state.projectAssets.styleGuideVersions.find((item) => item.id === id);
+      if (!guide || !version) throw new Error("未找到需要补生成的风格模板版本");
+      await openStyleGuideVisualWizard(guide.id, { backfillVersion: version });
     } else if (action === "style-guide-version-preview") {
       const version = state.projectAssets.styleGuideVersions.find((item) => item.id === target.dataset.versionId);
       const gallery = styleGuideVersionPreviewItems(version).filter((item) => item.url);
@@ -9688,6 +10152,10 @@ function bindEvents() {
       cancelImageNamingFormatBrush();
       return;
     }
+    if (!els.agentAccessDialog?.hidden) {
+      closeAgentAccessDialog();
+      return;
+    }
     if (!els.localProfileDialog?.hidden) {
       closeLocalProfileDialog();
       return;
@@ -9722,10 +10190,13 @@ function bindEvents() {
   els.imageExportToResourceButton?.addEventListener("click", () => openResourceExportProjectDialog("matte"));
   els.imageStartSplitButton?.addEventListener("click", startImageSplitFlow);
   els.localProfileButton?.addEventListener("click", openLocalProfileDialog);
+  els.agentAccessButton?.addEventListener("click", openAgentAccessDialog);
   document.querySelectorAll("[data-open-profile]").forEach((button) => {
     button.addEventListener("click", openLocalProfileDialog);
   });
   els.localProfileCloseButton?.addEventListener("click", closeLocalProfileDialog);
+  els.agentAccessCloseButton?.addEventListener("click", closeAgentAccessDialog);
+  els.agentAccessCopyButton?.addEventListener("click", () => void copyAgentAccessPrompt());
   els.localProfileModelButton?.addEventListener("click", openModelManagerFromLocalProfile);
   els.localProfileSaveButton?.addEventListener("click", () => void saveLocalProfile());
   els.localProfileTestButton?.addEventListener("click", () => void testGenerationProviderConnection());
@@ -9749,6 +10220,10 @@ function bindEvents() {
     renderGenerationCapabilityControls();
     scheduleAiStyleGuidePreview();
   });
+  els.aiAspectRatioSelect?.addEventListener("change", scheduleAiGenerationCostEstimate);
+  els.aiResolutionSelect?.addEventListener("change", scheduleAiGenerationCostEstimate);
+  els.aiCountSelect?.addEventListener("change", scheduleAiGenerationCostEstimate);
+  els.aiReferenceOptimizationInput?.addEventListener("change", syncAiGenerationReferenceState);
   els.aiReferenceImageInput?.addEventListener("change", () => {
     syncAiGenerationReferenceState();
   });
@@ -20733,6 +21208,165 @@ function syncManualColorLabel(scope = activeMatteScope()) {
   controls.manualKeyLabel.textContent = (controls.manualKeyInput.value || "#00ff00").toUpperCase();
 }
 
+let agentAccessManifest = null;
+let agentAccessManifestLoading = false;
+
+function agentAccessOrigin() {
+  return String(window.location.origin || "http://127.0.0.1:8895").replace(/\/+$/, "");
+}
+
+function buildAgentAccessPrompt(manifest = agentAccessManifest || {}) {
+  const origin = agentAccessOrigin();
+  const projectId = activeProjectId() || "YOUR_PROJECT_ID";
+  const protocolVersion = String(manifest.protocol_version || "1.0");
+  return `你现在是“灵帧工坊”的素材生产 Agent。请严格通过下面的 Agent API 工作，不要只给自然语言建议，也不要绕过状态机直接操作项目文件。
+
+【接入信息】
+- 服务地址：${origin}
+- Manifest：${origin}/api/v1/agent/manifest
+- 当前项目 ID：${projectId}
+- 协议版本：${protocolVersion}
+- 素材需求：【在这里填写本次需求】
+
+【开始前必须做】
+1. 先 GET ${origin}/api/v1/agent/manifest，读取实际动作类型、状态、输入输出契约和安全限制；若与本提示词有差异，以 Manifest 为准。
+2. 明确声明你的能力：
+   - native_image_generation：你是否能直接生成图片。
+   - image_input：你是否能读取图片并做质量检查。
+3. 为本次运行生成稳定的 Idempotency-Key。所有创建运行、动作回传、图片回传、处理和入库请求都使用稳定幂等键，重试时不得换键。
+
+【创建运行】
+POST ${origin}/api/v1/projects/${projectId}/agent-runs
+Content-Type: application/json
+Idempotency-Key: <稳定幂等键>
+
+请求体示例：
+{
+  "request": "【在这里填写本次需求】",
+  "capabilities": {
+    "native_image_generation": true,
+    "image_input": true
+  },
+  "execution_policy": {
+    "image_generator": "auto",
+    "paid_generation": {
+      "mode": "auto_under_budget",
+      "max_total": 10,
+      "currency": "CNY"
+    }
+  }
+}
+
+如果你没有原生生图能力，把 native_image_generation 设为 false。不要虚报能力。
+
+【执行循环】
+1. 创建运行后，持续 GET ${origin}/api/v1/projects/${projectId}/agent-runs/{runId}。
+2. 读取返回的 status 和 next_actions，只执行 next_actions 中当前可执行的动作，不自行跳步。
+3. executor=agent 的结构化动作完成后，POST：
+   ${origin}/api/v1/projects/${projectId}/agent-runs/{runId}/actions/{actionId}/result
+4. image.generate 的执行方式由动作契约决定：
+   - agent_native：你自己按模块规范生成图片，再 POST 到：
+     ${origin}/api/v1/projects/${projectId}/agent-runs/{runId}/actions/{actionId}/artifacts
+     只允许 PNG、JPEG、WebP data URL，单文件最大 20 MB；不得提交本机绝对路径。
+   - server_mcp：由服务端负责报价、预算门禁、提交和轮询。需要批准时停止并向用户说明费用，得到批准后调用运行批准接口；不得重复提交另一个生成任务。
+5. executor=server 的风格创建、风格确认、资产创建、抠图、拆分、入库和流程保存由服务端执行。你只需继续读取运行状态和 next_actions。
+6. quality.review 必须按动作中的验收条件检查输出；发现问题时返回具体问题清单，按动作重试，不新建平行运行。
+7. 运行取消或中断后必须恢复原 runId，不得静默重新创建运行。
+8. 最终确认运行达到 succeeded，并汇报风格、生成记录、抠图/拆分结果、入库资产和保存的流程配方。
+
+【硬性约束】
+- 不猜测接口字段，不伪造成功状态，不跳过风格确认、质量检查或费用批准。
+- 不把客户端绝对路径传给服务端，不绕过项目 ID 写文件。
+- 两种生图路径都必须保留生成历史、文件哈希、资产节点和来源链。
+- 如果 API 返回错误，先读取错误和当前运行，再使用同一幂等键重试对应动作。
+
+现在先读取 Manifest，验证项目 ID，然后根据“素材需求”创建并执行运行。`;
+}
+
+function renderAgentAccessPrompt() {
+  const projectId = activeProjectId() || "YOUR_PROJECT_ID";
+  const manifestUrl = `${agentAccessOrigin()}/api/v1/agent/manifest`;
+  els.agentAccessProjectId.textContent = projectId;
+  els.agentAccessManifestLink.href = manifestUrl;
+  els.agentAccessPrompt.value = buildAgentAccessPrompt();
+  els.agentAccessCopyStatus.className = "agent-access-copy-status";
+  els.agentAccessCopyStatus.textContent = activeProjectId()
+    ? "提示词已带入当前服务地址和项目 ID。"
+    : "尚未进入项目，提示词使用 YOUR_PROJECT_ID 占位符。";
+}
+
+function applyAgentAccessManifest(manifest) {
+  agentAccessManifest = manifest && typeof manifest === "object" ? manifest : {};
+  const executors = agentAccessManifest.image_executors || {};
+  const strip = els.agentAccessManifestStatus.closest(".agent-access-status-strip");
+  strip?.classList.remove("error");
+  strip?.classList.add("ready");
+  els.agentAccessManifestStatus.textContent = "协议可用";
+  els.agentAccessProtocolVersion.textContent = String(agentAccessManifest.protocol_version || "-");
+  els.agentAccessNativeDescription.textContent = String(executors.agent_native || "AI 按动作契约生成图片，并通过受控图片接口回传。");
+  els.agentAccessMcpDescription.textContent = String(executors.server_mcp || "工具负责报价、预算门禁、提交和轮询生成任务。");
+  renderAgentAccessPrompt();
+}
+
+async function loadAgentAccessManifest() {
+  if (agentAccessManifestLoading) return;
+  agentAccessManifestLoading = true;
+  const strip = els.agentAccessManifestStatus.closest(".agent-access-status-strip");
+  strip?.classList.remove("ready", "error");
+  els.agentAccessManifestStatus.textContent = "正在读取协议";
+  try {
+    const data = await apiJson(`/api/v1/agent/manifest?ts=${Date.now()}`);
+    applyAgentAccessManifest(data.manifest || data.result || data);
+  } catch (error) {
+    strip?.classList.remove("ready");
+    strip?.classList.add("error");
+    els.agentAccessManifestStatus.textContent = "协议读取失败";
+    els.agentAccessProtocolVersion.textContent = "-";
+    renderAgentAccessPrompt();
+    els.agentAccessCopyStatus.className = "agent-access-copy-status error";
+    els.agentAccessCopyStatus.textContent = `当前使用内置规范；Manifest 读取失败：${error.message}`;
+  } finally {
+    agentAccessManifestLoading = false;
+  }
+}
+
+function openAgentAccessDialog() {
+  renderAgentAccessPrompt();
+  if (agentAccessManifest) applyAgentAccessManifest(agentAccessManifest);
+  els.agentAccessDialog.hidden = false;
+  document.body.classList.add("modal-open");
+  window.setTimeout(() => els.agentAccessCloseButton.focus(), 0);
+  void loadAgentAccessManifest();
+}
+
+function closeAgentAccessDialog() {
+  els.agentAccessDialog.hidden = true;
+  document.body.classList.remove("modal-open");
+  els.agentAccessButton?.focus();
+}
+
+async function copyAgentAccessPrompt() {
+  const prompt = els.agentAccessPrompt.value;
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(prompt);
+    } else {
+      els.agentAccessPrompt.focus();
+      els.agentAccessPrompt.select();
+      if (!document.execCommand("copy")) throw new Error("浏览器未提供剪贴板权限");
+      els.agentAccessPrompt.setSelectionRange(0, 0);
+    }
+    els.agentAccessCopyStatus.className = "agent-access-copy-status success";
+    els.agentAccessCopyStatus.textContent = "提示词已复制，可以直接发送给 AI。";
+    setStatus("Agent 执行提示词已复制。", "success");
+  } catch (error) {
+    els.agentAccessPrompt.focus();
+    els.agentAccessPrompt.select();
+    els.agentAccessCopyStatus.className = "agent-access-copy-status error";
+    els.agentAccessCopyStatus.textContent = `自动复制失败，请按 Ctrl+C：${error.message}`;
+  }
+}
+
 function profileInitial(name = state.localProfile?.name) {
   return Array.from(String(name || "游客").trim() || "游客")[0] || "游";
 }
@@ -21187,6 +21821,21 @@ function aiStyleGuideName(guide) {
   return direction?.name || guide?.title || "未命名指导包";
 }
 
+function aiStyleGuideReferenceTrace(reference) {
+  const variant = reference?.template_variant === "compact"
+    ? "简略版"
+    : reference?.template_variant === "detailed" ? "详细版" : "";
+  const module = STYLE_GUIDE_MODULES.find((item) => item.id === reference?.template_module_type)?.label
+    || (reference?.template_module_type === "core" ? "全局视觉基因" : reference?.template_module_type || "");
+  const responsibility = reference?.reference_role === "style" ? "风格职责" : reference?.reference_role || "";
+  return [variant, module, responsibility].filter(Boolean).join(" · ");
+}
+
+function aiStyleGuideReferenceTitle(reference) {
+  const trace = aiStyleGuideReferenceTrace(reference);
+  return ["风格模板", trace || reference?.name || ""].filter(Boolean).join(" · ");
+}
+
 function aiStyleGuideWarningMarkup(warning) {
   const term = warning?.details?.term || "";
   const conflict = warning?.code === "prompt_conflict" && term;
@@ -21224,7 +21873,8 @@ function renderAiStyleGuideControls() {
     ? references.map((reference) => {
         const checked = selectedReferenceIds === null || selectedReferenceIds.includes(reference.id);
         const roles = (reference.roles || []).join("、") || "通用风格";
-        return `<label class="ai-style-guide-reference"><input type="checkbox" data-ai-guide-reference="${escapeHtml(reference.id)}" ${checked ? "checked" : ""}><span><strong>${escapeHtml(reference.name || reference.id || "参考图")}</strong><small>${escapeHtml(roles)}</small></span></label>`;
+        const trace = aiStyleGuideReferenceTrace(reference);
+        return `<label class="ai-style-guide-reference"><input type="checkbox" data-ai-guide-reference="${escapeHtml(reference.id)}" ${checked ? "checked" : ""}><span><strong>${escapeHtml(reference.name || reference.id || "参考图")}</strong>${trace ? `<small>${escapeHtml(trace)}</small>` : ""}<small>${escapeHtml(roles)}</small></span></label>`;
       }).join("")
     : '<span class="ai-style-guide-empty">当前编译未使用指导包参考图</span>';
   const warnings = preview?.warnings || [];
@@ -21258,7 +21908,9 @@ function scheduleAiStyleGuidePreview() {
     state.aiCreation.styleGuidePreviewTimer = null;
     state.aiCreation.styleGuidePreview = null;
     renderAiStyleGuideControls();
+    syncAiGenerationReferenceState();
     updateAiGenerateAvailability();
+    scheduleAiGenerationCostEstimate();
     return;
   }
   const requestId = ++state.aiCreation.styleGuidePreviewRequestId;
@@ -21293,7 +21945,9 @@ function scheduleAiStyleGuidePreview() {
       };
     }
     renderAiStyleGuideControls();
+    syncAiGenerationReferenceState();
     updateAiGenerateAvailability();
+    scheduleAiGenerationCostEstimate();
   }, 180);
   updateAiGenerateAvailability();
 }
@@ -21372,14 +22026,19 @@ function renderAiAssetContext() {
       ? `${pathLabel} · 生成结果`
       : `${selected?.name || "当前节点"}下的全部结果`;
   }
-  if (els.aiOpenGeneratePanelButton) {
-    els.aiOpenGeneratePanelButton.disabled = !isGenerationTarget;
-    els.aiOpenGeneratePanelButton.title = isGenerationTarget ? "生成图片" : "请先选择具体资产";
+  if (els.aiProductionCanvasTitle) {
+    els.aiProductionCanvasTitle.textContent = isGenerationTarget
+      ? `${pathLabel} · 资产画布`
+      : `${selected?.name || "当前节点"}下的资产画布`;
   }
-  if (els.aiAddReferenceButton) {
-    els.aiAddReferenceButton.disabled = !isGenerationTarget;
-    els.aiAddReferenceButton.title = isGenerationTarget ? "添加参考图" : "请先选择具体资产";
+  if (els.aiProductionCanvasSummary) {
+    els.aiProductionCanvasSummary.textContent = scopedRecords.length ? `${scopedRecords.length} 个结果` : "暂无结果";
   }
+  els.aiCreationModule?.querySelectorAll("[data-ai-production-action]").forEach((button) => {
+    const isReference = button.dataset.aiProductionAction === "reference";
+    button.disabled = !isGenerationTarget;
+    button.title = isGenerationTarget ? (isReference ? "添加参考图" : "生成图片") : "请先选择具体资产";
+  });
   if (els.aiCurrentAssetInput) {
     els.aiCurrentAssetInput.textContent = isGenerationTarget ? pathLabel : "请选择具体资产";
     els.aiCurrentAssetInput.title = isGenerationTarget ? pathLabel : "";
@@ -21709,6 +22368,10 @@ function openAiProductionInspector(type, record = null) {
       if (els.aiReferenceImageInput) els.aiReferenceImageInput.value = "";
       renderGenerationModelOptions();
       const params = record.params || {};
+      state.aiCreation.referenceOptimizationEnabled = params.optimize_reference_images ?? true;
+      if (els.aiReferenceOptimizationInput) {
+        els.aiReferenceOptimizationInput.checked = state.aiCreation.referenceOptimizationEnabled;
+      }
       if (params.aspect_ratio && Array.from(els.aiAspectRatioSelect?.options || []).some((option) => option.value === params.aspect_ratio)) els.aiAspectRatioSelect.value = params.aspect_ratio;
       if (params.resolution && Array.from(els.aiResolutionSelect?.options || []).some((option) => option.value === params.resolution)) els.aiResolutionSelect.value = params.resolution;
       if (els.aiBackgroundSelect) els.aiBackgroundSelect.value = params.background || record.background || els.aiBackgroundSelect.value;
@@ -21772,6 +22435,7 @@ async function loadGenerationModels() {
     }
     renderGenerationModelOptions();
     scheduleAiStyleGuidePreview();
+    scheduleStyleGenerationCostEstimate();
   } catch (error) {
     state.aiCreation.models = [];
     renderGenerationModelOptions();
@@ -21862,7 +22526,10 @@ function renderAiGenerationReferencePicker() {
 function syncAiGenerationReferenceState() {
   const selectedRecords = selectedAiReferenceRecords();
   const localFiles = Array.from(els.aiReferenceImageInput?.files || []);
-  const selected = selectedRecords.length + localFiles.length;
+  const styleGuideReferences = state.aiCreation.styleGuidePreview?.references || [];
+  const selected = aiGenerationReferenceKeys().length;
+  const optimizationEnabled = aiReferenceOptimizationEnabled();
+  const effectiveCount = effectiveReferenceCount(selected, optimizationEnabled);
   const limit = aiModelReferenceLimit();
   if (els.aiReferenceCount) els.aiReferenceCount.textContent = `已选 ${selected} / ${limit}`;
   if (els.aiReferenceModalCount) els.aiReferenceModalCount.textContent = `已选 ${selected} / ${limit}`;
@@ -21883,18 +22550,41 @@ function syncAiGenerationReferenceState() {
     if (count) count.textContent = `${checked} / ${items.length}`;
   });
   if (els.aiReferenceSummary) {
-    const visible = selectedRecords.slice(0, 4).map((record) => `<span class="style-reference-summary-item" title="${escapeHtml(record.prompt || "生成结果")}"><img src="${escapeHtml(record.local_url)}" alt=""><button type="button" data-ai-reference-action="remove" data-ai-reference-id="${escapeHtml(record.id)}" title="移除 ${escapeHtml(record.prompt || "生成结果")}" aria-label="移除 ${escapeHtml(record.prompt || "生成结果")}">${workbenchIcon("close")}</button></span>`);
-    if (localFiles.length) visible.push(`<span class="style-reference-summary-item local" title="${escapeHtml(localFiles.map((file) => file.name).join("、"))}"><b>本地 +${localFiles.length}</b><button type="button" data-ai-reference-action="remove-local" title="移除本地图片" aria-label="移除本地图片">${workbenchIcon("close")}</button></span>`);
-    const hiddenCount = Math.max(0, selectedRecords.length - 4);
+    const entries = selectedRecords.map((record) => ({
+      count: 1,
+      markup: `<span class="style-reference-summary-item" title="${escapeHtml(record.prompt || "生成结果")}"><img src="${escapeHtml(record.local_url)}" alt=""><button type="button" data-ai-reference-action="remove" data-ai-reference-id="${escapeHtml(record.id)}" title="移除 ${escapeHtml(record.prompt || "生成结果")}" aria-label="移除 ${escapeHtml(record.prompt || "生成结果")}">${workbenchIcon("close")}</button></span>`,
+    }));
+    if (localFiles.length) {
+      entries.push({
+        count: localFiles.length,
+        markup: `<span class="style-reference-summary-item local" title="${escapeHtml(localFiles.map((file) => file.name).join("、"))}"><b>本地 +${localFiles.length}</b><button type="button" data-ai-reference-action="remove-local" title="移除本地图片" aria-label="移除本地图片">${workbenchIcon("close")}</button></span>`,
+      });
+    }
+    styleGuideReferences.forEach((reference) => {
+      const url = reference.local_url || styleReferenceUrl(reference);
+      const title = aiStyleGuideReferenceTitle(reference);
+      entries.push({
+        count: 1,
+        markup: url
+          ? `<button class="style-reference-summary-item guide" type="button" data-ai-reference-action="preview-guide" data-ai-guide-reference-id="${escapeHtml(reference.id || "")}" title="查看大图：${escapeHtml(title)}" aria-label="查看大图：${escapeHtml(title)}"><img src="${escapeHtml(url)}" alt=""><span class="style-reference-summary-source">风格</span></button>`
+          : `<span class="style-reference-summary-item guide unavailable" title="${escapeHtml(title)}"><b>风格</b><span class="style-reference-summary-source">风格</span></span>`,
+      });
+    });
+    const visible = entries.slice(0, 4).map((entry) => entry.markup);
+    const hiddenCount = entries.slice(4).reduce((total, entry) => total + entry.count, 0);
     if (hiddenCount) visible.push(`<span class="style-reference-summary-more">+${hiddenCount}</span>`);
     els.aiReferenceSummary.innerHTML = visible.join("") || '<span class="style-reference-summary-empty">尚未选择参考图</span>';
   }
   if (els.aiReferenceLimitHint) {
-    els.aiReferenceLimitHint.textContent = selected > limit ? `已超出当前模型上限，请减少 ${selected - limit} 张。` : "";
-    els.aiReferenceLimitHint.classList.toggle("error", selected > limit);
+    els.aiReferenceLimitHint.textContent = effectiveCount > limit ? `优化后仍超出当前模型上限，请减少 ${effectiveCount - limit} 张实际输入。` : "";
+    els.aiReferenceLimitHint.classList.toggle("error", effectiveCount > limit);
   }
+  if (els.aiReferenceOptimizationHint) {
+    els.aiReferenceOptimizationHint.textContent = generationOptimizationText(selected, effectiveCount, optimizationEnabled);
+  }
+  state.aiCreation.referenceOptimizationEnabled = optimizationEnabled;
   updateAiGenerateAvailability();
-  void syncAiSmartAspectRatio(localFiles);
+  void syncAiSmartAspectRatio(localFiles).then(scheduleAiGenerationCostEstimate);
 }
 
 function handleAiGenerationReferenceClick(event) {
@@ -21937,6 +22627,13 @@ function handleAiGenerationReferenceClick(event) {
   if (action === "preview") {
     const record = aiRecordById(target.dataset.aiReferenceId || "");
     if (record?.local_url) openImageLightbox(record.local_url, record.prompt || "生成结果");
+    return;
+  }
+  if (action === "preview-guide") {
+    const reference = (state.aiCreation.styleGuidePreview?.references || [])
+      .find((item) => item.id === target.dataset.aiGuideReferenceId);
+    const url = reference?.local_url || styleReferenceUrl(reference);
+    if (url) openImageLightbox(url, aiStyleGuideReferenceTitle(reference));
   }
 }
 
@@ -22025,13 +22722,14 @@ function renderGenerationCapabilityControls() {
   renderAiGenerationReferencePicker();
   void syncAiSmartAspectRatio();
   updateAiGenerateAvailability();
+  scheduleAiGenerationCostEstimate();
 }
 
 function renderAiGenerationBackgroundControl() {
   if (!els.aiBackgroundControl || !els.aiBackgroundSelect) return;
-  const current = generationBackgroundOption(ASSET_GENERATION_BACKGROUNDS, els.aiBackgroundSelect.value);
+  const current = styleGenerationBackgroundOption(els.aiBackgroundSelect.value);
   els.aiBackgroundSelect.value = current.value;
-  els.aiBackgroundControl.innerHTML = renderGenerationBackgroundControl(ASSET_GENERATION_BACKGROUNDS, current.value, {
+  els.aiBackgroundControl.innerHTML = renderGenerationBackgroundControl(STYLE_GENERATION_BACKGROUNDS, current.value, {
     scope: "asset",
     inputId: "aiBackgroundSelect",
     disabled: !selectedGenerationModel(),
@@ -22039,6 +22737,7 @@ function renderAiGenerationBackgroundControl() {
   });
   bindGenerationBackgroundControl(els.aiBackgroundControl.querySelector('[data-generation-background-control="asset"]'), () => {
     renderAiResultGrid();
+    scheduleAiGenerationCostEstimate();
   });
 }
 
@@ -22050,7 +22749,9 @@ function updateAiGenerateAvailability() {
     state.aiCreation.styleGuidePackageId
     && (state.aiCreation.styleGuidePreviewTimer || state.aiCreation.styleGuidePreview?.can_continue !== true),
   );
-  const referenceCount = selectedAiReferenceRecords().length + Array.from(els.aiReferenceImageInput?.files || []).length;
+  const effectiveCount = effectiveReferenceCountByRole(
+    aiGenerationReferenceRoleCounts(), aiReferenceOptimizationEnabled(),
+  );
   const hasGenerationTarget = isAiAssetGenerationTarget();
   els.aiGenerateButton.disabled = !hasGenerationTarget
     || !state.localProfile?.mcp?.validated
@@ -22058,7 +22759,7 @@ function updateAiGenerateAvailability() {
     || !els.aiPromptInput.value.trim()
     || state.aiCreation.loading
     || guideBlocked
-    || referenceCount > aiModelReferenceLimit();
+    || effectiveCount > aiModelReferenceLimit();
   els.aiGenerateButton.title = hasGenerationTarget ? "" : "请先在资产结构树中选择具体资产";
 }
 
@@ -22084,8 +22785,11 @@ async function submitAiImageGeneration(record = null) {
         const referenceFiles = Array.from(els.aiReferenceImageInput?.files || []);
         const selectedReferences = selectedAiReferenceRecords();
         const referenceLimit = aiModelReferenceLimit(state.aiCreation.models.find((item) => item.id === model));
-        if (selectedReferences.length + referenceFiles.length > referenceLimit) {
-          throw new Error(`当前模型最多支持 ${referenceLimit} 张参考图`);
+        const effectiveCount = effectiveReferenceCountByRole(
+          aiGenerationReferenceRoleCounts(), aiReferenceOptimizationEnabled(),
+        );
+        if (effectiveCount > referenceLimit) {
+          throw new Error(`当前模型最多支持 ${referenceLimit} 张实际参考输入`);
         }
         await syncAiSmartAspectRatio(referenceFiles);
         const references = await uploadProjectReferenceImages(projectId, referenceFiles, "generation-reference");
@@ -22098,6 +22802,7 @@ async function submitAiImageGeneration(record = null) {
             ...selectedReferences.map(aiReferenceRecordPath),
             ...references.map((item) => item.relative_path),
           ].filter(Boolean))),
+          optimize_reference_images: aiReferenceOptimizationEnabled(),
         };
       }
       const count = record ? 1 : Math.max(1, Math.min(8, Number(els.aiCountSelect?.value || 1)));
@@ -22128,6 +22833,9 @@ async function submitAiImageGeneration(record = null) {
         style_guide_overrides: record.style_guide_overrides,
         style_guide_warnings: record.style_guide_warnings,
         style_guide_budget: record.style_guide_budget,
+        style_guide_template_variant: record.style_guide_template_variant,
+        style_guide_template_module_type: record.style_guide_template_module_type,
+        style_guide_reference_roles: record.style_guide_reference_roles,
       } : null;
       for (let index = 0; index < count; index += 1) {
         const data = await apiJson("/api/v1/generation/tasks", {

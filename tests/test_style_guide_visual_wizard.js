@@ -12,7 +12,7 @@ test("wizard contains the main semantic dialog", () => assert.match(html, /id="s
 test("wizard contains three named steps", () => {
   assert.match(app, /选择参考图/);
   assert.match(app, /生成设置/);
-  assert.match(app, /生成指导图/);
+  assert.match(app, /生成模板/);
 });
 test("locked steps explain prerequisites", () => {
   assert.match(app, /data-visual-guide-step/);
@@ -65,6 +65,28 @@ test("wizard defaults to modular mode with professional modules", () => {
   assert.match(app, /mode:\s*"modular"/);
   assert.match(app, /PROFESSIONAL_MODULES/);
 });
+
+test("wizard defaults to compact template and allows both variants", () => {
+  assert.match(app, /requestedVariants:\s*\["compact"\]/);
+  assert.match(app, /data-visual-template-variant="\$\{variant\}"/);
+  assert.match(app, /\["compact", "简略版"/);
+  assert.match(app, /\["detailed", "详细版"/);
+  assert.match(app, /至少保留一种模板规格/);
+});
+
+test("variant controls lock while tabs previews and scoped cancel stay available", () => {
+  assert.match(app, /data-visual-template-variant/);
+  assert.match(app, /data-visual-variant-tab/);
+  assert.match(app, /data-visual-cancel-variant/);
+  assert.match(app, /preview-node/);
+  assert.match(app, /body: variant \? \{ variant \} : \{\}/);
+});
+
+test("dual selection renders variant estimates and an arithmetic total", () => {
+  for (const label of ["简略版预计", "详细版预计", "合计预计"]) assert.match(app, new RegExp(label));
+  assert.match(app, /visualGuideCostEstimateInputs/);
+  assert.match(app, /totals\.reduce/);
+});
 test("wizard defaults to compact mobile-game detail profile and exposes three profiles", () => {
   assert.match(app, /detailProfile:\s*"compact"/);
   assert.match(app, /data-visual-detail-profile/);
@@ -84,6 +106,18 @@ test("prompt viewer shows master module negative and reference sections", () => 
   for (const text of ["母提示词", "模块提示词", "负面约束", "参考图顺序"]) assert.match(app, new RegExp(text));
 });
 test("task estimate excludes local template", () => assert.match(app, /远端图片任务[\s\S]*本地模板/));
+test("generation settings show a shared live price estimate", () => {
+  assert.match(app, /id="styleGuideVisualCostEstimate"/);
+  assert.match(app, /scheduleStyleGuideVisualCostEstimate/);
+  assert.match(app, /requestGenerationCostEstimate/);
+  assert.match(app, /paintGenerationCostEstimate/);
+});
+test("visual guide quote guards against stale responses and does not block generation", () => {
+  assert.match(app, /styleGuideVisualCostEstimateRequestId/);
+  assert.match(app, /styleGuideVisualCostEstimateTimer/);
+  assert.match(app, /paintGenerationCostEstimateError/);
+  assert.match(app, /wizard\.moduleTypes\.length && wizard\.model/);
+});
 test("generation settings use a compact desktop grid and only fall back to one column on narrow screens", () => {
   assert.match(app, /style-guide-visual-settings-grid/);
   assert.match(css, /\.style-guide-visual-settings-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*0\.9fr\)\s+minmax\(0,\s*1\.1fr\)/s);

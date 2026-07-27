@@ -16,6 +16,7 @@ from style_guide_visual_prompts import (
     DETAIL_PROFILE_DEFAULT,
     MODULE_LABELS,
     normalize_detail_profile,
+    normalize_template_variants,
     prompt_bundle,
 )
 from style_guide_visual_renderer import render_visual_template
@@ -30,7 +31,7 @@ NODE_LABELS = {
     **MODULE_LABELS,
 }
 TERMINAL_RECORD_FAILURES = {"failed", "canceled", "download_failed"}
-ACTIVE_NODE_STATUSES = {"submitting", "queued", "running"}
+ACTIVE_NODE_STATUSES = {"submitting", "queued", "running", "cancel_requested"}
 TERMINAL_NODE_FAILURES = {"failed", "canceled"}
 SHARED_BUDGET_ERROR_MARKERS = (
     "预算不足",
@@ -138,12 +139,27 @@ class StyleGuideVisualService:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _node(node_id: str, order: int, *, depends_on=None, prompt="") -> dict:
+    def _node(
+        variant: str,
+        node_key: str,
+        order: int,
+        *,
+        depends_on=None,
+        prompt="",
+    ) -> dict:
+        node_id = f"{variant}:{node_key}"
         return {
             "id": node_id,
-            "kind": "local" if node_id == "template" else "image",
-            "module_type": "core" if node_id in {"anchor", "overall", "template"} else node_id,
-            "label": NODE_LABELS[node_id],
+            "node_key": node_key,
+            "variant": variant,
+            "kind": "local" if node_key == "template" else "image",
+            "module_type": "core"
+            if node_key in {"anchor", "overall", "template"}
+            else node_key,
+            "label": (
+                f"{'简略版' if variant == 'compact' else '详细版'} · "
+                f"{NODE_LABELS[node_key]}"
+            ),
             "order": order,
             "depends_on": list(depends_on or []),
             "status": "pending",
@@ -156,27 +172,58 @@ class StyleGuideVisualService:
             "palette": [],
         }
 
-    def _build_nodes(self, mode: str, modules: list[str], prompts: dict) -> list[dict]:
-        if mode == "overall":
-            overall = self._node("overall", 0, prompt=prompts["overall"])
-            return [overall, self._node("template", 1, depends_on=["overall"])]
-        nodes = [self._node("anchor", 0, prompt=prompts["anchor"])]
-        for module_type in modules:
-            nodes.append(
-                self._node(
-                    module_type,
-                    len(nodes),
-                    depends_on=["anchor"],
-                    prompt=prompts["modules"][module_type],
+    def _build_nodes(
+        self,
+        mode: str,
+        modules: list[str],
+        requested_variants: list[str],
+        prompt_bundles: dict,
+    ) -> list[dict]:
+        nodes = []
+        for variant in requested_variants:
+            prompts = prompt_bundles[variant]
+            if mode == "overall":
+                overall_id = f"{variant}:overall"
+                nodes.append(
+                    self._node(
+                        variant,
+                        "overall",
+                        len(nodes),
+                        prompt=prompts["overall"],
+                    )
                 )
-            )
-        nodes.append(
-            self._node(
-                "template",
-                len(nodes),
-                depends_on=[node["id"] for node in nodes],
-            )
-        )
+                remote_ids = [overall_id]
+            else:
+                anchor_id = f"{variant}:anchor"
+                nodes.append(
+                    self._node(
+                        variant,
+                        "anchor",
+                        len(nodes),
+                        prompt=prompts["anchor"],
+                    )
+                )
+                remote_ids = [anchor_id]
+                for module_type in modules:
+                    nodes.append(
+                        self._node(
+                            variant,
+                            module_type,
+                            len(nodes),
+                            depends_on=[anchor_id],
+                            prompt=prompts["modules"][module_type],
+                        )
+                    )
+                    remote_ids.append(f"{variant}:{module_type}")
+            if variant == "detailed":
+                nodes.append(
+                    self._node(
+                        variant,
+                        "template",
+                        len(nodes),
+                        depends_on=remote_ids,
+                    )
+                )
         return nodes
 
     def create_run_document(self, project_id: str, package_id: str, request: dict) -> dict:
@@ -198,24 +245,40 @@ class StyleGuideVisualService:
             references = copy.deepcopy(references)
             params = self._normalized_params(request.get("params") or {})
             detail_profile = self._detail_profile(request.get("detail_profile"))
-            prompts = prompt_bundle(
-                title=str(draft.get("title") or package.get("title") or ""),
-                description=str(draft.get("summary") or ""),
-                mode=mode,
-                module_types=modules,
-                detail_profile=detail_profile,
+            requested_variants = normalize_template_variants(
+                request.get("requested_variants")
             )
+            source_version_id = str(request.get("source_version_id") or "").strip()
+            if source_version_id:
+                source_version = self.guides.get_version(
+                    project_id, package_id, source_version_id
+                )
+                if str(source_version.get("package_id") or "") != package_id:
+                    raise ValueError("Backfill source version belongs to another package")
+            prompt_bundles = {
+                variant: prompt_bundle(
+                    title=str(draft.get("title") or package.get("title") or ""),
+                    description=str(draft.get("summary") or ""),
+                    mode=mode,
+                    module_types=modules,
+                    detail_profile=detail_profile,
+                    template_variant=variant,
+                )
+                for variant in requested_variants
+            }
             signature_payload = {
                 "mode": mode,
                 "module_types": modules,
                 "model": model,
                 "params": params,
                 "detail_profile": detail_profile,
+                "requested_variants": requested_variants,
                 "reference_sources": references,
+                "source_version_id": source_version_id,
             }
             now = utc_now()
             run = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "id": f"visualrun_{uuid.uuid4().hex}",
                 "project_id": project_id,
                 "package_id": package_id,
@@ -226,12 +289,20 @@ class StyleGuideVisualService:
                 "model": model,
                 "params": params,
                 "detail_profile": detail_profile,
+                "requested_variants": requested_variants,
+                "source_version_id": source_version_id,
                 "reference_sources": references,
-                "prompt_bundle": prompts,
+                "prompt_bundles": prompt_bundles,
+                "prompt_bundle": copy.deepcopy(
+                    prompt_bundles.get("detailed")
+                    or prompt_bundles[requested_variants[0]]
+                ),
                 "input_revision": int(draft.get("revision") or 0),
                 "input_signature": self._input_signature(signature_payload),
                 "invalid_reason": "",
-                "nodes": self._build_nodes(mode, modules, prompts),
+                "nodes": self._build_nodes(
+                    mode, modules, requested_variants, prompt_bundles
+                ),
                 "warnings": copy.deepcopy(request.get("warnings") or []),
                 "supersedes_run_id": str(request.get("supersedes_run_id") or ""),
                 "template_relative_path": "",
@@ -368,14 +439,17 @@ class StyleGuideVisualService:
     def _submit_node(self, project_id: str, run: dict, node: dict, generation_service) -> None:
         limit = self._reference_limit(generation_service, run["model"])
         references = list(run["reference_sources"])
-        if run["mode"] == "modular" and node["id"] != "anchor":
-            anchor = next(item for item in run["nodes"] if item["id"] == "anchor")
+        node_key = self._node_key(node)
+        variant = self._node_variant(node)
+        if run["mode"] == "modular" and node_key != "anchor":
+            anchor = self._node_by_variant_key(run, variant, "anchor")
             references = [
                 {
                     "relative_path": anchor["result_relative_path"],
                     "remote_asset_id": anchor["result_remote_asset_id"],
                     "source_record_id": anchor["record_id"],
                     "content_sha256": "",
+                    "reference_role": "style",
                 },
                 *references,
             ]
@@ -398,6 +472,8 @@ class StyleGuideVisualService:
                     "actor": run["actor"],
                     "style_guide_visual_run_id": run["id"],
                     "style_guide_visual_node_id": node["id"],
+                    "style_guide_template_variant": variant,
+                    "style_guide_visual_module_type": node["module_type"],
                 },
             )
             node["record_id"] = str(record.get("id") or "")
@@ -436,6 +512,10 @@ class StyleGuideVisualService:
             params = self._normalized_params(prepared.get("params") or {})
             detail_profile = self._detail_profile(prepared.get("detail_profile"))
             prepared["detail_profile"] = detail_profile
+            requested_variants = normalize_template_variants(
+                prepared.get("requested_variants")
+            )
+            prepared["requested_variants"] = requested_variants
             model = str(prepared.get("model") or "").strip()
             limit = self._reference_limit(generation_service, model)
             warnings = []
@@ -450,13 +530,17 @@ class StyleGuideVisualService:
                 )
             prepared["warnings"] = warnings
             draft = self.guides.get_draft(project_id, package_id)
-            prompts = prompt_bundle(
-                title=str(draft.get("title") or ""),
-                description=str(draft.get("summary") or ""),
-                mode=mode,
-                module_types=modules,
-                detail_profile=detail_profile,
-            )
+            prompt_bundles = {
+                variant: prompt_bundle(
+                    title=str(draft.get("title") or ""),
+                    description=str(draft.get("summary") or ""),
+                    mode=mode,
+                    module_types=modules,
+                    detail_profile=detail_profile,
+                    template_variant=variant,
+                )
+                for variant in requested_variants
+            }
             signature = self._input_signature(
                 {
                     "mode": mode,
@@ -464,25 +548,46 @@ class StyleGuideVisualService:
                     "model": model,
                     "params": params,
                     "detail_profile": detail_profile,
+                    "requested_variants": requested_variants,
                     "reference_sources": resolved,
                 }
             )
             if prepared.get("preview_only"):
-                prompts["reference_order"] = [copy.deepcopy(item) for item in resolved]
+                for prompts in prompt_bundles.values():
+                    prompts["reference_order"] = [
+                        copy.deepcopy(item) for item in resolved
+                    ]
+                preview_nodes = self._build_nodes(
+                    mode, modules, requested_variants, prompt_bundles
+                )
                 return {
                     "preview_only": True,
-                    "prompt_bundle": prompts,
+                    "prompt_bundles": prompt_bundles,
+                    "prompt_bundle": copy.deepcopy(
+                        prompt_bundles.get("detailed")
+                        or prompt_bundles[requested_variants[0]]
+                    ),
                     "detail_profile": detail_profile,
+                    "requested_variants": requested_variants,
                     "reference_sources": resolved,
                     "warnings": warnings,
                     "input_signature": signature,
-                    "task_count": 1 if mode == "overall" else 1 + len(modules),
+                    "task_count": sum(
+                        node["kind"] == "image" for node in preview_nodes
+                    ),
                 }
             run = self.create_run_document(project_id, package_id, prepared)
             run["input_signature"] = signature
-            first = run["nodes"][0]
-            self._submit_node(project_id, run, first, generation_service)
-            if first["status"] in TERMINAL_NODE_FAILURES:
+            roots = [
+                node
+                for node in run["nodes"]
+                if node["kind"] == "image" and not node["depends_on"]
+            ]
+            for node in roots:
+                self._submit_node(project_id, run, node, generation_service)
+            if roots and all(
+                node["status"] in TERMINAL_NODE_FAILURES for node in roots
+            ):
                 run["status"] = "failed"
             return self._write_run(project_id, package_id, run)
 
@@ -492,6 +597,93 @@ class StyleGuideVisualService:
         if node is None:
             raise ProjectError(f"Visual guide node does not exist: {node_id}")
         return node
+
+    @staticmethod
+    def _node_key(node: dict) -> str:
+        return str(node.get("node_key") or node.get("id") or "").split(":")[-1]
+
+    @staticmethod
+    def _node_variant(node: dict) -> str:
+        return str(node.get("variant") or "detailed")
+
+    @classmethod
+    def _node_by_variant_key(cls, run: dict, variant: str, node_key: str) -> dict:
+        node = next(
+            (
+                item
+                for item in run.get("nodes") or []
+                if cls._node_variant(item) == variant
+                and cls._node_key(item) == node_key
+            ),
+            None,
+        )
+        if node is None:
+            raise ProjectError(
+                f"Visual guide node does not exist: {variant}:{node_key}"
+            )
+        return node
+
+    @staticmethod
+    def _requested_variants(run: dict) -> list[str]:
+        return normalize_template_variants(
+            run.get("requested_variants")
+            if isinstance(run.get("requested_variants"), list)
+            else ["detailed"]
+        )
+
+    @classmethod
+    def _variant_states(cls, run: dict) -> dict:
+        states = {}
+        for variant in cls._requested_variants(run):
+            nodes = [
+                node
+                for node in run.get("nodes") or []
+                if cls._node_variant(node) == variant
+            ]
+            image_nodes = [node for node in nodes if node.get("kind") == "image"]
+            statuses = {str(node.get("status") or "pending") for node in nodes}
+            if any(status in ACTIVE_NODE_STATUSES for status in statuses):
+                status = "running"
+            elif nodes and all(node.get("status") == "succeeded" for node in nodes):
+                status = "succeeded"
+            elif any(node.get("status") == "succeeded" for node in image_nodes):
+                status = "partial"
+            elif statuses and statuses.issubset({"canceled"}):
+                status = "canceled"
+            else:
+                status = "failed"
+            states[variant] = {
+                "status": status,
+                "succeeded": sum(
+                    node.get("status") == "succeeded" for node in nodes
+                ),
+                "total": len(nodes),
+            }
+        return states
+
+    @classmethod
+    def _publishable(cls, run: dict) -> bool:
+        image_nodes = [
+            node for node in run.get("nodes") or [] if node.get("kind") == "image"
+        ]
+        if run.get("mode") == "overall":
+            return any(
+                cls._node_key(node) == "overall"
+                and node.get("status") == "succeeded"
+                for node in image_nodes
+            )
+        for module_type in run.get("module_types") or []:
+            if not any(
+                node.get("module_type") == module_type
+                and node.get("status") == "succeeded"
+                for node in image_nodes
+            ):
+                return False
+        return any(
+            cls._node_key(node) == "anchor"
+            and node.get("status") == "succeeded"
+            for node in image_nodes
+        )
 
     def _update_node_from_record(self, project_id: str, node: dict, record: dict) -> None:
         status = str(record.get("status") or node.get("status") or "running")
@@ -510,14 +702,24 @@ class StyleGuideVisualService:
         node["status"] = status if status in {"submitting", "queued", "running"} else "running"
 
     def _render_template(self, project_id: str, package_id: str, run: dict) -> None:
-        template = self._node_by_id(run, "template")
+        template = self._node_by_variant_key(run, "detailed", "template")
         sources = []
         for node in run["nodes"]:
-            if node["kind"] != "image":
+            if node["kind"] != "image" or self._node_variant(node) != "detailed":
                 continue
             path = self.projects.resolve_project_file(project_id, node["result_relative_path"])
-            sources.append({"module_type": node["module_type"] if node["id"] != "overall" else "overview", "path": path})
-        relative = f"production/style-guides/{package_id}/visual-runs/{run['id']}/guide-template.png"
+            sources.append(
+                {
+                    "module_type": node["module_type"]
+                    if self._node_key(node) != "overall"
+                    else "overview",
+                    "path": path,
+                }
+            )
+        relative = (
+            f"production/style-guides/{package_id}/visual-runs/"
+            f"{run['id']}/detailed-template.png"
+        )
         output = self.projects.resolve_project_file(project_id, relative)
         template["attempt"] = int(template.get("attempt") or 0) + 1
         try:
@@ -546,10 +748,19 @@ class StyleGuideVisualService:
     ) -> dict:
         with self._lock:
             run = self._read_run(project_id, package_id, run_id)
-            if run.get("status") in {"superseded", "applied", "finalize_failed", "canceled"}:
+            if run.get("status") in {
+                "superseded",
+                "applied",
+                "finalize_failed",
+                "canceled",
+            }:
                 return copy.deepcopy(run)
             for node in run["nodes"]:
-                if node["kind"] == "image" and node.get("record_id") and node["status"] in {"submitting", "queued", "running"}:
+                if (
+                    node["kind"] == "image"
+                    and node.get("record_id")
+                    and node["status"] in ACTIVE_NODE_STATUSES
+                ):
                     try:
                         self._update_node_from_record(
                             project_id, node, generation_service.refresh_task(node["record_id"])
@@ -557,46 +768,113 @@ class StyleGuideVisualService:
                     except Exception as exc:
                         node["status"] = "failed"
                         node["error"] = str(exc)[:1000]
-            if run.get("cancel_requested_at") or run.get("status") == "canceling":
-                for node in run["nodes"]:
-                    if node["status"] in {"pending", "invalidated"}:
-                        node["status"] = "canceled"
-                        node["error"] = ""
-                if any(
-                    node["status"] in ACTIVE_NODE_STATUSES
-                    for node in run["nodes"]
-                    if node["kind"] == "image"
+            cancel_requests = run.get("cancel_requests")
+            if not isinstance(cancel_requests, dict):
+                cancel_requests = {}
+            if run.get("cancel_requested_at") and not cancel_requests:
+                cancel_requests = {
+                    variant: str(run.get("cancel_requested_at"))
+                    for variant in self._requested_variants(run)
+                }
+            run["cancel_requests"] = cancel_requests
+            canceled_variants = set(cancel_requests)
+            for node in run["nodes"]:
+                if self._node_variant(node) not in canceled_variants:
+                    continue
+                if node["status"] in {"pending", "invalidated"}:
+                    node["status"] = "canceled"
+                    node["error"] = ""
+                elif node["status"] in TERMINAL_NODE_FAILURES | {"succeeded"}:
+                    node["status"] = "canceled"
+                    node["error"] = ""
+                elif (
+                    node["kind"] == "image"
+                    and node.get("record_id")
+                    and node["status"] in {"submitting", "queued", "running"}
                 ):
-                    run["status"] = "canceling"
-                else:
-                    run["status"] = "canceled"
-                    run["canceled_at"] = str(run.get("canceled_at") or utc_now())
-                return self._write_run(project_id, package_id, run)
+                    node["status"] = "cancel_requested"
             if run["mode"] == "modular":
-                anchor = self._node_by_id(run, "anchor")
-                if anchor["status"] == "succeeded":
+                for variant in self._requested_variants(run):
+                    if variant in canceled_variants:
+                        continue
+                    anchor = self._node_by_variant_key(run, variant, "anchor")
+                    if anchor["status"] != "succeeded":
+                        continue
                     shared_budget_error = ""
                     for node in run["nodes"]:
-                        if node["id"] in run["module_types"] and node["status"] in {"pending", "invalidated"}:
+                        if (
+                            self._node_variant(node) == variant
+                            and node.get("module_type") in run["module_types"]
+                            and node["status"] in {"pending", "invalidated"}
+                        ):
                             if shared_budget_error:
                                 self._block_node_after_shared_budget_error(
                                     node, shared_budget_error
                                 )
                                 continue
-                            self._submit_node(project_id, run, node, generation_service)
-                            if node["status"] == "failed" and self._is_shared_budget_error(
+                            self._submit_node(
+                                project_id, run, node, generation_service
+                            )
+                            if node[
+                                "status"
+                            ] == "failed" and self._is_shared_budget_error(
                                 node.get("error")
                             ):
-                                shared_budget_error = str(node.get("error") or "")
-            image_nodes = [node for node in run["nodes"] if node["kind"] == "image"]
-            template = self._node_by_id(run, "template")
-            if all(node["status"] == "succeeded" for node in image_nodes) and template["status"] == "pending":
+                                shared_budget_error = str(
+                                    node.get("error") or ""
+                                )
+            detailed_nodes = [
+                node
+                for node in run["nodes"]
+                if self._node_variant(node) == "detailed"
+            ]
+            detailed_images = [
+                node for node in detailed_nodes if node["kind"] == "image"
+            ]
+            detailed_template = next(
+                (
+                    node
+                    for node in detailed_nodes
+                    if self._node_key(node) == "template"
+                ),
+                None,
+            )
+            if (
+                detailed_template
+                and "detailed" not in canceled_variants
+                and detailed_images
+                and all(
+                    node["status"] == "succeeded" for node in detailed_images
+                )
+                and detailed_template["status"] == "pending"
+            ):
                 self._render_template(project_id, package_id, run)
-            if template["status"] == "succeeded":
+            image_nodes = [
+                node for node in run["nodes"] if node["kind"] == "image"
+            ]
+            run["variant_states"] = self._variant_states(run)
+            active_nodes = [
+                node
+                for node in image_nodes
+                if node["status"] in ACTIVE_NODE_STATUSES
+            ]
+            if active_nodes:
+                run["status"] = (
+                    "canceling"
+                    if all(
+                        self._node_variant(node) in canceled_variants
+                        for node in active_nodes
+                    )
+                    else "running"
+                )
+            elif self._publishable(run):
                 run["status"] = "succeeded"
-            elif any(node["status"] in ACTIVE_NODE_STATUSES for node in image_nodes):
-                run["status"] = "running"
-            elif template["status"] in TERMINAL_NODE_FAILURES or any(
+            elif image_nodes and all(
+                node["status"] == "canceled" for node in image_nodes
+            ):
+                run["status"] = "canceled"
+                run["canceled_at"] = str(run.get("canceled_at") or utc_now())
+            elif any(
                 node["status"] in TERMINAL_NODE_FAILURES for node in image_nodes
             ):
                 run["status"] = "failed"
@@ -612,26 +890,72 @@ class StyleGuideVisualService:
                     run["finalize_error"] = str(exc)[:1000]
             return self._write_run(project_id, package_id, run)
 
-    def cancel_run(self, project_id: str, package_id: str, run_id: str) -> dict:
+    def cancel_run(
+        self,
+        project_id: str,
+        package_id: str,
+        run_id: str,
+        *,
+        variant: str = "",
+    ) -> dict:
         with self._lock:
             run = self._read_run(project_id, package_id, run_id)
-            if run.get("status") in {"canceling", "canceled"}:
+            scope = (
+                normalize_template_variants([variant])
+                if variant
+                else self._requested_variants(run)
+            )
+            existing_requests = run.get("cancel_requests")
+            if not isinstance(existing_requests, dict):
+                existing_requests = {}
+            if all(selected in existing_requests for selected in scope):
                 return copy.deepcopy(run)
-            active = run.get("status") == "running" or any(
-                node.get("status") in ACTIVE_NODE_STATUSES
+            active = any(
+                self._node_variant(node) in scope
+                and node.get("status") in ACTIVE_NODE_STATUSES
                 for node in run.get("nodes") or []
             )
             if not active:
                 raise ValueError("Only an active visual guide run can be canceled")
-            run["cancel_requested_at"] = str(
-                run.get("cancel_requested_at") or utc_now()
-            )
+            now = utc_now()
+            run["cancel_requests"] = existing_requests
+            for selected in scope:
+                run["cancel_requests"].setdefault(selected, now)
+            if set(scope) == set(self._requested_variants(run)):
+                run["cancel_requested_at"] = str(
+                    run.get("cancel_requested_at") or now
+                )
             for node in run.get("nodes") or []:
+                if self._node_variant(node) not in scope:
+                    continue
                 if node.get("status") in {"pending", "invalidated"}:
                     node["status"] = "canceled"
                     node["error"] = ""
-            if any(
+                elif (
+                    node.get("kind") == "image"
+                    and node.get("record_id")
+                    and node.get("status") in {"submitting", "queued", "running"}
+                ):
+                    node["status"] = "cancel_requested"
+            run["variant_states"] = self._variant_states(run)
+            active_nodes = [
+                node
+                for node in run.get("nodes") or []
+                if node.get("kind") == "image"
+                and node.get("status") in ACTIVE_NODE_STATUSES
+            ]
+            if active_nodes:
+                run["status"] = (
+                    "canceling"
+                    if all(
+                        self._node_variant(node) in run["cancel_requests"]
+                        for node in active_nodes
+                    )
+                    else "running"
+                )
+            elif all(
                 node.get("status") in ACTIVE_NODE_STATUSES
+                or self._node_variant(node) in run["cancel_requests"]
                 for node in run.get("nodes") or []
                 if node.get("kind") == "image"
             ):
@@ -653,8 +977,14 @@ class StyleGuideVisualService:
         with self._lock:
             run = self._read_run(project_id, package_id, run_id)
             node = self._node_by_id(run, str(node_id or ""))
+            node_key = self._node_key(node)
+            variant = self._node_variant(node)
             if run.get("status") == "applied":
-                if node.get("id") != "anchor":
+                if node_key != "anchor" and node.get("status") not in {
+                    "failed",
+                    "canceled",
+                    "invalidated",
+                }:
                     raise ValueError("A versioned visual guide run cannot retry this node")
                 return self.create_run(
                     project_id,
@@ -665,6 +995,12 @@ class StyleGuideVisualService:
                         "model": run.get("model"),
                         "params": copy.deepcopy(run.get("params") or {}),
                         "detail_profile": run.get("detail_profile") or DETAIL_PROFILE_DEFAULT,
+                        "requested_variants": [variant],
+                        "source_version_id": str(
+                            run.get("published_version_id")
+                            or run.get("source_version_id")
+                            or ""
+                        ),
                         "reference_sources": copy.deepcopy(
                             run.get("reference_sources") or []
                         ),
@@ -680,7 +1016,7 @@ class StyleGuideVisualService:
                 self._render_template(project_id, package_id, run)
             else:
                 allowed = {"failed", "invalidated"}
-                if node["id"] == "anchor":
+                if node_key == "anchor":
                     allowed.add("succeeded")
                 if node["status"] not in allowed:
                     raise ValueError("Visual guide node cannot retry in its current state")
@@ -693,16 +1029,38 @@ class StyleGuideVisualService:
                         "error": "",
                     }
                 )
-                if node["id"] == "anchor":
+                if node_key == "anchor":
                     for sibling in run["nodes"]:
-                        if sibling["id"] in run["module_types"] and sibling["status"] == "succeeded":
+                        if (
+                            self._node_variant(sibling) == variant
+                            and sibling.get("module_type") in run["module_types"]
+                            and sibling["status"] == "succeeded"
+                        ):
                             sibling["status"] = "invalidated"
                             sibling["error"] = "视觉基因锚点已更新"
-                template = self._node_by_id(run, "template")
-                template.update({"status": "pending", "result_relative_path": "", "error": ""})
-                run["template_relative_path"] = ""
+                template = next(
+                    (
+                        item
+                        for item in run["nodes"]
+                        if self._node_variant(item) == variant
+                        and self._node_key(item) == "template"
+                    ),
+                    None,
+                )
+                if template:
+                    template.update(
+                        {
+                            "status": "pending",
+                            "result_relative_path": "",
+                            "error": "",
+                        }
+                    )
+                    run["template_relative_path"] = ""
+                if isinstance(run.get("cancel_requests"), dict):
+                    run["cancel_requests"].pop(variant, None)
                 self._submit_node(project_id, run, node, generation_service)
             run["status"] = "failed" if node["status"] == "failed" else "running"
+            run["variant_states"] = self._variant_states(run)
             return self._write_run(project_id, package_id, run)
 
     @staticmethod

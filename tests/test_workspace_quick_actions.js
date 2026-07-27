@@ -39,10 +39,11 @@ test("blank context actions cover style resources, guide repository, and product
   assert.match(actions, /production/);
   assert.match(actions, /生成图片/);
   assert.match(actions, /添加参考图/);
-  assert.match(actions, /生成视觉指导图/);
+  assert.match(actions, /生成风格模板/);
   assert.match(runner, /style-open-generate/);
   assert.match(runner, /style-open-reference/);
   assert.match(menu, /style-content-context-menu/);
+  assert.match(menu, /ensureStyleContentContextMenuBindings\(\)/);
 });
 
 test("list, repository, and shared canvas blank areas open the matching quick menu", () => {
@@ -64,10 +65,17 @@ test("production blank quick actions stay out of generation history", () => {
 test("production list and canvas share usable generation and reference buttons", () => {
   assert.match(html, /id="aiOpenGeneratePanelButton"/);
   assert.match(html, /id="aiAddReferenceButton"/);
-  assert.match(html, /class="ai-production-quick-actions"/);
+  const productionHeader = html.match(/<header class="ai-production-header">[\s\S]*?<\/header>/)?.[0] || "";
+  const resultSection = html.match(/<section class="ai-node-results-section">[\s\S]*?<\/section>/)?.[0] || "";
+  const canvasSection = html.match(/<section id="aiProductionCanvasWorkspace"[\s\S]*?<\/section>/)?.[0] || "";
+  assert.doesNotMatch(productionHeader, /ai-production-quick-actions/);
+  assert.match(resultSection, /class="ai-production-quick-actions"/);
+  assert.match(canvasSection, /class="ai-production-quick-actions"/);
+  assert.match(resultSection, /data-ai-production-action="generate"/);
+  assert.match(canvasSection, /data-ai-production-action="reference"/);
   const context = functionSource("renderAiAssetContext", "renderAiResultDetail");
-  assert.match(context, /aiOpenGeneratePanelButton\.disabled = !isGenerationTarget/);
-  assert.match(context, /aiAddReferenceButton\.disabled = !isGenerationTarget/);
+  assert.match(context, /data-ai-production-action/);
+  assert.match(context, /button\.disabled = !isGenerationTarget/);
   assert.match(source, /openAiProductionReferencePicker/);
 });
 

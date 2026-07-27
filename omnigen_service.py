@@ -6,6 +6,7 @@ import http.client
 import ipaddress
 import io
 import json
+import math
 import mimetypes
 import os
 import socket
@@ -18,9 +19,10 @@ import urllib.request
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 
 OMNIGEN_ENDPOINT = "https://omnigen.dianchu.cc/api/v1/mcp"
@@ -32,6 +34,16 @@ MAX_IMAGE_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_AVATAR_BYTES = 5 * 1024 * 1024
 AVATAR_SIZE = (256, 256)
 AVATAR_MIME_TYPES = {"image/png", "image/jpeg", "image/webp"}
+REFERENCE_COMPOSITE_RULE_VERSION = 1
+REFERENCE_COMPOSITE_MAX_EDGE = 4096
+REFERENCE_COMPOSITE_CELL_EDGE = 1024
+REFERENCE_COMPOSITE_MAX_IMAGES = 40
+REFERENCE_COMPOSITE_MAX_SOURCE_PIXELS = 64 * 1024 * 1024
+REFERENCE_COMPOSITE_GAP = 24
+REFERENCE_COMPOSITE_BACKGROUND = (238, 240, 243)
+REFERENCE_ROLES = {"style", "content", "identity", "pose", "composition"}
+IMAGE_MODEL_CAPABILITY_CACHE_SECONDS = 300.0
+IMAGE_MODEL_CAPABILITY_RETRY_SECONDS = 30.0
 FILE_TRANSACTION_LOCK_TIMEOUT_SECONDS = 5.0
 IMAGE_EXTENSIONS = {
     "PNG": ".png",
@@ -117,6 +129,9 @@ class OmniGenService:
         self.reference_assets_path = (
             self.omnigen_dir / "reference-assets.json"
         ).resolve()
+        self.reference_composites_dir = (
+            self.omnigen_dir / "reference-composites"
+        ).resolve()
         self.results_dir = Path(results_dir or (self.omnigen_dir / "results")).resolve()
         self.trash_dir = Path(trash_dir or (self.omnigen_dir / ".trash")).resolve()
         self.transaction_lock_path = Path(
@@ -126,10 +141,13 @@ class OmniGenService:
         self.local_url_prefix = str(local_url_prefix or "").rstrip("/")
         self.endpoint = endpoint
         self._lock = threading.RLock()
+        self._image_models_cache: dict[str, dict] = {}
+        self._image_models_cache_refresh_after = 0.0
 
         self.work_dir.mkdir(parents=True, exist_ok=True)
         for path, label in (
             (self.omnigen_dir, "OmniGen data directory"),
+            (self.reference_composites_dir, "reference composite directory"),
             (self.results_dir, "OmniGen results directory"),
             (self.trash_dir, "OmniGen trash directory"),
         ):
@@ -165,6 +183,7 @@ class OmniGenService:
         for path, label in (
             (self.work_dir, "OmniGen work directory"),
             (self.omnigen_dir, "OmniGen data directory"),
+            (self.reference_composites_dir, "reference composite directory"),
             (self.results_dir, "OmniGen results directory"),
             (self.trash_dir, "OmniGen trash directory"),
         ):
@@ -253,6 +272,29 @@ class OmniGenService:
                 handle.flush()
                 os.fsync(handle.fileno())
                 temporary_path = Path(handle.name)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+    def _atomic_write_image(
+        self, path: Path, image: Image.Image, *, image_format: str
+    ) -> None:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                image.save(handle, format=image_format, optimize=True)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary_path, path)
         finally:
             if temporary_path is not None and temporary_path.exists():
@@ -667,6 +709,8 @@ class OmniGenService:
             "asset_node_id",
             "style_direction_id",
             "workflow_run_id",
+            "agent_run_id",
+            "agent_action_id",
             "style_guide_visual_run_id",
             "style_guide_visual_node_id",
             "actor",
@@ -1308,6 +1352,9 @@ class OmniGenService:
                     ),
                     "modality": modality,
                     "pricing": copy.deepcopy(model.get("pricing") or {}),
+                    "billing_rules": copy.deepcopy(
+                        model.get("billing_rules") or {}
+                    ),
                     "capabilities": copy.deepcopy(capabilities),
                     "supported_aspect_ratios": first_value(
                         "supported_aspect_ratios", "aspect_ratios", "aspectRatios"
@@ -1324,20 +1371,279 @@ class OmniGenService:
             )
         return normalized
 
+    @staticmethod
+    def _billing_decimal(value: object) -> Decimal | None:
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _resolution_price(
+        cls, prices: object, resolution: str
+    ) -> Decimal | None:
+        if not isinstance(prices, dict):
+            return None
+        return cls._billing_decimal(
+            prices.get(resolution, prices.get("default"))
+        )
+
+    @staticmethod
+    def _estimated_output_pixels(
+        resolution: str, aspect_ratio: str
+    ) -> int:
+        long_edges = {
+            "512": 512,
+            "1K": 1024,
+            "2K": 2048,
+            "4K": 4096,
+            "8K": 8192,
+        }
+        edge = long_edges.get(str(resolution or "").upper(), 0)
+        try:
+            width_ratio, height_ratio = (
+                float(item)
+                for item in str(aspect_ratio or "1:1").split(":", 1)
+            )
+        except (TypeError, ValueError):
+            width_ratio, height_ratio = 1.0, 1.0
+        if edge <= 0 or width_ratio <= 0 or height_ratio <= 0:
+            return 0
+        scale = edge / max(width_ratio, height_ratio)
+        width = max(1, round(width_ratio * scale))
+        height = max(1, round(height_ratio * scale))
+        return width * height
+
+    @classmethod
+    def estimate_image_cost(
+        cls,
+        model: dict,
+        params: dict,
+        *,
+        effective_reference_count: int,
+        original_reference_count: int,
+        task_count: int = 1,
+    ) -> dict:
+        rules = copy.deepcopy(model.get("billing_rules") or {})
+        resolution = str(params.get("resolution") or "").upper()
+        aspect_ratio = str(params.get("aspect_ratio") or "1:1")
+        effective = max(0, int(effective_reference_count))
+        original = max(effective, int(original_reference_count))
+        tasks = max(1, int(task_count))
+        currency = str(rules.get("currency") or "CNY").upper()
+        reference_unit = None
+        reference_free = 0
+        reference_billable = 0
+        reference_subtotal: Decimal | None = Decimal("0")
+        unoptimized_reference_subtotal: Decimal | None = Decimal("0")
+        output_unit = None
+        output_subtotal = None
+        exact = True
+        used_fallback = False
+        unavailable_reason = ""
+
+        unit = str(rules.get("unit") or "").lower()
+        if unit == "composite":
+            pixels = cls._estimated_output_pixels(resolution, aspect_ratio)
+            for component in rules.get("components") or []:
+                if not isinstance(component, dict):
+                    continue
+                key = str(component.get("key") or "")
+                if key == "input_images":
+                    reference_unit = cls._billing_decimal(
+                        component.get("amount")
+                    )
+                    reference_free = max(
+                        0, int(component.get("free_quantity") or 0)
+                    )
+                    reference_billable = max(0, effective - reference_free)
+                    original_billable = max(0, original - reference_free)
+                    if reference_unit is None:
+                        reference_subtotal = None
+                        unoptimized_reference_subtotal = None
+                        unavailable_reason = "参考图计费规则缺少单价"
+                        break
+                    reference_subtotal = reference_unit * reference_billable
+                    unoptimized_reference_subtotal = (
+                        reference_unit * original_billable
+                    )
+                elif key == "output_images":
+                    output_unit = cls._resolution_price(
+                        component.get("prices") or {}, resolution
+                    )
+                    if output_unit is None:
+                        output_unit = cls._billing_decimal(
+                            component.get("amount")
+                        )
+                    if output_unit is None:
+                        for candidate in component.get("rules") or []:
+                            if not isinstance(candidate, dict):
+                                continue
+                            when = candidate.get("when") or {}
+                            matches_lte = (
+                                "output_pixels_lte" not in when
+                                or pixels <= int(when["output_pixels_lte"])
+                            )
+                            matches_gt = (
+                                "output_pixels_gt" not in when
+                                or pixels > int(when["output_pixels_gt"])
+                            )
+                            if pixels > 0 and matches_lte and matches_gt:
+                                output_unit = cls._billing_decimal(
+                                    candidate.get("amount")
+                                )
+                                break
+                    if output_unit is None:
+                        unavailable_reason = "当前分辨率缺少生成价格"
+                        break
+                    output_subtotal = output_unit
+            if output_subtotal is None and not unavailable_reason:
+                unavailable_reason = "生成计费规则缺少输出图片组件"
+        elif unit in {"cny/item", "yuan/item", "item"}:
+            output_unit = cls._billing_decimal(rules.get("amount"))
+            if output_unit is None:
+                output_unit = cls._resolution_price(
+                    rules.get("prices_by_resolution") or {}, resolution
+                )
+            if output_unit is None:
+                unavailable_reason = "当前分辨率缺少生成价格"
+            else:
+                output_subtotal = output_unit
+        elif unit == "token_usage":
+            fallback = (
+                rules.get("fallback")
+                if isinstance(rules.get("fallback"), dict)
+                else {}
+            )
+            output_unit = cls._resolution_price(
+                fallback.get("prices_by_resolution") or {}, resolution
+            )
+            exact = False
+            used_fallback = output_unit is not None
+            reference_subtotal = None
+            unoptimized_reference_subtotal = None
+            if output_unit is None:
+                unavailable_reason = "Token 计费缺少可用的分辨率回退价"
+            else:
+                output_subtotal = output_unit
+        else:
+            exact = False
+            reference_subtotal = None
+            unoptimized_reference_subtotal = None
+            unavailable_reason = "当前模型未提供可识别的价格规则"
+
+        if (
+            unavailable_reason
+            or output_subtotal is None
+            or (unit == "composite" and reference_subtotal is None)
+        ):
+            per_task_total = None
+            total = None
+            unoptimized_total = None
+            savings = None
+        elif unit == "token_usage":
+            per_task_total = float(output_subtotal)
+            total = float(output_subtotal * tasks)
+            unoptimized_total = None
+            savings = None
+        else:
+            reference_cost = reference_subtotal or Decimal("0")
+            unoptimized_reference_cost = (
+                unoptimized_reference_subtotal or Decimal("0")
+            )
+            per_task = reference_cost + output_subtotal
+            unoptimized_per_task = (
+                unoptimized_reference_cost + output_subtotal
+            )
+            per_task_total = float(per_task)
+            total = float(per_task * tasks)
+            unoptimized_total = float(unoptimized_per_task * tasks)
+            savings = float(
+                max(
+                    Decimal("0"),
+                    (unoptimized_per_task - per_task) * tasks,
+                )
+            )
+
+        return {
+            "currency": currency,
+            "exact": exact,
+            "used_fallback": used_fallback,
+            "reference": {
+                "unit_price": (
+                    float(reference_unit)
+                    if reference_unit is not None
+                    else None
+                ),
+                "free_quantity": reference_free,
+                "billable_count": reference_billable,
+                "subtotal": (
+                    float(reference_subtotal)
+                    if reference_subtotal is not None
+                    else None
+                ),
+            },
+            "generation": {
+                "unit_price": (
+                    float(output_unit) if output_unit is not None else None
+                ),
+                "subtotal": (
+                    float(output_subtotal)
+                    if output_subtotal is not None
+                    else None
+                ),
+            },
+            "per_task_total": per_task_total,
+            "task_count": tasks,
+            "total": total,
+            "unoptimized_total": unoptimized_total,
+            "savings": savings,
+            "unavailable_reason": unavailable_reason,
+        }
+
     def list_image_models(self) -> list[dict]:
         payload = self.call_tool(
             "list_generation_models", {"modality": "image"}
         )
-        return self._normalize_image_models(payload)
+        models = self._normalize_image_models(payload)
+        if models:
+            with self._lock:
+                self._image_models_cache = {
+                    str(model.get("id") or ""): copy.deepcopy(model)
+                    for model in models
+                    if str(model.get("id") or "")
+                }
+                self._image_models_cache_refresh_after = (
+                    time.monotonic() + IMAGE_MODEL_CAPABILITY_CACHE_SECONDS
+                )
+        return models
 
     def image_model_capability(self, model_id: str) -> dict:
         model_id = str(model_id or "").strip()
         if not model_id:
             return {}
+        now = time.monotonic()
+        with self._lock:
+            cached = copy.deepcopy(
+                self._image_models_cache.get(model_id) or {}
+            )
+            refresh_after = self._image_models_cache_refresh_after
+        if cached and now < refresh_after:
+            return cached
+        try:
+            models = self.list_image_models()
+        except OmniGenError:
+            if not cached:
+                raise
+            with self._lock:
+                self._image_models_cache_refresh_after = (
+                    now + IMAGE_MODEL_CAPABILITY_RETRY_SECONDS
+                )
+            return cached
         return next(
             (
                 copy.deepcopy(model)
-                for model in self.list_image_models()
+                for model in models
                 if str(model.get("id") or "") == model_id
             ),
             {},
@@ -1490,9 +1796,241 @@ class OmniGenService:
             self.update_record(record["id"], result_asset_id=asset_id)
         return asset_id
 
+    @staticmethod
+    def _reference_identity(raw_reference: object) -> str:
+        if isinstance(raw_reference, dict):
+            relative_path = str(
+                raw_reference.get("relative_path") or ""
+            ).strip()
+            if relative_path:
+                return "path:" + relative_path.replace("\\", "/")
+            asset_id = str(
+                raw_reference.get("remote_asset_id")
+                or raw_reference.get("asset_id")
+                or ""
+            ).strip()
+            return f"asset:{asset_id}" if asset_id else ""
+        text = str(raw_reference or "").strip()
+        if not text:
+            return ""
+        parsed = urllib.parse.urlparse(text)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return f"url:{text}"
+        return "path:" + text.replace("\\", "/")
+
+    @staticmethod
+    def _reference_role(raw_reference: object) -> str:
+        if not isinstance(raw_reference, dict):
+            return "content"
+        role = str(raw_reference.get("reference_role") or "content").strip().lower()
+        return role if role in REFERENCE_ROLES else "content"
+
+    def _reference_local_path(
+        self, raw_reference: object
+    ) -> Path | None:
+        if isinstance(raw_reference, dict):
+            value = raw_reference.get("relative_path")
+            has_remote_asset = bool(
+                str(
+                    raw_reference.get("remote_asset_id")
+                    or raw_reference.get("asset_id")
+                    or ""
+                ).strip()
+            )
+        else:
+            value = raw_reference
+            has_remote_asset = False
+        text = str(value or "").strip()
+        parsed = urllib.parse.urlparse(text)
+        if not text or (
+            parsed.scheme in {"http", "https"} and parsed.netloc
+        ):
+            return None
+        try:
+            return self._resolve_project_reference_path(text)
+        except ValueError:
+            if has_remote_asset:
+                return None
+            raise
+
+    def _render_reference_composite(self, paths: list[Path]) -> Path:
+        if not 2 <= len(paths) <= REFERENCE_COMPOSITE_MAX_IMAGES:
+            raise ValueError(
+                "Reference composite requires between 2 and "
+                f"{REFERENCE_COMPOSITE_MAX_IMAGES} local images"
+            )
+        fingerprints = [self._reference_fingerprint(path) for path in paths]
+        signature = json.dumps(
+            {
+                "version": REFERENCE_COMPOSITE_RULE_VERSION,
+                "fingerprints": fingerprints,
+                "cell": REFERENCE_COMPOSITE_CELL_EDGE,
+                "gap": REFERENCE_COMPOSITE_GAP,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        cache_name = (
+            hashlib.sha256(signature.encode("utf-8")).hexdigest() + ".png"
+        )
+        destination = self.reference_composites_dir / cache_name
+        if destination.is_file():
+            return destination
+
+        columns = max(1, math.ceil(math.sqrt(len(paths))))
+        rows = math.ceil(len(paths) / columns)
+        largest_axis = max(columns, rows)
+        cell = min(
+            REFERENCE_COMPOSITE_CELL_EDGE,
+            max(
+                256,
+                (
+                    REFERENCE_COMPOSITE_MAX_EDGE
+                    - (largest_axis + 1) * REFERENCE_COMPOSITE_GAP
+                )
+                // largest_axis,
+            ),
+        )
+        canvas = Image.new(
+            "RGB",
+            (
+                columns * cell + (columns + 1) * REFERENCE_COMPOSITE_GAP,
+                rows * cell + (rows + 1) * REFERENCE_COMPOSITE_GAP,
+            ),
+            REFERENCE_COMPOSITE_BACKGROUND,
+        )
+        try:
+            for index, path in enumerate(paths):
+                try:
+                    with Image.open(path) as source:
+                        source.load()
+                        if (
+                            source.width * source.height
+                            > REFERENCE_COMPOSITE_MAX_SOURCE_PIXELS
+                        ):
+                            raise ValueError(
+                                f"Reference image is too large: {path.name}"
+                            )
+                        rgb = source.convert("RGB")
+                except (OSError, UnidentifiedImageError) as exc:
+                    raise ValueError(
+                        f"Reference image is invalid: {path.name}"
+                    ) from exc
+                try:
+                    tile = ImageOps.contain(
+                        rgb,
+                        (min(cell, rgb.width), min(cell, rgb.height)),
+                        Image.Resampling.LANCZOS,
+                    )
+                finally:
+                    rgb.close()
+                column = index % columns
+                row = index // columns
+                x = (
+                    REFERENCE_COMPOSITE_GAP
+                    + column * (cell + REFERENCE_COMPOSITE_GAP)
+                    + (cell - tile.width) // 2
+                )
+                y = (
+                    REFERENCE_COMPOSITE_GAP
+                    + row * (cell + REFERENCE_COMPOSITE_GAP)
+                    + (cell - tile.height) // 2
+                )
+                canvas.paste(tile, (x, y))
+                tile.close()
+            self._atomic_write_image(
+                destination, canvas, image_format="PNG"
+            )
+        finally:
+            canvas.close()
+        return destination
+
+    def _optimize_reference_images(
+        self, raw_references: list[object], enabled: bool
+    ) -> tuple[list[object], dict]:
+        unique = []
+        seen = set()
+        for reference in raw_references:
+            source_identity = self._reference_identity(reference)
+            identity = f"{self._reference_role(reference)}|{source_identity}"
+            if source_identity and identity not in seen:
+                seen.add(identity)
+                unique.append(reference)
+
+        role_order = []
+        role_entries = {}
+        for index, reference in enumerate(unique):
+            role = self._reference_role(reference)
+            if role not in role_entries:
+                role_order.append(role)
+                role_entries[role] = []
+            role_entries[role].append((index, reference, self._reference_local_path(reference)))
+
+        optimized_by_index = {}
+        composite_relative_path = ""
+        groups = []
+        for role in role_order:
+            entries = role_entries[role]
+            local_entries = [entry for entry in entries if entry[2] is not None]
+            if role == "content" and len(local_entries) > REFERENCE_COMPOSITE_MAX_IMAGES:
+                raise ValueError(
+                    f"A maximum of {REFERENCE_COMPOSITE_MAX_IMAGES} local "
+                    "content reference images can be combined per task"
+                )
+            group_composite = ""
+            if enabled and role == "content" and len(local_entries) >= 2:
+                composite = self._render_reference_composite(
+                    [path for _index, _reference, path in local_entries]
+                )
+                group_composite = composite.relative_to(self.work_dir).as_posix()
+                composite_relative_path = group_composite
+                local_indexes = {index for index, _reference, _path in local_entries}
+                first_local = min(local_indexes)
+                for index, reference, _path in entries:
+                    if index == first_local:
+                        optimized_by_index[index] = {
+                            "relative_path": group_composite,
+                            "reference_role": "content",
+                        }
+                    elif index not in local_indexes:
+                        optimized_by_index[index] = reference
+            else:
+                for index, reference, _path in entries:
+                    optimized_by_index[index] = reference
+            groups.append(
+                {
+                    "role": role,
+                    "original_count": len(entries),
+                    "effective_count": sum(
+                        1 for index, _reference, _path in entries if index in optimized_by_index
+                    ),
+                    "composite_relative_path": group_composite,
+                }
+            )
+
+        optimized = [optimized_by_index[index] for index in sorted(optimized_by_index)]
+
+        unmerged_references = []
+        for reference in optimized:
+            if self._reference_local_path(reference) is None:
+                identity = self._reference_identity(reference)
+                if identity:
+                    unmerged_references.append(identity)
+        snapshot = {
+            "enabled": bool(enabled),
+            "rule_version": REFERENCE_COMPOSITE_RULE_VERSION,
+            "original_count": len(unique),
+            "effective_count": len(optimized),
+            "composite_relative_path": composite_relative_path,
+            "unmerged_references": unmerged_references,
+            "groups": groups,
+        }
+        return optimized, snapshot
+
     def _reference_input(
         self, raw_reference: object, current_record_id: str
     ) -> tuple[dict, dict]:
+        reference_role = self._reference_role(raw_reference)
         if isinstance(raw_reference, dict):
             asset_id = str(
                 raw_reference.get("remote_asset_id")
@@ -1507,6 +2045,7 @@ class OmniGenService:
                     "record_id": str(raw_reference.get("source_record_id") or ""),
                     "content_sha256": str(raw_reference.get("content_sha256") or ""),
                     "updated_at": self._utc_timestamp(),
+                    "reference_role": reference_role,
                 }
                 return (
                     {
@@ -1524,6 +2063,7 @@ class OmniGenService:
                 "reference": reference_text,
                 "source": "public-url",
                 "url": reference_text,
+                "reference_role": reference_role,
             }
             return (
                 {"type": "url", "url": reference_text, "role": "reference"},
@@ -1546,6 +2086,7 @@ class OmniGenService:
                     "record_id": generated_record["id"],
                     "content_sha256": fingerprint,
                     "updated_at": self._utc_timestamp(),
+                    "reference_role": reference_role,
                 }
                 self._cache_reference_asset(fingerprint, marker)
                 return (
@@ -1569,6 +2110,7 @@ class OmniGenService:
                 **copy.deepcopy(cached),
                 "relative_path": relative_path,
                 "asset_id": cached_asset_id,
+                "reference_role": reference_role,
             }
             return (
                 {
@@ -1603,6 +2145,7 @@ class OmniGenService:
             "source": "mcp-upload",
             "content_sha256": fingerprint,
             "updated_at": self._utc_timestamp(),
+            "reference_role": reference_role,
         }
         self._cache_reference_asset(fingerprint, marker)
         return (
@@ -1615,17 +2158,42 @@ class OmniGenService:
         )
 
     def _prepare_reference_inputs(
-        self, params: dict, current_record_id: str
+        self,
+        params: dict,
+        current_record_id: str,
+        *,
+        reference_limit: int = 0,
     ) -> tuple[list[dict], list[dict], dict]:
         remote_params = copy.deepcopy(params)
         raw_references = remote_params.pop("reference_images", [])
+        optimization_enabled = bool(
+            remote_params.pop("optimize_reference_images", True)
+        )
         if raw_references is None:
             raw_references = []
         if not isinstance(raw_references, list):
             raise ValueError("Reference images must be an array")
+        optimized_references, optimization_snapshot = (
+            self._optimize_reference_images(
+                raw_references, optimization_enabled
+            )
+        )
+        self.update_record(
+            current_record_id,
+            reference_optimization=optimization_snapshot,
+        )
+        reference_limit = max(0, int(reference_limit or 0))
+        effective_count = int(
+            optimization_snapshot.get("effective_count") or 0
+        )
+        if reference_limit and effective_count > reference_limit:
+            raise ValueError(
+                f"当前模型最多支持 {reference_limit} 张实际参考输入，"
+                f"本次优化后为 {effective_count} 张"
+            )
         inputs = []
         markers = []
-        for raw_reference in raw_references:
+        for raw_reference in optimized_references:
             input_item, marker = self._reference_input(
                 raw_reference, current_record_id
             )
@@ -1658,8 +2226,19 @@ class OmniGenService:
         record = self.create_record(prompt, model, params, context=context)
         try:
             inputs, reference_assets, remote_params = (
-                self._prepare_reference_inputs(params, record["id"])
+                self._prepare_reference_inputs(
+                    params,
+                    record["id"],
+                    reference_limit=max(
+                        0,
+                        int(
+                            (context or {}).get("model_reference_limit")
+                            or 0
+                        ),
+                    ),
+                )
             )
+            record = self.find_record(record["id"])
             if reference_assets:
                 record = self.update_record(
                     record["id"], reference_assets=reference_assets

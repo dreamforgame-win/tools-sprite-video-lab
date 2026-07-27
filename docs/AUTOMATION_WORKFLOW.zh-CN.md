@@ -2,6 +2,8 @@
 
 Web、REST、CLI 和后续本地 MCP 适配器共用 `ProjectService`。Agent 不需要操作网页即可完成生产、处理、入库和装配；网页只是同一份项目文件的可视化入口。
 
+Agent 首先读取 `GET /api/v1/agent/manifest`，创建 `agentRun` 并声明图片生成能力。API 返回机器可执行的 `next_actions`；Agent 只执行标记为 `agent` 或 `agent_native` 的动作，服务端动作由状态机自动推进。完整契约见 `AGENT_API.zh-CN.md`。
+
 ## 标准步骤
 
 1. 查找或创建项目，获得 `projectId`。
@@ -10,11 +12,18 @@ Web、REST、CLI 和后续本地 MCP 适配器共用 `ProjectService`。Agent �
 4. 建立资产节点，提交生成任务，并把 `workflow_run_id` 写入生成上下文。
 5. 轮询稳定任务 ID；失败时更新步骤错误和重试次数。
 6. 将候选结果设为 `selected` 或 `confirmed`。
-7. 需要抠图/拆图时创建 `processing-intake`，处理区使用文件副本并保留来源记录。
-8. 将最终结果复制到资产管理，写入 SHA-256 和来源链路。
-9. 配置正式项目目录与分类映射，执行预检。
-10. 使用部署幂等键装配正式项目，验证目标哈希。
-11. 将工作流标记为 `succeeded`；失败或取消也必须回写终态。
+7. 需要抠图/拆图时创建 `processing-intake`，处理区使用文件副本并保留来源记录；根据有效 Alpha、背景稳定度、边缘质量要求和可用能力在保留 Alpha、色键、增强色键与框选引导 AI Matting 之间协商执行。
+8. 对处理结果执行结构化质量检查；`passed=false` 时保留证据并进入返工、人工确认或失败状态，不得自动入库。
+9. 将通过质量门禁的最终结果复制到资产管理，写入 SHA-256 和来源链路。
+10. 配置正式项目目录与分类映射，执行预检。
+11. 使用部署幂等键装配正式项目，验证目标哈希。
+12. 将工作流标记为 `succeeded`；失败或取消也必须回写终态。
+
+通过 Agent 编排 API 执行时，以上步骤保存为版本化 `workflowRecipe` 和单次 `agentRun`。`agentRun` 同时关联基础 `workflowRun`，因此现有审计、生成历史、处理接收单、资产入库和部署追溯继续有效。
+
+生图后的抠图、拆分、分层、命名和质量门禁设计见 [AI 生图抠图、拆分与分层工作流方案](AI_IMAGE_MATTING_WORKFLOW.zh-CN.md)。该文档当前是设计提案；现有 Agent 自动抠图仍以本地色键和透明通道处理为主，不应把候选 AI 模型写成已上线能力。
+
+无论执行器来自 Agent、本地模型还是 MCP，网页必须可视化同一份项目状态：用户应能查看运行终态、逐步输入输出、处理图片、质量问题、降级原因和入库去向。只有文件落盘而没有工具内入口，不算自动化流程交付完成。
 
 ## CLI
 
@@ -30,6 +39,9 @@ python sprite_lab_cli.py configure-integration default --target-root E:\game --m
 python sprite_lab_cli.py preflight default
 python sprite_lab_cli.py deploy default --idempotency-key ui-icons-deploy-v1
 python sprite_lab_cli.py update-workflow default run_xxx --status succeeded --outputs '{"deployment_id":"deploy_xxx"}'
+python sprite_lab_cli.py agent-manifest
+python sprite_lab_cli.py create-agent-run default --request "制作一套主界面图标"
+python sprite_lab_cli.py get-agent-run default arun_xxx
 ```
 
 CLI 输出统一为 JSON，成功为 `{"ok": true, "result": ...}`，失败写入标准错误并返回退出码 `1`。

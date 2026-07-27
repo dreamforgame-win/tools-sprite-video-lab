@@ -28,6 +28,8 @@ from urllib.request import Request, urlopen
 
 from PIL import Image, ImageChops, ImageFilter
 
+from agent_processing_service import AgentProcessingService
+from agent_workflow_service import AgentWorkflowService
 from omnigen_service import OmniGenError, OmniGenService, redact_secret
 from project_service import ProjectError, ProjectService
 from style_guide_service import StyleGuideService
@@ -6934,6 +6936,27 @@ def export_image_split_result_job(job_id: str, items: list[dict], export_mode: s
     return result
 
 
+AGENT_WORKFLOW_SERVICE: AgentWorkflowService | None = None
+AGENT_WORKFLOW_SERVICE_LOCK = threading.RLock()
+
+
+def agent_workflow_service() -> AgentWorkflowService:
+    global AGENT_WORKFLOW_SERVICE
+    with AGENT_WORKFLOW_SERVICE_LOCK:
+        if AGENT_WORKFLOW_SERVICE is None:
+            processing = AgentProcessingService(
+                PROJECT_SERVICE, project_generation_service
+            )
+            service = AgentWorkflowService(
+                PROJECT_SERVICE,
+                project_generation_service,
+                processing_executor=processing.execute,
+            )
+            processing.set_artifact_recorder(service.register_processed_image)
+            AGENT_WORKFLOW_SERVICE = service
+        return AGENT_WORKFLOW_SERVICE
+
+
 class AppHandler(BaseHTTPRequestHandler):
     server_version = "SpriteVideoLab/0.1"
 
@@ -6957,6 +6980,11 @@ class AppHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
+        if parsed.path == "/api/v1/agent/manifest":
+            self.send_json(
+                {"ok": True, "manifest": agent_workflow_service().manifest()}
+            )
+            return
         if parsed.path == "/api/v1/projects":
             try:
                 self.send_json({"ok": True, **PROJECT_SERVICE.list_projects()})
@@ -6987,6 +7015,52 @@ class AppHandler(BaseHTTPRequestHandler):
                 if len(parts) == 6 and parts[4] == "workflow-runs":
                     self.send_json(
                         {"ok": True, "workflow_run": PROJECT_SERVICE.get_workflow_run(parts[3], unquote(parts[5]))}
+                    )
+                    return
+                if len(parts) == 5 and parts[4] == "workflow-recipes":
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "workflow_recipes": agent_workflow_service().list_recipes(
+                                parts[3]
+                            ),
+                        }
+                    )
+                    return
+                if len(parts) == 6 and parts[4] == "workflow-recipes":
+                    version_text = (
+                        parse_qs(parsed.query).get("version") or [""]
+                    )[0]
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "workflow_recipe": agent_workflow_service().get_recipe(
+                                parts[3],
+                                unquote(parts[5]),
+                                int(version_text) if version_text else None,
+                            ),
+                        }
+                    )
+                    return
+                if len(parts) == 5 and parts[4] == "agent-runs":
+                    limit = int((parse_qs(parsed.query).get("limit") or ["100"])[0])
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "agent_runs": agent_workflow_service().list_runs(
+                                parts[3], limit=limit
+                            ),
+                        }
+                    )
+                    return
+                if len(parts) == 6 and parts[4] == "agent-runs":
+                    self.send_json(
+                        {
+                            "ok": True,
+                            "agent_run": agent_workflow_service().get_run(
+                                parts[3], unquote(parts[5])
+                            ),
+                        }
                     )
                     return
                 if len(parts) == 5 and parts[4] == "asset-tree":
@@ -7136,8 +7210,8 @@ class AppHandler(BaseHTTPRequestHandler):
                         cache_control="no-store",
                     )
                     return
-            except (ProjectError, ValueError) as exc:
-                self.send_error_json(str(exc))
+            except (OmniGenError, ProjectError, ValueError) as exc:
+                self.send_error_json(self.safe_generation_error(exc))
                 return
         if parsed.path in {
             "/api/local-profile",
@@ -7312,6 +7386,132 @@ class AppHandler(BaseHTTPRequestHandler):
                 )
                 self.send_json({"ok": True, "workflow_run": workflow}, status=HTTPStatus.CREATED)
                 return
+            if parsed.path.startswith("/api/v1/projects/"):
+                parts = [part for part in parsed.path.split("/") if part]
+                if len(parts) == 5 and parts[4] == "workflow-recipes":
+                    payload = self.read_json_body()
+                    recipe = agent_workflow_service().create_recipe(
+                        parts[3],
+                        name=payload.get("name"),
+                        description=payload.get("description") or "",
+                        steps=payload.get("steps"),
+                        actor=payload.get("actor") or "agent",
+                        idempotency_key=str(
+                            self.headers.get("Idempotency-Key")
+                            or payload.get("idempotency_key")
+                            or ""
+                        ),
+                    )
+                    self.send_json(
+                        {"ok": True, "workflow_recipe": recipe},
+                        status=HTTPStatus.CREATED,
+                    )
+                    return
+                if len(parts) == 5 and parts[4] == "agent-runs":
+                    payload = self.read_json_body()
+                    run = agent_workflow_service().create_run(
+                        parts[3],
+                        request_text=payload.get("request"),
+                        capabilities=payload.get("capabilities"),
+                        execution_policy=payload.get("execution_policy"),
+                        recipe_id=str(payload.get("recipe_id") or ""),
+                        recipe_version=payload.get("recipe_version"),
+                        steps=payload.get("steps"),
+                        variables=payload.get("variables"),
+                        actor=payload.get("actor") or "agent",
+                        idempotency_key=str(
+                            self.headers.get("Idempotency-Key")
+                            or payload.get("idempotency_key")
+                            or ""
+                        ),
+                    )
+                    self.send_json(
+                        {"ok": True, "agent_run": run},
+                        status=HTTPStatus.CREATED,
+                    )
+                    return
+                if (
+                    len(parts) == 9
+                    and parts[4] == "agent-runs"
+                    and parts[6] == "actions"
+                    and parts[8] == "result"
+                ):
+                    payload = self.read_json_body()
+                    run = agent_workflow_service().submit_action_result(
+                        parts[3],
+                        unquote(parts[5]),
+                        unquote(parts[7]),
+                        result=payload.get("result")
+                        if isinstance(payload.get("result"), dict)
+                        else payload,
+                        idempotency_key=str(
+                            self.headers.get("Idempotency-Key")
+                            or payload.get("idempotency_key")
+                            or ""
+                        ),
+                    )
+                    self.send_json({"ok": True, "agent_run": run})
+                    return
+                if (
+                    len(parts) == 9
+                    and parts[4] == "agent-runs"
+                    and parts[6] == "actions"
+                    and parts[8] == "artifacts"
+                ):
+                    payload = self.read_json_body()
+                    run = agent_workflow_service().submit_artifact(
+                        parts[3],
+                        unquote(parts[5]),
+                        unquote(parts[7]),
+                        data_url=payload.get("data_url"),
+                        file_name=payload.get("file_name") or "agent-result.png",
+                        metadata=payload.get("metadata")
+                        if isinstance(payload.get("metadata"), dict)
+                        else None,
+                        idempotency_key=str(
+                            self.headers.get("Idempotency-Key")
+                            or payload.get("idempotency_key")
+                            or ""
+                        ),
+                    )
+                    self.send_json({"ok": True, "agent_run": run})
+                    return
+                if (
+                    len(parts) == 9
+                    and parts[4] == "agent-runs"
+                    and parts[6] == "actions"
+                    and parts[8] == "retry"
+                ):
+                    run = agent_workflow_service().retry_action(
+                        parts[3], unquote(parts[5]), unquote(parts[7])
+                    )
+                    self.send_json({"ok": True, "agent_run": run})
+                    return
+                if len(parts) == 7 and parts[4] == "agent-runs":
+                    payload = self.read_json_body()
+                    operation = parts[6]
+                    if operation == "approve":
+                        run = agent_workflow_service().approve_run(
+                            parts[3],
+                            unquote(parts[5]),
+                            action_id=str(payload.get("action_id") or "*"),
+                            actor=payload.get("actor") or "user",
+                        )
+                    elif operation == "cancel":
+                        run = agent_workflow_service().cancel_run(
+                            parts[3],
+                            unquote(parts[5]),
+                            actor=payload.get("actor") or "user",
+                        )
+                    elif operation == "resume":
+                        run = agent_workflow_service().resume_run(
+                            parts[3], unquote(parts[5])
+                        )
+                    else:
+                        run = None
+                    if run is not None:
+                        self.send_json({"ok": True, "agent_run": run})
+                        return
             if parsed.path.startswith("/api/v1/projects/") and parsed.path.endswith("/asset-nodes"):
                 parts = [part for part in parsed.path.split("/") if part]
                 if len(parts) != 5:
@@ -7366,8 +7566,12 @@ class AppHandler(BaseHTTPRequestHandler):
                     and parts[6] == "visual-runs"
                     and parts[8] == "cancel"
                 ):
+                    payload = self.read_json_body()
                     run = STYLE_GUIDE_VISUAL_SERVICE.cancel_run(
-                        parts[3], unquote(parts[5]), unquote(parts[7])
+                        parts[3],
+                        unquote(parts[5]),
+                        unquote(parts[7]),
+                        variant=str(payload.get("variant") or ""),
                     )
                     self.send_json({"ok": True, "visual_run": run})
                     return
@@ -7421,9 +7625,9 @@ class AppHandler(BaseHTTPRequestHandler):
                         self.send_json({"ok": True, "style_guide": package})
                         return
                     if operation == "compile-preview":
-                        capability = project_generation_service(
-                            parts[3]
-                        ).image_model_capability(payload.get("model") or "")
+                        capability = GENERATION_PROVIDER.image_model_capability(
+                            payload.get("model") or ""
+                        )
                         compile_request = dict(payload)
                         compile_request["model_reference_limit"] = int(
                             capability.get("max_reference_images") or 0
@@ -7540,6 +7744,43 @@ class AppHandler(BaseHTTPRequestHandler):
                 profile = GENERATION_PROVIDER.test_connection()
                 self.send_json({"ok": True, "profile": profile})
                 return
+            if parsed.path == "/api/v1/generation/estimate":
+                payload = self.read_json_body()
+                model_id = str(payload.get("model") or "").strip()
+                params = payload.get("params")
+                if not isinstance(params, dict):
+                    params = {}
+                original_count = max(
+                    0,
+                    min(
+                        100,
+                        int(payload.get("original_reference_count") or 0),
+                    ),
+                )
+                effective_count = max(
+                    0,
+                    min(
+                        original_count,
+                        int(payload.get("effective_reference_count") or 0),
+                    ),
+                )
+                task_count = max(
+                    1, min(8, int(payload.get("task_count") or 1))
+                )
+                capability = GENERATION_PROVIDER.image_model_capability(
+                    model_id
+                )
+                if not capability:
+                    raise ValueError("Unknown image model")
+                estimate = GENERATION_PROVIDER.estimate_image_cost(
+                    capability,
+                    params,
+                    effective_reference_count=effective_count,
+                    original_reference_count=original_count,
+                    task_count=task_count,
+                )
+                self.send_json({"ok": True, "estimate": estimate})
+                return
             if parsed.path in {"/api/omnigen/generate", "/api/v1/generation/tasks"}:
                 payload = self.read_json_body()
                 project_id = required_project_id(payload.get("project_id"))
@@ -7558,6 +7799,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 }
                 if payload.get("style_direction_id"):
                     generation_context["style_direction_id"] = payload.get("style_direction_id")
+                model_id = str(payload.get("model") or "").strip()
+                capability = GENERATION_PROVIDER.image_model_capability(
+                    model_id
+                )
+                if not capability:
+                    raise ValueError("Unknown image model")
+                generation_context["model_reference_limit"] = int(
+                    capability.get("max_reference_images") or 0
+                )
                 retry_snapshot = payload.get("style_guide_snapshot")
                 if isinstance(retry_snapshot, dict):
                     for key in (
@@ -7571,11 +7821,19 @@ class AppHandler(BaseHTTPRequestHandler):
                         "style_guide_overrides",
                         "style_guide_warnings",
                         "style_guide_budget",
+                        "style_guide_template_variant",
+                        "style_guide_template_module_type",
+                        "style_guide_reference_roles",
                     ):
                         if key in retry_snapshot:
                             generation_context[key] = copy.deepcopy(retry_snapshot[key])
                 prompt = str(payload.get("prompt") or "")
                 params = copy.deepcopy(payload.get("params") or {})
+                if not isinstance(params, dict):
+                    raise ValueError("Image params must be an object")
+                params["optimize_reference_images"] = bool(
+                    params.get("optimize_reference_images", True)
+                )
                 style_guide = payload.get("style_guide")
                 if isinstance(style_guide, dict) and style_guide.get("package_id"):
                     package_id = str(style_guide.get("package_id") or "").strip()
@@ -7597,9 +7855,6 @@ class AppHandler(BaseHTTPRequestHandler):
                             status=HTTPStatus.BAD_REQUEST,
                         )
                         return
-                    capability = service.image_model_capability(
-                        payload.get("model") or ""
-                    )
                     overrides = {
                         "module_types": style_guide.get("module_types"),
                         "reference_ids": style_guide.get("reference_ids"),
@@ -7657,7 +7912,11 @@ class AppHandler(BaseHTTPRequestHandler):
                     params["negative_prompt"] = compiled["final_negative_prompt"]
                     params["reference_images"] = [
                         *(params.get("reference_images") or []),
-                        *(compiled.get("reference_paths") or []),
+                        *(
+                            compiled.get("reference_inputs")
+                            or compiled.get("reference_paths")
+                            or []
+                        ),
                     ]
                     generation_context.update(compiled.get("snapshot") or {})
                     generation_context["style_guide_warnings"] = copy.deepcopy(
@@ -7668,9 +7927,24 @@ class AppHandler(BaseHTTPRequestHandler):
                     )
                 record = service.submit_image(
                     prompt,
-                    payload.get("model"),
+                    model_id,
                     params,
                     context=generation_context,
+                )
+                optimization = record.get("reference_optimization") or {}
+                actual_estimate = GENERATION_PROVIDER.estimate_image_cost(
+                    capability,
+                    params,
+                    effective_reference_count=int(
+                        optimization.get("effective_count") or 0
+                    ),
+                    original_reference_count=int(
+                        optimization.get("original_count") or 0
+                    ),
+                    task_count=1,
+                )
+                record = service.update_record(
+                    record["id"], cost_estimate=actual_estimate
                 )
                 PROJECT_SERVICE.append_event(
                     project_id,
@@ -8236,6 +8510,16 @@ class AppHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/v1/projects/"):
             parts = [part for part in parsed.path.split("/") if part]
             try:
+                if len(parts) == 6 and parts[4] == "workflow-recipes":
+                    payload = self.read_json_body()
+                    recipe = agent_workflow_service().update_recipe(
+                        parts[3],
+                        unquote(parts[5]),
+                        changes=payload,
+                        actor=payload.get("actor") or "agent",
+                    )
+                    self.send_json({"ok": True, "workflow_recipe": recipe})
+                    return
                 if len(parts) == 4:
                     payload = self.read_json_body()
                     project = PROJECT_SERVICE.update_project(parts[3], changes=payload, actor=payload.get("actor") or "user")

@@ -56,14 +56,14 @@ test("containers browse descendants while concrete assets own generation", () =>
   assert.match(context, /aiChildAssetsSection\.hidden = !selected \|\| isGenerationTarget/);
   assert.match(context, /请选择具体资产/);
   assert.match(context, /asset-container-active/);
-  assert.match(context, /aiOpenGeneratePanelButton\.disabled = !isGenerationTarget/);
-  assert.match(context, /aiAddReferenceButton\.disabled = !isGenerationTarget/);
+  assert.match(context, /data-ai-production-action/);
+  assert.match(context, /button\.disabled = !isGenerationTarget/);
   assert.match(context, /aiChildAssetCreateLabel\.textContent = `创建/);
   assert.match(availability, /!hasGenerationTarget/);
   assert.match(submit, /分类和分组不能作为生成目标/);
   assert.match(submit, /asset_node_id: targetNode\.id/);
   assert.match(styles, /\.ai-image-workspace\.asset-leaf-active\s*\{[^}]*grid-template-rows:\s*minmax\(0, 1fr\);/s);
-  assert.match(productionPanelMarkup(), /class="ai-production-quick-actions"/);
+  assert.equal((productionPanelMarkup().match(/class="ai-production-quick-actions"/g) || []).length, 2);
   assert.match(productionPanelMarkup(), /id="aiAddReferenceButton"/);
   assert.match(styles, /\.ai-image-workspace\.asset-container-active\s*\{[^}]*grid-template-columns:\s*250px minmax\(0, 1fr\);/s);
   assert.match(styles, /\.ai-image-workspace\.asset-container-active \.ai-child-asset-grid\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\);[^}]*grid-auto-rows:\s*82px;[^}]*align-content:\s*start;/s);
@@ -101,13 +101,15 @@ test("image generation count remains available and defaults to one", () => {
   assert.doesNotMatch(select, /<option value="[248]" selected>/);
 });
 
-test("asset backgrounds remain transparent, solid and scene with swatches", () => {
-  const constants = source.match(/const ASSET_GENERATION_BACKGROUNDS = \[([\s\S]*?)\];/)?.[1] || "";
-  assert.match(constants, /value: "transparent"[\s\S]*swatch: "default"/);
-  assert.match(constants, /value: "solid"[\s\S]*swatch: "white"/);
-  assert.match(constants, /value: "scene"[\s\S]*swatch: "scene"/);
-  assert.equal((constants.match(/value:/g) || []).length, 3);
-  assert.match(styles, /\.style-background-swatch\.is-scene\s*\{/);
+test("asset generation reuses the established five background options", () => {
+  const constants = source.match(/const STYLE_GENERATION_BACKGROUNDS = \[([\s\S]*?)\];/)?.[1] || "";
+  assert.match(constants, /value: "default"[\s\S]*swatch: "default"/);
+  assert.match(constants, /value: "magenta"[\s\S]*swatch: "magenta"/);
+  assert.match(constants, /value: "green_screen"[\s\S]*swatch: "green"/);
+  assert.match(constants, /value: "white"[\s\S]*swatch: "white"/);
+  assert.match(constants, /value: "black"[\s\S]*swatch: "black"/);
+  assert.equal((constants.match(/value:/g) || []).length, 5);
+  assert.doesNotMatch(source, /const ASSET_GENERATION_BACKGROUNDS/);
 });
 
 test("style and asset panels share the generic background control", () => {
@@ -118,6 +120,8 @@ test("style and asset panels share the generic background control", () => {
   assert.match(bind, /data-generation-background-value/);
   assert.match(source, /data-generation-background-control="style"/);
   assert.match(asset, /data-generation-background-control="asset"/);
+  assert.match(asset, /styleGenerationBackgroundOption\(els\.aiBackgroundSelect\.value\)/);
+  assert.match(asset, /renderGenerationBackgroundControl\(STYLE_GENERATION_BACKGROUNDS/);
 });
 
 test("model occupies its own row and remaining parameters form a two by two grid", () => {
@@ -144,6 +148,22 @@ test("reference picker supports grouped reuse, local files, preview and limits",
   assert.match(clicks, /openImageLightbox/);
   assert.match(source, /aiModelReferenceLimit/);
   assert.match(productionPanelMarkup(), /id="aiReferenceImageInput"[^>]*multiple/);
+});
+
+test("reference summary exposes actual style guide images without treating them as removable content", () => {
+  const title = functionSource("aiStyleGuideReferenceTitle", "aiStyleGuideWarningMarkup");
+  const sync = functionSource("syncAiGenerationReferenceState", "handleAiGenerationReferenceClick");
+  const clicks = functionSource("handleAiGenerationReferenceClick", "handleAiGenerationReferenceChange");
+  const preview = functionSource("scheduleAiStyleGuidePreview", "handleAiStyleGuideControlChange");
+  assert.match(sync, /styleGuidePreview\?\.references/);
+  assert.match(sync, /styleReferenceUrl/);
+  assert.match(sync, /style-reference-summary-source/);
+  assert.match(sync, /data-ai-reference-action="preview-guide"/);
+  assert.doesNotMatch(sync, /preview-guide[^\n]*data-ai-reference-action="remove"/);
+  assert.match(title, /\["风格模板", trace/);
+  assert.match(clicks, /action === "preview-guide"[\s\S]*openImageLightbox/);
+  assert.match(preview, /syncAiGenerationReferenceState\(\)/);
+  assert.match(styles, /button\.style-reference-summary-item\.guide/);
 });
 
 test("submission merges reused and uploaded references without the removed description", () => {

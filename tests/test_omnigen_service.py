@@ -447,6 +447,172 @@ class OmniGenOperationsTests(unittest.TestCase):
                 )
                 self.assertEqual(models[0]["max_reference_images"], 3)
 
+    def test_normalizes_billing_rules_without_model_id_price_hardcoding(self):
+        rules = {
+            "unit": "composite",
+            "currency": "CNY",
+            "components": [
+                {
+                    "key": "input_images",
+                    "amount": 0.1,
+                    "quantity_from": "input_images",
+                },
+                {
+                    "key": "output_images",
+                    "prices": {"1K": 0.395, "2K": 0.803},
+                    "quantity_from": "output_images",
+                },
+            ],
+        }
+        models = OmniGenService._normalize_image_models(
+            {"models": [{"id": "provider-defined-name", "billing_rules": rules}]}
+        )
+
+        self.assertEqual(models[0]["billing_rules"], rules)
+
+    def test_estimates_composite_reference_and_batch_cost(self):
+        model = {
+            "billing_rules": {
+                "unit": "composite",
+                "currency": "CNY",
+                "components": [
+                    {
+                        "key": "input_images",
+                        "label": "输入参考图",
+                        "amount": 0.1,
+                        "quantity_from": "input_images",
+                    },
+                    {
+                        "key": "output_images",
+                        "label": "输出图片",
+                        "prices": {"1K": 0.395, "default": 0.395},
+                        "quantity_from": "output_images",
+                    },
+                ],
+            }
+        }
+
+        quote = OmniGenService.estimate_image_cost(
+            model,
+            {"resolution": "1K", "aspect_ratio": "1:1"},
+            effective_reference_count=1,
+            original_reference_count=8,
+            task_count=4,
+        )
+
+        self.assertEqual(quote["currency"], "CNY")
+        self.assertTrue(quote["exact"])
+        self.assertEqual(quote["reference"]["billable_count"], 1)
+        self.assertAlmostEqual(quote["per_task_total"], 0.495)
+        self.assertAlmostEqual(quote["total"], 1.98)
+        self.assertAlmostEqual(quote["savings"], 2.8)
+
+    def test_estimates_free_reference_and_pixel_threshold(self):
+        model = {
+            "billing_rules": {
+                "unit": "composite",
+                "currency": "CNY",
+                "components": [
+                    {
+                        "key": "input_images",
+                        "amount": 0.02,
+                        "free_quantity": 1,
+                        "quantity_from": "input_images",
+                    },
+                    {
+                        "key": "output_images",
+                        "rules": [
+                            {
+                                "when": {"output_pixels_lte": 2360000},
+                                "amount": 0.3,
+                            },
+                            {
+                                "when": {"output_pixels_gt": 2360000},
+                                "amount": 0.6,
+                            },
+                        ],
+                        "quantity_from": "output_images",
+                    },
+                ],
+            }
+        }
+
+        low = OmniGenService.estimate_image_cost(
+            model,
+            {"resolution": "1K", "aspect_ratio": "1:1"},
+            effective_reference_count=1,
+            original_reference_count=4,
+            task_count=1,
+        )
+        high = OmniGenService.estimate_image_cost(
+            model,
+            {"resolution": "2K", "aspect_ratio": "1:1"},
+            effective_reference_count=1,
+            original_reference_count=4,
+            task_count=1,
+        )
+
+        self.assertEqual(low["reference"]["billable_count"], 0)
+        self.assertEqual(low["total"], 0.3)
+        self.assertEqual(high["total"], 0.6)
+        self.assertAlmostEqual(low["savings"], 0.06)
+
+    def test_estimates_fixed_item_price_without_reference_surcharge(self):
+        quote = OmniGenService.estimate_image_cost(
+            {
+                "billing_rules": {
+                    "unit": "cny/item",
+                    "amount": 0.25,
+                    "currency": "CNY",
+                }
+            },
+            {"resolution": "1K", "aspect_ratio": "1:1"},
+            effective_reference_count=1,
+            original_reference_count=8,
+            task_count=2,
+        )
+
+        self.assertEqual(quote["reference"]["unit_price"], None)
+        self.assertEqual(quote["total"], 0.5)
+        self.assertEqual(quote["savings"], 0.0)
+
+    def test_token_pricing_uses_declared_resolution_fallback_as_non_exact(self):
+        quote = OmniGenService.estimate_image_cost(
+            {
+                "billing_rules": {
+                    "unit": "token_usage",
+                    "currency": "USD",
+                    "fallback": {
+                        "unit": "item",
+                        "prices_by_resolution": {"1K": 0.0672},
+                    },
+                }
+            },
+            {"resolution": "1K", "aspect_ratio": "1:1"},
+            effective_reference_count=1,
+            original_reference_count=3,
+            task_count=2,
+        )
+
+        self.assertFalse(quote["exact"])
+        self.assertTrue(quote["used_fallback"])
+        self.assertEqual(quote["currency"], "USD")
+        self.assertAlmostEqual(quote["total"], 0.1344)
+        self.assertIsNone(quote["savings"])
+
+    def test_unrecognized_pricing_is_explicitly_unavailable(self):
+        quote = OmniGenService.estimate_image_cost(
+            {"billing_rules": {}},
+            {"resolution": "1K", "aspect_ratio": "1:1"},
+            effective_reference_count=0,
+            original_reference_count=0,
+            task_count=1,
+        )
+
+        self.assertFalse(quote["exact"])
+        self.assertIsNone(quote["total"])
+        self.assertTrue(quote["unavailable_reason"])
+
     def test_connection_updates_only_omnigen_validation_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             settings_path = Path(directory) / "settings.json"
@@ -544,6 +710,7 @@ class OmniGenOperationsTests(unittest.TestCase):
                             "display_name": "Image A",
                             "modality": "image",
                             "pricing": {"credits": 2},
+                            "billing_rules": {},
                             "capabilities": {"seed": True},
                             "supported_aspect_ratios": ["1:1", "16:9"],
                             "supported_resolutions": ["1024x1024"],
@@ -551,6 +718,42 @@ class OmniGenOperationsTests(unittest.TestCase):
                         }
                     ],
                 )
+
+    def test_image_model_capability_reuses_recent_model_list(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            with mock.patch.object(
+                service,
+                "call_tool",
+                return_value={"models": [{"id": "image-a", "modality": "image"}]},
+            ) as call_tool:
+                service.list_image_models()
+                capability = service.image_model_capability("image-a")
+
+            self.assertEqual(capability["id"], "image-a")
+            call_tool.assert_called_once_with(
+                "list_generation_models", {"modality": "image"}
+            )
+
+    def test_image_model_capability_uses_stale_cache_when_refresh_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            service._image_models_cache = {
+                "image-a": {"id": "image-a", "billing_rules": {"unit": "item"}}
+            }
+            service._image_models_cache_refresh_after = 0.0
+            with mock.patch.object(
+                service,
+                "call_tool",
+                side_effect=OmniGenError("temporary provider failure"),
+            ):
+                capability = service.image_model_capability("image-a")
+
+            self.assertEqual(capability["id"], "image-a")
+            self.assertGreater(
+                service._image_models_cache_refresh_after,
+                time.monotonic(),
+            )
 
     def test_submit_image_updates_the_persisted_record_after_remote_submission(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -680,6 +883,264 @@ class OmniGenOperationsTests(unittest.TestCase):
                 record["reference_assets"][0]["asset_id"],
                 "asset-uploaded",
             )
+
+    def test_submit_image_composites_multiple_local_references_by_default(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            Image.new("RGB", (400, 100), "red").save(
+                service.work_dir / "wide.png"
+            )
+            Image.new("RGB", (100, 400), "blue").save(
+                service.work_dir / "tall.png"
+            )
+            calls = []
+
+            def call_tool(name, arguments):
+                calls.append((name, arguments))
+                if name == "upload_asset":
+                    return {"asset_id": "asset-composite"}
+                if name == "generate_image":
+                    return {"task_id": "task-composite"}
+                self.fail(f"Unexpected tool call: {name}")
+
+            with mock.patch.object(
+                service, "call_tool", side_effect=call_tool
+            ):
+                record = service.submit_image(
+                    "hero",
+                    "image-a",
+                    {"reference_images": ["wide.png", "tall.png"]},
+                )
+
+            generate = next(
+                arguments for name, arguments in calls if name == "generate_image"
+            )
+            self.assertEqual(len(generate["inputs"]), 1)
+            self.assertNotIn("optimize_reference_images", generate["params"])
+            self.assertEqual(
+                record["params"]["reference_images"],
+                ["wide.png", "tall.png"],
+            )
+            optimization = record["reference_optimization"]
+            self.assertTrue(optimization["enabled"])
+            self.assertEqual(optimization["original_count"], 2)
+            self.assertEqual(optimization["effective_count"], 1)
+            composite_path = service.work_dir / optimization[
+                "composite_relative_path"
+            ]
+            self.assertTrue(composite_path.is_file())
+            with Image.open(composite_path) as composite:
+                self.assertEqual(composite.mode, "RGB")
+                self.assertLessEqual(max(composite.size), 4096)
+
+    def test_submit_image_keeps_multiple_inputs_when_optimization_is_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            Image.new("RGB", (64, 32), "red").save(service.work_dir / "a.png")
+            Image.new("RGB", (32, 64), "blue").save(service.work_dir / "b.png")
+            generated = []
+            upload_index = 0
+
+            def call_tool(name, arguments):
+                nonlocal upload_index
+                if name == "upload_asset":
+                    upload_index += 1
+                    return {"asset_id": f"asset-{upload_index}"}
+                if name == "generate_image":
+                    generated.append(arguments)
+                    return {"task_id": "task-disabled"}
+                self.fail(f"Unexpected tool call: {name}")
+
+            with mock.patch.object(
+                service, "call_tool", side_effect=call_tool
+            ):
+                record = service.submit_image(
+                    "hero",
+                    "image-a",
+                    {
+                        "reference_images": ["a.png", "b.png"],
+                        "optimize_reference_images": False,
+                    },
+                )
+
+            self.assertEqual(len(generated[0]["inputs"]), 2)
+            self.assertNotIn(
+                "optimize_reference_images", generated[0]["params"]
+            )
+            self.assertEqual(
+                record["reference_optimization"]["effective_count"], 2
+            )
+            self.assertEqual(
+                record["reference_optimization"]["composite_relative_path"],
+                "",
+            )
+
+    def test_reference_optimization_never_merges_style_with_content(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            for name, color in (("pose-a.png", "red"), ("pose-b.png", "blue"), ("style.png", "green")):
+                Image.new("RGB", (64, 64), color).save(service.work_dir / name)
+            upload_index = 0
+
+            def call_tool(name, _arguments):
+                nonlocal upload_index
+                if name == "upload_asset":
+                    upload_index += 1
+                    return {"asset_id": f"asset-{upload_index}"}
+                if name == "generate_image":
+                    return {"task_id": "task-role-aware"}
+                self.fail(f"Unexpected tool call: {name}")
+
+            with mock.patch.object(service, "call_tool", side_effect=call_tool):
+                record = service.submit_image(
+                    "hero",
+                    "image-a",
+                    {
+                        "reference_images": [
+                            {"relative_path": "pose-a.png", "reference_role": "content"},
+                            {"relative_path": "pose-b.png", "reference_role": "content"},
+                            {"relative_path": "style.png", "reference_role": "style"},
+                        ]
+                    },
+                )
+
+            optimization = record["reference_optimization"]
+            self.assertEqual(optimization["effective_count"], 2)
+            self.assertEqual(
+                {item["role"] for item in optimization["groups"]},
+                {"content", "style"},
+            )
+            self.assertEqual(
+                {item["reference_role"] for item in record["reference_assets"]},
+                {"content", "style"},
+            )
+
+    def test_reference_composite_cache_is_stable_for_same_ordered_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            Image.new("RGB", (64, 32), "red").save(service.work_dir / "a.png")
+            Image.new("RGB", (32, 64), "blue").save(service.work_dir / "b.png")
+            upload_count = 0
+
+            def call_tool(name, _arguments):
+                nonlocal upload_count
+                if name == "upload_asset":
+                    upload_count += 1
+                    return {"asset_id": "asset-composite"}
+                if name == "generate_image":
+                    return {"task_id": f"task-{upload_count}"}
+                self.fail(f"Unexpected tool call: {name}")
+
+            with mock.patch.object(
+                service, "call_tool", side_effect=call_tool
+            ):
+                first = service.submit_image(
+                    "first",
+                    "image-a",
+                    {"reference_images": ["a.png", "b.png"]},
+                )
+                second = service.submit_image(
+                    "second",
+                    "image-a",
+                    {"reference_images": ["a.png", "b.png"]},
+                )
+
+            self.assertEqual(
+                first["reference_optimization"]["composite_relative_path"],
+                second["reference_optimization"]["composite_relative_path"],
+            )
+            self.assertEqual(
+                len(list(service.reference_composites_dir.glob("*.png"))), 1
+            )
+            self.assertEqual(upload_count, 1)
+
+    def test_reference_optimization_keeps_public_urls_as_independent_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            Image.new("RGB", (64, 32), "red").save(service.work_dir / "a.png")
+            Image.new("RGB", (32, 64), "blue").save(service.work_dir / "b.png")
+
+            def call_tool(name, arguments):
+                if name == "upload_asset":
+                    return {"asset_id": "asset-composite"}
+                if name == "generate_image":
+                    self.assertEqual(len(arguments["inputs"]), 2)
+                    self.assertEqual(arguments["inputs"][1]["type"], "url")
+                    return {"task_id": "task-mixed"}
+                self.fail(f"Unexpected tool call: {name}")
+
+            with mock.patch.object(
+                service, "call_tool", side_effect=call_tool
+            ):
+                record = service.submit_image(
+                    "mixed",
+                    "image-a",
+                    {
+                        "reference_images": [
+                            "a.png",
+                            "https://example.com/reference.png",
+                            "b.png",
+                        ]
+                    },
+                )
+
+            optimization = record["reference_optimization"]
+            self.assertEqual(optimization["original_count"], 3)
+            self.assertEqual(optimization["effective_count"], 2)
+            self.assertEqual(
+                optimization["unmerged_references"],
+                ["url:https://example.com/reference.png"],
+            )
+
+    def test_effective_reference_limit_is_checked_before_remote_upload(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            Image.new("RGB", (64, 32), "red").save(service.work_dir / "a.png")
+            Image.new("RGB", (32, 64), "blue").save(service.work_dir / "b.png")
+
+            with mock.patch.object(service, "call_tool") as call_tool:
+                with self.assertRaisesRegex(
+                    ValueError, "最多支持 1 张实际参考输入"
+                ):
+                    service.submit_image(
+                        "mixed",
+                        "image-a",
+                        {
+                            "reference_images": [
+                                "a.png",
+                                "https://example.com/reference.png",
+                                "b.png",
+                            ]
+                        },
+                        context={"model_reference_limit": 1},
+                    )
+
+            call_tool.assert_not_called()
+            record = service.list_history()[0]
+            self.assertEqual(record["status"], "failed")
+            self.assertEqual(
+                record["reference_optimization"]["effective_count"], 2
+            )
+
+    def test_reference_composite_rejects_invalid_images_without_remote_fallback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            service = OmniGenService(Path(directory))
+            (service.work_dir / "bad.png").write_bytes(b"not an image")
+            Image.new("RGB", (32, 32), "blue").save(
+                service.work_dir / "good.png"
+            )
+
+            with mock.patch.object(service, "call_tool") as call_tool:
+                with self.assertRaisesRegex(ValueError, "invalid|reference|图片"):
+                    service.submit_image(
+                        "broken",
+                        "image-a",
+                        {"reference_images": ["bad.png", "good.png"]},
+                    )
+
+            call_tool.assert_not_called()
+            record = service.list_history()[0]
+            self.assertEqual(record["status"], "failed")
 
     def test_submit_image_reuses_generated_result_asset_without_uploading(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1029,11 +1490,48 @@ class ServerApiTests(unittest.TestCase):
         self.service.submit_image.return_value = {
             "id": "record-1",
             "status": "queued",
+            "reference_optimization": {
+                "enabled": True,
+                "rule_version": 1,
+                "original_count": 0,
+                "effective_count": 0,
+                "composite_relative_path": "",
+                "unmerged_references": [],
+            },
         }
         self.service.image_model_capability.return_value = {
             "id": "image-a",
             "max_reference_images": 4,
+            "billing_rules": {
+                "unit": "cny/item",
+                "amount": 0.25,
+                "currency": "CNY",
+            },
         }
+        self.service.estimate_image_cost.return_value = {
+            "currency": "CNY",
+            "exact": True,
+            "used_fallback": False,
+            "reference": {
+                "unit_price": None,
+                "free_quantity": 0,
+                "billable_count": 0,
+                "subtotal": 0.0,
+            },
+            "generation": {"unit_price": 0.25, "subtotal": 0.25},
+            "per_task_total": 0.25,
+            "task_count": 1,
+            "total": 0.25,
+            "unoptimized_total": 0.25,
+            "savings": 0.0,
+            "unavailable_reason": "",
+        }
+        self.service.update_record.side_effect = (
+            lambda _record_id, **changes: {
+                **self.service.submit_image.return_value,
+                **changes,
+            }
+        )
         self.service.delete_records.return_value = {"deleted_ids": ["record-1"]}
         self.patch = mock.patch.object(
             server_module, "GENERATION_PROVIDER", self.service, create=True
@@ -1213,6 +1711,36 @@ class ServerApiTests(unittest.TestCase):
                 self.assertEqual(payload[key], expected)
         self.service.refresh_task.assert_called_once_with("record-1")
 
+    def test_generation_estimate_route_uses_shared_service_quote(self):
+        self.service.estimate_image_cost.return_value = {
+            **self.service.estimate_image_cost.return_value,
+            "task_count": 4,
+            "total": 1.0,
+            "unoptimized_total": 1.0,
+        }
+
+        status, payload = self.request(
+            "POST",
+            "/api/v1/generation/estimate",
+            {
+                "model": "image-a",
+                "params": {"resolution": "1K", "aspect_ratio": "1:1"},
+                "original_reference_count": 8,
+                "effective_reference_count": 1,
+                "task_count": 4,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["estimate"]["total"], 1.0)
+        self.service.estimate_image_cost.assert_called_once_with(
+            self.service.image_model_capability.return_value,
+            {"resolution": "1K", "aspect_ratio": "1:1"},
+            effective_reference_count=1,
+            original_reference_count=8,
+            task_count=4,
+        )
+
     def test_style_guide_routes_expose_manual_core_operations(self):
         status, payload = self.request("GET", "/api/v1/projects/default/style-guides")
         self.assertEqual(status, 200)
@@ -1337,7 +1865,19 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(payload["visual_run"]["status"], "canceling")
         self.visual_service.cancel_run.assert_called_once_with(
-            "default", "guide-one", "visualrun-one"
+            "default", "guide-one", "visualrun-one", variant=""
+        )
+
+    def test_cancel_visual_run_accepts_variant_scope(self):
+        status, payload = self.request(
+            "POST",
+            "/api/v1/projects/default/style-guides/guide-one/visual-runs/visualrun-one/cancel",
+            {"variant": "compact"},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["visual_run"]["status"], "canceling")
+        self.visual_service.cancel_run.assert_called_once_with(
+            "default", "guide-one", "visualrun-one", variant="compact"
         )
 
     def test_missing_visual_run_returns_400_without_leaking_paths(self):
@@ -1366,6 +1906,19 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(request_payload["reference_sources"][0]["id"], "record-1")
 
     def test_generation_compiles_exact_style_guide_version_before_submit(self):
+        self.service.submit_image.return_value = {
+            **self.service.submit_image.return_value,
+            "reference_optimization": {
+                "enabled": True,
+                "rule_version": 1,
+                "original_count": 2,
+                "effective_count": 1,
+                "composite_relative_path": (
+                    ".sprite-lab/generation/reference-composites/key.png"
+                ),
+                "unmerged_references": [],
+            },
+        }
         status, payload = self.request(
             "POST",
             "/api/v1/generation/tasks",
@@ -1377,6 +1930,7 @@ class ServerApiTests(unittest.TestCase):
                 "params": {
                     "negative_prompt": "text",
                     "reference_images": ["references/user.png"],
+                    "optimize_reference_images": True,
                 },
                 "style_guide": {
                     "package_id": "guide-one",
@@ -1396,9 +1950,15 @@ class ServerApiTests(unittest.TestCase):
         self.assertEqual(call.args[0], "hero, guided pixel art")
         self.assertEqual(call.args[2]["negative_prompt"], "photorealistic")
         self.assertEqual(len(call.args[2]["reference_images"]), 2)
+        self.assertTrue(call.args[2]["optimize_reference_images"])
         self.assertEqual(
             call.kwargs["context"]["style_guide_version_id"], "version-one"
         )
+        self.assertEqual(call.kwargs["context"]["model_reference_limit"], 4)
+        saved_estimate = self.service.update_record.call_args.kwargs[
+            "cost_estimate"
+        ]
+        self.assertEqual(saved_estimate["task_count"], 1)
 
     def test_generation_rejects_blocking_style_guide_compile(self):
         self.guide_service.compile_for_generation.return_value = {
@@ -1473,12 +2033,13 @@ class ServerApiTests(unittest.TestCase):
         self.service.submit_image.assert_called_once_with(
             "hero",
             "image-a",
-            {"seed": 7},
+            {"seed": 7, "optimize_reference_images": True},
             context={
                 "project_id": "default",
                 "asset_node_id": "asset-character-test",
                 "workflow_run_id": None,
                 "actor": "user",
+                "model_reference_limit": 4,
             },
         )
         self.service.delete_records.assert_called_once_with(

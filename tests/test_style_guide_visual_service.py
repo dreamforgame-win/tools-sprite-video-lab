@@ -93,6 +93,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
             "module_types": ["environment", "ui_hud"],
             "model": "image-a",
             "params": {"aspect_ratio": "16:9", "resolution": "1K"},
+            "requested_variants": ["detailed"],
             "reference_sources": [
                 {
                     "kind": "style_reference",
@@ -122,9 +123,10 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
             "default", self.package["id"], run["id"], generation_service=self.generation
         )
         for node in run["nodes"]:
-            if node["kind"] == "image" and node["id"] != "anchor":
+            if node["kind"] == "image" and node["node_key"] != "anchor":
+                safe_id = node["id"].replace(":", "-")
                 self.generation.succeed(
-                    node["record_id"], f"production/generated/{node['id']}.png", f"asset-{node['id']}"
+                    node["record_id"], f"production/generated/{safe_id}.png", f"asset-{safe_id}"
                 )
         return self.visuals.refresh_run(
             "default", self.package["id"], run["id"], generation_service=self.generation
@@ -143,11 +145,57 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
 
     def test_create_modular_run_builds_dynamic_node_plan(self):
         run = self.visuals.create_run_document("default", self.package["id"], self.request(module_types=["ui_hud", "environment"]))
-        self.assertEqual([node["id"] for node in run["nodes"]], ["anchor", "environment", "ui_hud", "template"])
+        self.assertEqual([node["id"] for node in run["nodes"]], ["detailed:anchor", "detailed:environment", "detailed:ui_hud", "detailed:template"])
 
     def test_create_overall_run_has_exactly_two_nodes(self):
         run = self.visuals.create_run_document("default", self.package["id"], self.request(mode="overall", module_types=["environment"]))
-        self.assertEqual([node["id"] for node in run["nodes"]], ["overall", "template"])
+        self.assertEqual([node["id"] for node in run["nodes"]], ["detailed:overall", "detailed:template"])
+
+    def test_compact_only_modular_run_has_no_local_template(self):
+        run = self.create(
+            module_types=["character"], requested_variants=["compact"]
+        )
+        self.assertEqual(run["requested_variants"], ["compact"])
+        self.assertEqual(
+            [node["id"] for node in run["nodes"]],
+            ["compact:anchor", "compact:character"],
+        )
+
+    def test_detailed_only_preserves_remote_chain_and_local_renderer(self):
+        run = self.create(
+            module_types=["character"], requested_variants=["detailed"]
+        )
+        self.assertEqual(
+            [node["id"] for node in run["nodes"]],
+            ["detailed:anchor", "detailed:character", "detailed:template"],
+        )
+
+    def test_dual_overall_run_submits_distinct_remote_images(self):
+        run = self.create(
+            mode="overall",
+            module_types=["environment"],
+            requested_variants=["compact", "detailed"],
+        )
+        self.assertEqual(
+            [node["id"] for node in run["nodes"]],
+            ["compact:overall", "detailed:overall", "detailed:template"],
+        )
+        self.assertEqual(len(self.generation.calls), 2)
+        self.assertEqual(
+            {
+                call["context"]["style_guide_template_variant"]
+                for call in self.generation.calls
+            },
+            {"compact", "detailed"},
+        )
+        self.assertTrue(
+            all(
+                call["context"]["style_guide_visual_node_id"].startswith(
+                    call["context"]["style_guide_template_variant"] + ":"
+                )
+                for call in self.generation.calls
+            )
+        )
 
     def test_unknown_mode_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -168,7 +216,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
     def test_detail_profile_defaults_to_compact_and_is_persisted(self):
         run = self.visuals.create_run_document("default", self.package["id"], self.request())
         self.assertEqual(run["detail_profile"], "compact")
-        self.assertEqual(run["prompt_bundle"]["detail_profile"], "compact")
+        self.assertEqual(run["prompt_bundles"]["detailed"]["detail_profile"], "compact")
         self.assertIn("96–128px", run["nodes"][0]["prompt"])
 
     def test_detail_profile_changes_input_signature_and_preview(self):
@@ -181,7 +229,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         preview = self.create(detail_profile="standard", preview_only=True)
         self.assertNotEqual(compact["input_signature"], rich["input_signature"])
         self.assertEqual(preview["detail_profile"], "standard")
-        self.assertEqual(preview["prompt_bundle"]["detail_profile"], "standard")
+        self.assertEqual(preview["prompt_bundles"]["detailed"]["detail_profile"], "standard")
 
     def test_unknown_detail_profile_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -227,12 +275,12 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
     def test_overall_run_submits_one_image_task(self):
         run = self.create(mode="overall", module_types=["environment"])
         self.assertEqual(len(self.generation.calls), 1)
-        self.assertEqual(run["nodes"][0]["id"], "overall")
+        self.assertEqual(run["nodes"][0]["id"], "detailed:overall")
 
     def test_modular_run_submits_only_anchor_initially(self):
         run = self.create()
         self.assertEqual(len(self.generation.calls), 1)
-        self.assertEqual(run["nodes"][0]["id"], "anchor")
+        self.assertEqual(run["nodes"][0]["id"], "detailed:anchor")
 
     def test_preview_only_has_no_files_or_tasks(self):
         before = len(self.visuals.list_runs("default", self.package["id"]))
@@ -245,7 +293,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         run = self.create(module_types=["ui_hud", "environment"])
         self.generation.succeed(run["nodes"][0]["record_id"], "production/generated/anchor.png", "asset-anchor")
         self.visuals.refresh_run("default", self.package["id"], run["id"], generation_service=self.generation)
-        self.assertEqual([call["context"]["style_guide_visual_node_id"] for call in self.generation.calls], ["anchor", "environment", "ui_hud"])
+        self.assertEqual([call["context"]["style_guide_visual_node_id"] for call in self.generation.calls], ["detailed:anchor", "detailed:environment", "detailed:ui_hud"])
 
     def test_module_inputs_use_anchor_asset_within_limit(self):
         run = self.create(module_types=["environment"])
@@ -259,12 +307,49 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         run = self.create()
         self.generation.succeed(run["nodes"][0]["record_id"], "production/generated/anchor.png", "asset-anchor")
         run = self.visuals.refresh_run("default", self.package["id"], run["id"], generation_service=self.generation)
-        environment = next(node for node in run["nodes"] if node["id"] == "environment")
-        ui = next(node for node in run["nodes"] if node["id"] == "ui_hud")
+        environment = next(node for node in run["nodes"] if node["id"] == "detailed:environment")
+        ui = next(node for node in run["nodes"] if node["id"] == "detailed:ui_hud")
         self.generation.succeed(environment["record_id"], "production/generated/environment.png", "asset-environment")
         self.generation.fail(ui["record_id"])
         run = self.visuals.refresh_run("default", self.package["id"], run["id"], generation_service=self.generation)
-        self.assertEqual(next(node for node in run["nodes"] if node["id"] == "environment")["status"], "succeeded")
+        self.assertEqual(next(node for node in run["nodes"] if node["id"] == "detailed:environment")["status"], "succeeded")
+
+    def test_failed_compact_module_can_finalize_with_detailed_success(self):
+        run = self.create(
+            module_types=["character"],
+            requested_variants=["compact", "detailed"],
+        )
+        for node in run["nodes"]:
+            if node["node_key"] == "anchor":
+                safe_id = node["id"].replace(":", "-")
+                self.generation.succeed(
+                    node["record_id"],
+                    f"production/generated/{safe_id}.png",
+                    f"asset-{safe_id}",
+                )
+        run = self.visuals.refresh_run(
+            "default", self.package["id"], run["id"], generation_service=self.generation
+        )
+        compact_character = next(
+            node for node in run["nodes"] if node["id"] == "compact:character"
+        )
+        detailed_character = next(
+            node for node in run["nodes"] if node["id"] == "detailed:character"
+        )
+        self.generation.fail(compact_character["record_id"])
+        self.generation.succeed(
+            detailed_character["record_id"],
+            "production/generated/detailed-character.png",
+            "asset-detailed-character",
+        )
+
+        completed = self.visuals.refresh_run(
+            "default", self.package["id"], run["id"], generation_service=self.generation
+        )
+
+        self.assertEqual(completed["status"], "applied")
+        self.assertEqual(completed["variant_states"]["compact"]["status"], "partial")
+        self.assertEqual(completed["variant_states"]["detailed"]["status"], "succeeded")
 
     def test_active_module_keeps_parent_running_when_sibling_failed(self):
         run = self.create()
@@ -272,7 +357,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         run = self.visuals.refresh_run(
             "default", self.package["id"], run["id"], generation_service=self.generation
         )
-        ui = next(node for node in run["nodes"] if node["id"] == "ui_hud")
+        ui = next(node for node in run["nodes"] if node["id"] == "detailed:ui_hud")
         self.generation.fail(ui["record_id"])
 
         refreshed = self.visuals.refresh_run(
@@ -280,7 +365,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            next(node for node in refreshed["nodes"] if node["id"] == "environment")["status"],
+            next(node for node in refreshed["nodes"] if node["id"] == "detailed:environment")["status"],
             "queued",
         )
         self.assertEqual(refreshed["status"], "running")
@@ -292,7 +377,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
             "default", self.package["id"], run["id"], generation_service=self.generation
         )
         for node in run["nodes"]:
-            if node["id"] in {"environment", "ui_hud"}:
+            if node["id"] in {"detailed:environment", "detailed:ui_hud"}:
                 self.generation.fail(node["record_id"])
         run = self.visuals.refresh_run(
             "default", self.package["id"], run["id"], generation_service=self.generation
@@ -301,7 +386,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
             "default",
             self.package["id"],
             run["id"],
-            "environment",
+            "detailed:environment",
             generation_service=self.generation,
         )
 
@@ -310,7 +395,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            next(node for node in refreshed["nodes"] if node["id"] == "environment")["status"],
+            next(node for node in refreshed["nodes"] if node["id"] == "detailed:environment")["status"],
             "queued",
         )
         self.assertEqual(refreshed["status"], "running")
@@ -328,7 +413,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
                 "default", self.package["id"], run["id"], generation_service=self.generation
             )
 
-        modules = [node for node in refreshed["nodes"] if node["id"] in refreshed["module_types"]]
+        modules = [node for node in refreshed["nodes"] if node["module_type"] in refreshed["module_types"]]
         self.assertEqual(submit.call_count, 1)
         self.assertTrue(all(node["status"] == "failed" for node in modules))
         self.assertEqual([node["attempt"] for node in modules], [1, 0, 0])
@@ -344,7 +429,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         self.assertEqual(canceling["status"], "canceling")
         self.assertTrue(canceling["cancel_requested_at"])
         self.assertEqual(
-            [node["status"] for node in canceling["nodes"] if node["id"] in run["module_types"]],
+            [node["status"] for node in canceling["nodes"] if node["module_type"] in run["module_types"]],
             ["canceled", "canceled"],
         )
         self.generation.succeed(
@@ -362,6 +447,33 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         self.assertFalse(canceled["template_relative_path"])
         self.assertFalse(self.guides.list_versions("default", self.package["id"]))
 
+    def test_cancel_compact_does_not_cancel_detailed(self):
+        run = self.create(
+            module_types=["character"],
+            requested_variants=["compact", "detailed"],
+        )
+
+        canceling = self.visuals.cancel_run(
+            "default",
+            self.package["id"],
+            run["id"],
+            variant="compact",
+        )
+
+        compact = [node for node in canceling["nodes"] if node["variant"] == "compact"]
+        detailed = [node for node in canceling["nodes"] if node["variant"] == "detailed"]
+        self.assertTrue(
+            all(node["status"] in {"cancel_requested", "canceled"} for node in compact)
+        )
+        self.assertTrue(
+            any(
+                node["status"] in {"submitting", "queued", "running"}
+                for node in detailed
+                if node["kind"] == "image"
+            )
+        )
+        self.assertEqual(canceling["status"], "running")
+
     def test_cancel_after_module_submission_waits_for_remote_nodes(self):
         run = self.create(module_types=["environment", "character"])
         self.generation.succeed(run["nodes"][0]["record_id"], "production/generated/anchor.png", "asset-anchor")
@@ -376,18 +488,19 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         self.assertEqual(canceling["status"], "canceling")
         self.assertEqual(len(self.generation.calls), 3)
         for node in canceling["nodes"]:
-            if node["id"] in canceling["module_types"]:
+            if node["module_type"] in canceling["module_types"]:
+                safe_id = node["id"].replace(":", "-")
                 self.generation.succeed(
                     node["record_id"],
-                    f"production/generated/canceled-{node['id']}.png",
-                    f"asset-canceled-{node['id']}",
+                    f"production/generated/canceled-{safe_id}.png",
+                    f"asset-canceled-{safe_id}",
                 )
         canceled = self.visuals.refresh_run(
             "default", self.package["id"], run["id"], generation_service=self.generation
         )
 
         self.assertEqual(canceled["status"], "canceled")
-        self.assertEqual(next(node for node in canceled["nodes"] if node["id"] == "template")["status"], "canceled")
+        self.assertEqual(next(node for node in canceled["nodes"] if node["id"] == "detailed:template")["status"], "canceled")
         self.assertFalse(self.guides.list_versions("default", self.package["id"]))
 
     def test_cancel_request_is_idempotent_and_persisted(self):
@@ -411,17 +524,17 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
         run = self.create(module_types=["environment"])
         self.generation.succeed(run["nodes"][0]["record_id"], "production/generated/anchor.png", "asset-anchor")
         run = self.visuals.refresh_run("default", self.package["id"], run["id"], generation_service=self.generation)
-        module = next(node for node in run["nodes"] if node["id"] == "environment")
+        module = next(node for node in run["nodes"] if node["id"] == "detailed:environment")
         self.generation.fail(module["record_id"])
         self.visuals.refresh_run("default", self.package["id"], run["id"], generation_service=self.generation)
-        retried = self.visuals.retry_node("default", self.package["id"], run["id"], "environment", generation_service=self.generation)
-        self.assertEqual(next(node for node in retried["nodes"] if node["id"] == "anchor")["status"], "succeeded")
+        retried = self.visuals.retry_node("default", self.package["id"], run["id"], "detailed:environment", generation_service=self.generation)
+        self.assertEqual(next(node for node in retried["nodes"] if node["id"] == "detailed:anchor")["status"], "succeeded")
 
     def test_regenerated_anchor_invalidates_module_results(self):
         run = self.finish_modular(["environment"])
-        regenerated = self.visuals.retry_node("default", self.package["id"], run["id"], "anchor", generation_service=self.generation)
+        regenerated = self.visuals.retry_node("default", self.package["id"], run["id"], "detailed:anchor", generation_service=self.generation)
         self.assertNotEqual(regenerated["id"], run["id"])
-        self.assertEqual(regenerated["nodes"][0]["id"], "anchor")
+        self.assertEqual(regenerated["nodes"][0]["id"], "detailed:anchor")
         self.assertEqual(regenerated["nodes"][0]["status"], "queued")
 
     def test_new_service_instance_recovers_persisted_run(self):
@@ -582,7 +695,7 @@ class StyleGuideVisualServiceTests(unittest.TestCase):
             item["module_type"]
             for item in compiled["snapshot"]["style_guide_reference_snapshot"]
         }
-        self.assertEqual(module_types, {"core", "character"})
+        self.assertEqual(module_types, {"character"})
 
 
 if __name__ == "__main__":

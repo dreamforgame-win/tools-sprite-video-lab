@@ -54,7 +54,86 @@ def published_version():
     }
 
 
+def dual_variant_version():
+    version = published_version()
+    version["variants"] = {
+        "compact": {
+            "anchor": {
+                "id": "compact-anchor",
+                "relative_path": "production/images/compact-anchor.png",
+            },
+            "modules": {
+                "character": {
+                    "id": "compact-character",
+                    "relative_path": "production/images/compact-character.png",
+                }
+            },
+        },
+        "detailed": {
+            "anchor": {
+                "id": "detailed-anchor",
+                "relative_path": "production/images/detailed-anchor.png",
+            },
+            "modules": {
+                "character": {
+                    "id": "detailed-character",
+                    "relative_path": "production/images/detailed-character.png",
+                }
+            },
+        },
+    }
+    return version
+
+
 class StyleGuideCompilerTests(unittest.TestCase):
+    def test_compiler_prefers_matching_compact_module_as_only_style_reference(self):
+        result = compile_style_guide(
+            dual_variant_version(),
+            asset_type="character",
+            prompt="young herbalist",
+            mode="balanced",
+            model_reference_limit=4,
+        )
+        self.assertEqual([item["id"] for item in result["references"]], ["compact-character"])
+        self.assertEqual(result["references"][0]["template_variant"], "compact")
+        self.assertEqual(result["references"][0]["reference_role"], "style")
+
+    def test_compiler_uses_fixed_variant_and_module_fallback_order(self):
+        compact_global = dual_variant_version()
+        compact_global["variants"]["compact"]["modules"].pop("character")
+        detailed_module = copy.deepcopy(compact_global)
+        detailed_module["variants"]["compact"]["anchor"] = None
+        detailed_global = copy.deepcopy(detailed_module)
+        detailed_global["variants"]["detailed"]["modules"].pop("character")
+        for version, expected in (
+            (compact_global, "compact-anchor"),
+            (detailed_module, "detailed-character"),
+            (detailed_global, "detailed-anchor"),
+        ):
+            with self.subTest(expected=expected):
+                result = compile_style_guide(
+                    version,
+                    asset_type="character",
+                    prompt="hero",
+                    mode="balanced",
+                    model_reference_limit=4,
+                )
+                self.assertEqual([item["id"] for item in result["references"]], [expected])
+
+    def test_compact_uses_fixed_strength_and_four_prompt_layers(self):
+        result = compile_style_guide(
+            dual_variant_version(),
+            asset_type="character",
+            prompt="young herbalist",
+            mode="balanced",
+            model_reference_limit=4,
+            style_strength=5,
+        )
+        self.assertEqual(result["budget"]["requested_style_strength"], 5)
+        self.assertEqual(result["budget"]["effective_style_strength"], 100)
+        for heading in ("任务内容：", "输出规格：", "风格引用协议：", "参考图职责："):
+            self.assertIn(heading, result["positive_prompt"])
+
     def test_character_balanced_uses_core_and_character_only(self):
         result = compile_style_guide(
             published_version(),
@@ -65,7 +144,7 @@ class StyleGuideCompilerTests(unittest.TestCase):
         )
         self.assertEqual(result["module_types"], ["character"])
         self.assertNotIn("compact framed HUD", result["positive_prompt"])
-        self.assertEqual(len(result["references"]), 2)
+        self.assertEqual(len(result["references"]), 1)
 
     def test_visual_detail_profile_is_compiled_even_with_manual_section_prompts(self):
         version = published_version()
@@ -100,9 +179,9 @@ class StyleGuideCompilerTests(unittest.TestCase):
             asset_type="character",
             prompt="hero",
             mode="precision",
-            model_reference_limit=1,
+            model_reference_limit=0,
         )
-        self.assertEqual(len(result["references"]), 1)
+        self.assertEqual(len(result["references"]), 0)
         self.assertIn("reference_limit", {item["code"] for item in result["warnings"]})
 
     def test_economy_and_balanced_can_continue_after_visible_reference_trimming(self):
@@ -118,8 +197,10 @@ class StyleGuideCompilerTests(unittest.TestCase):
                 self.assertTrue(result["can_continue"])
                 self.assertEqual(result["blocking_warnings"], [])
 
-    def test_precision_blocks_when_required_reference_is_unavailable(self):
+    def test_precision_falls_back_when_module_template_is_unavailable(self):
         version = published_version()
+        for reference in version["modules"]["character"]["references"]:
+            reference["relative_path"] = ""
         version["modules"]["character"]["references"].append(
             {
                 "id": "required-turnaround",
@@ -137,11 +218,8 @@ class StyleGuideCompilerTests(unittest.TestCase):
             mode="precision",
             model_reference_limit=4,
         )
-        self.assertFalse(result["can_continue"])
-        self.assertIn(
-            "missing_reference",
-            {item["code"] for item in result["blocking_warnings"]},
-        )
+        self.assertTrue(result["can_continue"])
+        self.assertEqual([item["id"] for item in result["references"]], ["core-shape"])
 
     def test_unknown_asset_uses_core_and_warns(self):
         result = compile_style_guide(

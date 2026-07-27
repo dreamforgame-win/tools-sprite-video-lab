@@ -29,17 +29,26 @@
         <button id="themeLightButton" class="theme-switch-button active" type="button" data-theme-value="light" aria-pressed="true">白</button>
         <button id="themeDarkButton" class="theme-switch-button" type="button" data-theme-value="dark" aria-pressed="false">黑</button>
       </div>
-      <button class="account-panel" id="localProfileButton" type="button" aria-label="编辑本地资料">
-        <span class="local-profile-avatar-shell" aria-hidden="true">
-          <img id="localProfileAvatar" alt="" hidden>
-          <b id="localProfileAvatarFallback">游</b>
-        </span>
-        <span class="local-profile-copy">
-          <small>本地资料</small>
-          <strong id="accountName">游客</strong>
-          <em id="localProfileMcpStatus">MCP 未配置</em>
-        </span>
-      </button>
+      <div class="topbar-access-actions">
+        <button class="account-panel" id="localProfileButton" type="button" aria-label="编辑本地资料">
+          <span class="local-profile-avatar-shell" aria-hidden="true">
+            <img id="localProfileAvatar" alt="" hidden>
+            <b id="localProfileAvatarFallback">游</b>
+          </span>
+          <span class="local-profile-copy">
+            <small>本地资料</small>
+            <strong id="accountName">游客</strong>
+            <em id="localProfileMcpStatus">MCP 未配置</em>
+          </span>
+        </button>
+        <button id="agentAccessButton" class="agent-access-button secondary-button" type="button" title="Agent 接入" aria-label="打开 Agent 接入说明">
+          <svg class="agent-access-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <rect width="16" height="12" x="4" y="8" rx="3"></rect>
+            <path d="M9 12h.01M15 12h.01M9 16h6M12 8V4M9 4h6"></path>
+          </svg>
+          <span>Agent 接入</span>
+        </button>
+      </div>
     </header>
 
     <main id="projectLauncher" class="project-launcher" aria-labelledby="projectLauncherTitle">
@@ -974,10 +983,6 @@
     <section id="aiCreationModule" class="ai-creation-module module-view" data-module-view="aiCreation" hidden>
       <header class="ai-production-header">
         <span id="aiConnectionBadge" class="ai-state-chip warning">未配置</span>
-        <div class="ai-production-quick-actions" aria-label="图片生产快捷操作">
-          <button id="aiOpenGeneratePanelButton" class="primary-button tiny" type="button" title="生成图片">生成图片</button>
-          <button id="aiAddReferenceButton" class="ghost-button style-reference-icon-button" type="button" title="添加参考图" aria-label="添加参考图"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h6M19 2v6M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><circle cx="8.5" cy="9" r="1.5"></circle><path d="M3 16l4-4 4 4 2-2 7 7"></path></svg></button>
-        </div>
         <div class="workbench-view-switch" role="group" aria-label="资产生产视图">
           <button id="aiProductionListViewButton" class="icon-text-button active" type="button" data-production-view="list" aria-pressed="true" title="列表视图">列表</button>
           <button id="aiProductionCanvasViewButton" class="icon-text-button" type="button" data-production-view="canvas" aria-pressed="false" title="画布视图">画布</button>
@@ -1022,6 +1027,10 @@
                 <h2 id="aiResultTitle">生成结果</h2>
               </div>
               <div class="ai-result-head-actions">
+                <div class="ai-production-quick-actions" aria-label="当前资产图片生产操作">
+                  <button id="aiOpenGeneratePanelButton" class="primary-button tiny" type="button" data-ai-production-action="generate" title="生成图片">生成图片</button>
+                  <button id="aiAddReferenceButton" class="ghost-button style-reference-icon-button" type="button" data-ai-production-action="reference" title="添加参考图" aria-label="添加参考图"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h6M19 2v6M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1 2-2V5a2 2 0 0 1 2-2h7"></path><circle cx="8.5" cy="9" r="1.5"></circle><path d="M3 16l4-4 4 4 2-2 7 7"></path></svg></button>
+                </div>
                 <span id="aiResultSummary">暂无结果</span>
               </div>
             </div>
@@ -1039,6 +1048,16 @@
         </section>
 
         <section id="aiProductionCanvasWorkspace" class="production-canvas-workspace" data-production-panel="canvas" hidden>
+          <div class="ai-canvas-head ai-production-canvas-head">
+            <div><h2 id="aiProductionCanvasTitle">资产画布</h2></div>
+            <div class="ai-result-head-actions">
+              <div class="ai-production-quick-actions" aria-label="当前资产图片生产操作">
+                <button class="primary-button tiny" type="button" data-ai-production-action="generate" title="生成图片">生成图片</button>
+                <button class="ghost-button style-reference-icon-button" type="button" data-ai-production-action="reference" title="添加参考图" aria-label="添加参考图"><svg class="workbench-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M16 5h6M19 2v6M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"></path><circle cx="8.5" cy="9" r="1.5"></circle><path d="M3 16l4-4 4 4 2-2 7 7"></path></svg></button>
+              </div>
+              <span id="aiProductionCanvasSummary">暂无结果</span>
+            </div>
+          </div>
           <div id="aiProductionCanvasHost" class="asset-canvas-host"></div>
           <div class="production-canvas-quickbar">
             <button type="button" data-production-canvas-action="add">加入画布</button>
@@ -1107,6 +1126,7 @@
               <button class="ghost-button" type="button" data-ai-reference-action="manage">管理参考图</button>
             </div>
             <p id="aiReferenceLimitHint" class="style-reference-limit-hint"></p>
+            <label class="generation-reference-optimization"><input id="aiReferenceOptimizationInput" type="checkbox" checked><span><strong>合并参考图以节省费用</strong><small id="aiReferenceOptimizationHint">当前无需合并</small></span></label>
             <div id="aiReferencePickerModal" class="style-reference-picker-modal" hidden tabindex="-1">
               <div class="style-reference-picker-backdrop" aria-hidden="true"></div>
               <section class="style-reference-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="aiReferencePickerTitle">
@@ -1152,6 +1172,7 @@
           </section>
           <details class="ai-advanced-settings"><summary>高级设置</summary><label class="ai-field"><span>负面提示</span><textarea id="aiNegativePromptInput" rows="3" placeholder="不希望出现的内容"></textarea></label></details>
           <button id="aiGenerateButton" class="primary-button large ai-generate-button" type="button" disabled>开始生成</button>
+          <div id="aiGenerationCostEstimate" class="generation-cost-estimate" aria-live="polite"><span>正在计算预计价格…</span></div>
         </section>
         <section id="aiResultDetailPanel" class="ai-result-detail-panel" aria-labelledby="aiInspectorTitle" hidden></section>
         </div>
@@ -1953,6 +1974,103 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <div id="agentAccessDialog" class="resource-project-dialog agent-access-dialog" role="dialog" aria-modal="true" aria-labelledby="agentAccessDialogTitle" hidden>
+      <section class="resource-project-dialog-panel agent-access-dialog-panel">
+        <div class="resource-project-dialog-head agent-access-dialog-head">
+          <div>
+            <p class="section-kicker">Agent protocol</p>
+            <h2 id="agentAccessDialogTitle">Agent 接入</h2>
+            <p>让 AI 按统一状态机完成风格确定、素材生成、抠图拆分、入库与流程保存。</p>
+          </div>
+          <button id="agentAccessCloseButton" class="icon-button" type="button" title="关闭" aria-label="关闭 Agent 接入说明">×</button>
+        </div>
+
+        <div class="agent-access-status-strip" aria-live="polite">
+          <span><i id="agentAccessManifestDot"></i><b id="agentAccessManifestStatus">正在读取协议</b></span>
+          <span>协议 <strong id="agentAccessProtocolVersion">-</strong></span>
+          <span>当前项目 <strong id="agentAccessProjectId">YOUR_PROJECT_ID</strong></span>
+          <a id="agentAccessManifestLink" href="/api/v1/agent/manifest" target="_blank" rel="noreferrer">打开 Manifest</a>
+        </div>
+
+        <div class="agent-access-workspace">
+          <div class="agent-access-guide">
+            <section class="agent-access-section">
+              <div class="agent-access-section-head">
+                <span>01</span>
+                <div><h3>标准执行流程</h3><p>AI 每次只执行接口返回的下一步，不自行跳过状态。</p></div>
+              </div>
+              <ol class="agent-access-flow">
+                <li><b>读取协议</b><span>先读取 Manifest，确认动作、状态和输入输出契约。</span></li>
+                <li><b>声明能力</b><span>明确是否具备原生生图和图片读取能力。</span></li>
+                <li><b>创建运行</b><span>提交需求、能力和付费策略，获得持久化运行。</span></li>
+                <li><b>循环执行</b><span>读取 <code>next_actions</code>，按执行器完成并回传结果。</span></li>
+                <li><b>处理与保存</b><span>完成抠图、拆分、质量检查、入库，并保存可复用流程。</span></li>
+              </ol>
+            </section>
+
+            <section class="agent-access-section">
+              <div class="agent-access-section-head">
+                <span>02</span>
+                <div><h3>生图能力分支</h3><p>两条路径共用生成历史、文件哈希和资产来源链。</p></div>
+              </div>
+              <div class="agent-executor-grid">
+                <article>
+                  <span class="agent-executor-tag native">AI 原生</span>
+                  <h4>agent_native</h4>
+                  <p id="agentAccessNativeDescription">AI 按动作契约生成图片，并通过受控图片接口回传。</p>
+                </article>
+                <article>
+                  <span class="agent-executor-tag mcp">服务端 MCP</span>
+                  <h4>server_mcp</h4>
+                  <p id="agentAccessMcpDescription">工具负责报价、预算门禁、提交和轮询生成任务。</p>
+                </article>
+              </div>
+            </section>
+
+            <section class="agent-access-section">
+              <div class="agent-access-section-head">
+                <span>03</span>
+                <div><h3>必须遵守的规范</h3><p>这些约束同时适用于原生生图与 MCP 生图。</p></div>
+              </div>
+              <ul class="agent-access-rules">
+                <li><b>幂等：</b>所有创建、回传、处理和入库动作携带稳定幂等键。</li>
+                <li><b>图片：</b>仅回传 PNG、JPEG 或 WebP data URL，单文件最大 20 MB。</li>
+                <li><b>路径：</b>客户端不得提交本机绝对路径，文件由服务端写入项目目录。</li>
+                <li><b>费用：</b>MCP 生图必须先获得报价，并遵守预算或显式批准策略。</li>
+                <li><b>状态：</b>失败时按动作重试；取消和恢复必须复用原运行，不重复建单。</li>
+              </ul>
+            </section>
+
+            <section class="agent-access-section">
+              <div class="agent-access-section-head">
+                <span>04</span>
+                <div><h3>关键接口</h3><p>路径中的项目 ID 与运行 ID 由实际上下文替换。</p></div>
+              </div>
+              <div class="agent-endpoint-list">
+                <code>GET /api/v1/agent/manifest</code>
+                <code>POST /api/v1/projects/{projectId}/agent-runs</code>
+                <code>GET /api/v1/projects/{projectId}/agent-runs/{runId}</code>
+                <code>POST /api/v1/projects/{projectId}/agent-runs/{runId}/actions/{actionId}/result</code>
+                <code>POST /api/v1/projects/{projectId}/agent-runs/{runId}/actions/{actionId}/artifacts</code>
+              </div>
+            </section>
+          </div>
+
+          <aside class="agent-prompt-panel">
+            <div class="agent-prompt-panel-head">
+              <div>
+                <span>可直接发给 AI</span>
+                <h3>Agent 执行提示词</h3>
+              </div>
+              <button id="agentAccessCopyButton" class="primary-button" type="button">复制提示词</button>
+            </div>
+            <textarea id="agentAccessPrompt" readonly spellcheck="false" aria-label="Agent 执行提示词"></textarea>
+            <p id="agentAccessCopyStatus" class="agent-access-copy-status" aria-live="polite">提示词会自动带入当前服务地址和项目 ID。</p>
+          </aside>
+        </div>
+      </section>
     </div>
 
     <div id="projectCreateDialog" class="resource-project-dialog" role="dialog" aria-modal="true" aria-labelledby="projectCreateDialogTitle" hidden>

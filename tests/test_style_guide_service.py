@@ -90,6 +90,21 @@ class StyleGuideServiceTests(unittest.TestCase):
         self.assertEqual(version["version"], 1)
         self.assertTrue(version["published_at"])
 
+    def test_legacy_version_hydrates_as_detailed_without_rewriting_json(self):
+        package = self._published_character_package()
+        version_id = package["confirmed_version_id"]
+        path = self.guides._version_path("default", package["id"], version_id)
+        raw = self.projects._read_json(path, {})
+        raw.pop("variants", None)
+        self.projects._atomic_write_json(path, raw)
+        before = path.read_bytes()
+
+        hydrated = self.guides.get_version("default", package["id"], version_id)
+
+        self.assertEqual(hydrated["available_variants"], ["detailed"])
+        self.assertTrue(hydrated["variants"]["detailed"]["legacy"])
+        self.assertEqual(path.read_bytes(), before)
+
     def test_set_default_requires_confirmed_version(self):
         package = self.guides.create_draft("default", self.direction["id"])
         with self.assertRaisesRegex(ProjectError, "confirmed"):
@@ -238,14 +253,17 @@ class StyleGuideServiceTests(unittest.TestCase):
         saved = self.guides.get_draft("default", package["id"])
         self.assertEqual(
             [(item["id"], item["visual_run_id"]) for item in saved["core"]["references"]],
-            [("manual-core", ""), ("guide_ref_v2_anchor", "visualrun_v2")],
+            [("manual-core", ""), ("guide_ref_v2_detailed_anchor", "visualrun_v2")],
         )
         self.assertEqual(
             [
                 (item["id"], item["visual_run_id"])
                 for item in saved["modules"]["character"]["references"]
             ],
-            [("manual-character", ""), ("guide_ref_v2_character", "visualrun_v2")],
+            [
+                ("manual-character", ""),
+                ("guide_ref_v2_detailed_character", "visualrun_v2"),
+            ],
         )
 
     def test_get_version_filters_generated_references_from_other_visual_runs(self):

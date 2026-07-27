@@ -8,8 +8,27 @@ const styles = fs.readFileSync(path.resolve(__dirname, "..", "app", "styles.css"
 
 test("style exploration exposes resource and visual guide repository tabs", () => {
   assert.match(source, /方向资源/);
-  assert.match(source, /指导图仓库/);
+  assert.match(source, /风格模板仓库/);
   assert.match(source, /renderStyleGuideRepositoryPanel/);
+});
+
+test("repository uses style template naming and exposes legacy compact backfill", () => {
+  assert.match(source, /风格模板仓库/);
+  assert.match(source, /生成风格模板/);
+  assert.match(source, /补生成简略版/);
+  assert.match(source, /available_variants/);
+  assert.match(source, /仅详细版/);
+});
+
+test("asset production exposes actual style template trace metadata", () => {
+  const traceHelper = source.match(/function aiStyleGuideReferenceTrace[\s\S]*?function aiStyleGuideReferenceTitle/)?.[0] || "";
+  const controls = source.match(/function renderAiStyleGuideControls[\s\S]*?function scheduleAiStyleGuidePreview/)?.[0] || "";
+  assert.match(traceHelper, /template_variant/);
+  assert.match(traceHelper, /template_module_type/);
+  assert.match(traceHelper, /reference_role/);
+  assert.match(traceHelper, /风格职责/);
+  assert.match(controls, /aiStyleGuideReferenceTrace/);
+  assert.match(source, /内容参考 \+ 风格模板/);
 });
 
 test("direction tabs are centered above tab-specific tools", () => {
@@ -35,7 +54,7 @@ test("visual guide repository contains fixed game-art modules", () => {
 
 test("main entry opens visual generation instead of the editor workspace", () => {
   const toolbar = source.match(/function renderStyleContentToolbar[\s\S]*?\n}/)?.[0] || "";
-  assert.match(source, /生成视觉指导图/);
+  assert.match(source, /生成风格模板/);
   assert.match(source, /style-guide-visual-open/);
   assert.match(toolbar, /activeTab === "resources"[\s\S]*\$\{guideAction\}/);
   assert.match(toolbar, /activeTab === "guides"[\s\S]*\$\{guideAction\}/);

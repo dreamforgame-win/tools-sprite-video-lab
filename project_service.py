@@ -918,6 +918,7 @@ class ProjectService:
         node_type: str = "asset",
         target_count: int = 0,
         actor: str = "user",
+        idempotency_key: str = "",
     ) -> dict:
         name = str(name or "").strip()
         if not 1 <= len(name) <= 60:
@@ -935,6 +936,18 @@ class ProjectService:
         with self._locked():
             root = self._project_root_unlocked(project_id)
             tree = self._read_asset_tree_unlocked(root)
+            normalized_key = str(idempotency_key or "").strip()[:160]
+            if normalized_key:
+                existing = next(
+                    (
+                        item
+                        for item in tree["nodes"]
+                        if item.get("idempotency_key") == normalized_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    return copy.deepcopy(existing)
             parent = next(
                 (item for item in tree["nodes"] if str(item.get("id") or "") == parent_id),
                 None,
@@ -958,6 +971,7 @@ class ProjectService:
                 "completed_count": 0,
                 "selected_count": 0,
                 "target_count": target_count,
+                "idempotency_key": normalized_key,
                 "order": len(siblings),
                 "created_at": now,
                 "updated_at": now,
@@ -1278,6 +1292,49 @@ class ProjectService:
             root = self._project_root_unlocked(project_id)
             return copy.deepcopy(self._read_style_directions_unlocked(root)["directions"])
 
+    def confirm_style_direction(
+        self, project_id: str, *, style_id: str, actor: str = "user"
+    ) -> dict:
+        style_id = str(style_id or "").strip()
+        with self._locked():
+            root = self._project_root_unlocked(project_id)
+            paths = self._project_paths(root)
+            styles = self._read_style_directions_unlocked(root)
+            style = next(
+                (
+                    item
+                    for item in styles["directions"]
+                    if str(item.get("id") or "") == style_id
+                    and str(item.get("lifecycle_status") or "normal")
+                    != "trashed"
+                ),
+                None,
+            )
+            if style is None:
+                raise ProjectError(f"Style direction does not exist: {style_id}")
+            now = utc_now()
+            for item in styles["directions"]:
+                item["is_current"] = item is style
+                if item is style:
+                    item["status"] = "confirmed"
+                    item["updated_at"] = now
+            manifest = self._read_project_manifest_unlocked(root)
+            manifest["current_style_direction_id"] = style_id
+            manifest["style_status"] = "confirmed"
+            manifest["updated_at"] = now
+            self._atomic_write_json(paths["style_directions"], styles)
+            self._atomic_write_json(paths["manifest"], manifest)
+            self._append_event_unlocked(
+                root,
+                {
+                    "type": "style.direction-confirmed",
+                    "actor": str(actor or "user"),
+                    "project_id": project_id,
+                    "data": {"style_direction_id": style_id},
+                },
+            )
+            return copy.deepcopy(style)
+
     def create_style_direction(
         self,
         project_id: str,
@@ -1287,6 +1344,7 @@ class ProjectService:
         tags: list | None = None,
         group_id: str = "",
         actor: str = "user",
+        idempotency_key: str = "",
     ) -> dict:
         name = str(name or "").strip()
         if not 1 <= len(name) <= 60:
@@ -1294,6 +1352,18 @@ class ProjectService:
         with self._locked():
             root = self._project_root_unlocked(project_id)
             payload = self._read_style_directions_unlocked(root)
+            normalized_key = str(idempotency_key or "").strip()[:160]
+            if normalized_key:
+                existing = next(
+                    (
+                        item
+                        for item in payload["directions"]
+                        if item.get("idempotency_key") == normalized_key
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    return copy.deepcopy(existing)
             now = utc_now()
             direction = {
                 "id": f"style_{uuid.uuid4().hex}",
@@ -1305,6 +1375,7 @@ class ProjectService:
                 "cover_image_id": "",
                 "reference_images": [],
                 "group_id": str(group_id or "").strip()[:80],
+                "idempotency_key": normalized_key,
                 "created_at": now,
                 "updated_at": now,
             }

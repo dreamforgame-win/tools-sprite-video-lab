@@ -49,6 +49,11 @@ MODULE_TYPES = {
 
 CONFLICT_RESOLUTIONS = {"preserve_task", "preserve_guide", "disable_rule"}
 
+STYLE_REFERENCE_PROTOCOL = (
+    "只继承风格模板的比例体系、形状语言、线条、色彩关系、明暗、材质表达和细节密度；"
+    "不得继承模板中的主体身份、姿势、构图、背景、文字或展示板布局。"
+)
+
 
 def _clamp_int(value, minimum: int, maximum: int, default: int) -> int:
     try:
@@ -171,6 +176,89 @@ def _style_fragment(text: str, strength: int) -> str:
     return f"strong style adherence: {text}"
 
 
+def _reference_available(reference: object) -> bool:
+    if not isinstance(reference, dict):
+        return False
+    has_source = bool(
+        str(reference.get("relative_path") or "").strip()
+        or str(reference.get("remote_asset_id") or "").strip()
+    )
+    return has_source and str(reference.get("availability") or "available") not in {
+        "missing",
+        "invalid",
+    }
+
+
+def _style_template_candidates(version: dict, requested_modules: list[str]) -> list[dict]:
+    variants = version.get("variants") if isinstance(version.get("variants"), dict) else {}
+    if not variants:
+        core = version.get("core") if isinstance(version.get("core"), dict) else {}
+        modules = version.get("modules") if isinstance(version.get("modules"), dict) else {}
+        variants = {
+            "detailed": {
+                "anchor": next(
+                    (item for item in core.get("references") or [] if isinstance(item, dict)),
+                    None,
+                ),
+                "modules": {
+                    module_type: next(
+                        (item for item in module.get("references") or [] if isinstance(item, dict)),
+                        None,
+                    )
+                    for module_type, module in modules.items()
+                    if isinstance(module, dict)
+                },
+            }
+        }
+    module_type = requested_modules[0] if requested_modules else ""
+    ordered = []
+    for variant, target in (
+        ("compact", module_type),
+        ("compact", "core"),
+        ("detailed", module_type),
+        ("detailed", "core"),
+    ):
+        data = variants.get(variant) if isinstance(variants.get(variant), dict) else {}
+        reference = (
+            (data.get("modules") or {}).get(target)
+            if target and target != "core"
+            else data.get("anchor")
+        )
+        if not _reference_available(reference):
+            continue
+        item = copy.deepcopy(reference)
+        item.update(
+            {
+                "template_variant": variant,
+                "template_module_type": target or "core",
+                "module_type": target or "core",
+                "reference_role": "style",
+            }
+        )
+        ordered.append(item)
+    return ordered
+
+
+def _production_prompt(task: str, output_spec: str, style_text: str, reference: dict | None) -> str:
+    if reference:
+        responsibility = (
+            "图片1是风格模板，"
+            f"规格为{reference.get('template_variant') or 'detailed'}，"
+            f"来源模块为{reference.get('template_module_type') or 'core'}；"
+            "它只负责视觉风格，不负责主体内容、身份、姿势或构图。"
+        )
+    else:
+        responsibility = "本次没有可用风格模板图片，只应用文字风格规则。"
+    return "\n".join(
+        (
+            f"任务内容：{task}",
+            f"输出规格：{output_spec}",
+            f"风格引用协议：{STYLE_REFERENCE_PROTOCOL} {style_text}".rstrip(),
+            f"参考图职责：{responsibility}",
+        )
+    )
+
+
 def compile_style_guide(
     version: dict,
     *,
@@ -279,10 +367,31 @@ def compile_style_guide(
     positive_style_parts = list(section_prompt_fragments)
     if detail_prompt_fragment and detail_prompt_fragment not in " ".join(section_prompt_fragments):
         positive_style_parts.insert(0, detail_prompt_fragment)
-    style_text = _style_fragment(", ".join(positive_style_parts), strength)
+    include_ids, exclude_ids = _reference_override_ids(reference_overrides)
+    template_candidates = [
+        item
+        for item in _style_template_candidates(source, requested_modules)
+        if (include_ids is None or str(item.get("id") or "") in include_ids)
+        and str(item.get("id") or "") not in exclude_ids
+    ]
+    selected_template = template_candidates[0] if template_candidates else None
+    effective_strength = (
+        100
+        if selected_template
+        and selected_template.get("template_variant") == "compact"
+        else strength
+    )
+    style_text = _style_fragment(
+        ", ".join(positive_style_parts), effective_strength
+    )
     user_prompt = str(prompt or "").strip()
     max_chars = budget_config["token_budget"] * 4
-    remaining_chars = max(0, max_chars - len(user_prompt) - 2)
+    output_spec = (
+        f"生成单张可直接用于游戏生产的{str(asset_type or 'asset')}图像，"
+        "主体完整、层级清晰。"
+    )
+    fixed_prompt = _production_prompt(user_prompt, output_spec, "", selected_template)
+    remaining_chars = max(0, max_chars - len(fixed_prompt))
     if len(style_text) > remaining_chars:
         style_text = style_text[:remaining_chars].rstrip(" ,;:")
         warnings.append(
@@ -293,7 +402,9 @@ def compile_style_guide(
                 token_budget=budget_config["token_budget"],
             )
         )
-    positive_prompt = ", ".join(part for part in (user_prompt, style_text) if part)
+    positive_prompt = _production_prompt(
+        user_prompt, output_spec, style_text, selected_template
+    )
 
     negative_parts = []
     detail_negative_fragment = str(
@@ -309,11 +420,10 @@ def compile_style_guide(
         if str(item).casefold() not in omitted_constraints
     )
 
-    include_ids, exclude_ids = _reference_override_ids(reference_overrides)
-    candidates = []
+    candidates = template_candidates[:1]
     invalid_required = []
     seen_reference_ids = set()
-    for section_type, section in selected_sections:
+    for section_type, section in []:
         references = section.get("references") if isinstance(section.get("references"), list) else []
         for raw_reference in references:
             if not isinstance(raw_reference, dict):
@@ -388,6 +498,8 @@ def compile_style_guide(
         "model_reference_limit": model_limit,
         "selected_reference_count": len(selected_references),
         "style_strength": strength,
+        "requested_style_strength": strength,
+        "effective_style_strength": effective_strength,
     }
     return {
         "positive_prompt": positive_prompt,
@@ -398,6 +510,12 @@ def compile_style_guide(
         "blocking_warnings": blocking_warnings,
         "can_continue": not blocking_warnings,
         "budget": budget,
+        "template_variant": str(
+            (selected_template or {}).get("template_variant") or ""
+        ),
+        "template_module_type": str(
+            (selected_template or {}).get("template_module_type") or ""
+        ),
     }
 
 

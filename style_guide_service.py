@@ -17,6 +17,7 @@ from style_guide_visual_prompts import (
     detail_profile_negative,
     detail_profile_prompt,
     normalize_detail_profile,
+    normalize_template_variants,
 )
 
 
@@ -358,6 +359,11 @@ class StyleGuideService:
             "visual_run_id": str(reference.get("visual_run_id") or "")[:120],
             "visual_node_id": str(reference.get("visual_node_id") or "")[:120],
             "module_type": str(reference.get("module_type") or "")[:80],
+            "template_variant": str(reference.get("template_variant") or "")[:40],
+            "template_module_type": str(
+                reference.get("template_module_type") or ""
+            )[:80],
+            "reference_role": str(reference.get("reference_role") or "")[:40],
         }
 
     def _normalize_references(self, value) -> list[dict]:
@@ -374,6 +380,153 @@ class StyleGuideService:
             seen.add(reference["id"])
             result.append(reference)
         return result
+
+    def _normalize_variants(self, value) -> dict:
+        if not isinstance(value, dict):
+            return {}
+        result = {}
+        for variant in ("compact", "detailed"):
+            raw = value.get(variant)
+            if not isinstance(raw, dict):
+                continue
+            anchor_values = self._normalize_references(
+                [raw.get("anchor")] if isinstance(raw.get("anchor"), dict) else []
+            )
+            modules = {}
+            raw_modules = raw.get("modules")
+            if isinstance(raw_modules, dict):
+                for module_type in self.MODULE_TYPES:
+                    reference = raw_modules.get(module_type)
+                    normalized = self._normalize_references(
+                        [reference] if isinstance(reference, dict) else []
+                    )
+                    if normalized:
+                        modules[module_type] = normalized[0]
+            local_template = raw.get("local_template")
+            local_template = (
+                {
+                    "relative_path": self._normalized_relative_path(
+                        local_template.get("relative_path")
+                    ),
+                    "status": str(local_template.get("status") or "")[:40],
+                    "error": str(local_template.get("error") or "")[:1000],
+                    "palette": self._string_list(
+                        local_template.get("palette"), limit=16, item_limit=20
+                    ),
+                }
+                if isinstance(local_template, dict)
+                else {}
+            )
+            result[variant] = {
+                "variant": variant,
+                "status": str(raw.get("status") or "failed")[:40],
+                "legacy": bool(raw.get("legacy")),
+                "model": str(raw.get("model") or "")[:160],
+                "params": copy.deepcopy(raw.get("params"))
+                if isinstance(raw.get("params"), dict)
+                else {},
+                "detail_profile": normalize_detail_profile(
+                    raw.get("detail_profile") or DETAIL_PROFILE_DEFAULT
+                ),
+                "reference_sources": copy.deepcopy(raw.get("reference_sources"))
+                if isinstance(raw.get("reference_sources"), list)
+                else [],
+                "prompt_bundle": copy.deepcopy(raw.get("prompt_bundle"))
+                if isinstance(raw.get("prompt_bundle"), dict)
+                else {},
+                "anchor": anchor_values[0] if anchor_values else None,
+                "modules": modules,
+                "local_template": local_template,
+                "nodes": copy.deepcopy((raw.get("nodes") or [])[:20])
+                if isinstance(raw.get("nodes"), list)
+                else [],
+                "visual_run_id": str(raw.get("visual_run_id") or "")[:120],
+            }
+        return result
+
+    def _with_normalized_variants(self, version: dict) -> dict:
+        """Hydrate legacy versions in memory without rewriting immutable JSON."""
+
+        hydrated = copy.deepcopy(version)
+        variants = self._normalize_variants(hydrated.get("variants"))
+        if variants:
+            hydrated["variants"] = variants
+            hydrated["available_variants"] = [
+                variant for variant in ("compact", "detailed") if variant in variants
+            ]
+            return hydrated
+
+        visual = (
+            hydrated.get("visual_guide")
+            if isinstance(hydrated.get("visual_guide"), dict)
+            else {}
+        )
+        core = hydrated.get("core") if isinstance(hydrated.get("core"), dict) else {}
+        core_references = [
+            self._normalize_reference(item)
+            for item in core.get("references") or []
+            if isinstance(item, dict)
+        ]
+        visual_run_id = str(visual.get("run_id") or "")
+        anchor_reference = next(
+            (
+                item
+                for item in core_references
+                if visual_run_id
+                and str(item.get("visual_run_id") or "") == visual_run_id
+            ),
+            core_references[0] if core_references else None,
+        )
+        module_references = {}
+        for module_type, module in (hydrated.get("modules") or {}).items():
+            if not isinstance(module, dict):
+                continue
+            candidates = [
+                self._normalize_reference(item)
+                for item in module.get("references") or []
+                if isinstance(item, dict)
+            ]
+            reference = next(
+                (
+                    item
+                    for item in candidates
+                    if visual_run_id
+                    and str(item.get("visual_run_id") or "") == visual_run_id
+                ),
+                candidates[0] if candidates else None,
+            )
+            if reference:
+                module_references[module_type] = self._normalize_reference(reference)
+        hydrated["variants"] = {
+            "detailed": {
+                "variant": "detailed",
+                "legacy": True,
+                "status": "succeeded",
+                "model": str(visual.get("model") or ""),
+                "params": {},
+                "detail_profile": normalize_detail_profile(
+                    visual.get("detail_profile") or DETAIL_PROFILE_DEFAULT
+                ),
+                "reference_sources": [],
+                "prompt_bundle": {},
+                "anchor": anchor_reference,
+                "modules": module_references,
+                "local_template": {
+                    "relative_path": str(
+                        visual.get("template_relative_path")
+                        or hydrated.get("style_board_relative_path")
+                        or ""
+                    ),
+                    "status": "succeeded",
+                    "error": "",
+                    "palette": [],
+                },
+                "nodes": [],
+                "visual_run_id": visual_run_id,
+            }
+        }
+        hydrated["available_variants"] = ["detailed"]
+        return hydrated
 
     def _normalize_draft(
         self,
@@ -442,6 +595,14 @@ class StyleGuideService:
             ).strip()[:3000],
             "completed_at": str(visual_input.get("completed_at") or "")[:80],
             "updated_at": str(visual_input.get("updated_at") or "")[:80],
+            "requested_variants": normalize_template_variants(
+                visual_input.get("requested_variants")
+                if isinstance(visual_input.get("requested_variants"), list)
+                else ["detailed"]
+            ),
+            "source_version_id": str(
+                visual_input.get("source_version_id") or ""
+            )[:120],
         } if visual_input else {}
 
         return {
@@ -454,6 +615,7 @@ class StyleGuideService:
             "core": core,
             "modules": modules,
             "visual_guide": visual_guide,
+            "variants": self._normalize_variants(draft.get("variants")),
             "created_at": str(created_at or now),
             "updated_at": now,
         }
@@ -484,8 +646,12 @@ class StyleGuideService:
             ]
 
             def generated_reference(node: dict, roles: list[str]) -> dict:
+                node_key = str(
+                    node.get("node_key") or node.get("id") or ""
+                ).split(":")[-1]
+                variant = str(node.get("variant") or "detailed")
                 return {
-                    "id": f"guide_ref_{run_id.removeprefix('visualrun_')}_{str(node.get('id') or '')}"[:120],
+                    "id": f"guide_ref_{run_id.removeprefix('visualrun_')}_{variant}_{node_key}"[:120],
                     "relative_path": str(node.get("result_relative_path") or ""),
                     "source_record_id": str(node.get("record_id") or ""),
                     "remote_asset_id": str(node.get("result_remote_asset_id") or ""),
@@ -498,6 +664,11 @@ class StyleGuideService:
                     "visual_run_id": run_id,
                     "visual_node_id": str(node.get("id") or ""),
                     "module_type": str(node.get("module_type") or ""),
+                    "template_variant": variant,
+                    "template_module_type": str(
+                        node.get("module_type") or "core"
+                    ),
+                    "reference_role": "style",
                 }
 
             core = draft.setdefault("core", self._blank_core())
@@ -514,22 +685,30 @@ class StyleGuideService:
                 ]
 
             for node in nodes:
-                node_id = str(node.get("id") or "")
-                if node_id == "anchor":
+                node_key = str(
+                    node.get("node_key") or node.get("id") or ""
+                ).split(":")[-1]
+                if node_key == "anchor":
                     core["references"].append(generated_reference(node, ["style-anchor"]))
-                elif node_id == "overall":
+                elif node_key == "overall":
                     core["references"].append(generated_reference(node, ["overview"]))
-                elif node_id in roles_by_module:
-                    module = draft["modules"].setdefault(node_id, {"enabled": True, "references": []})
+                elif node_key in roles_by_module:
+                    module = draft["modules"].setdefault(node_key, {"enabled": True, "references": []})
                     module["enabled"] = True
                     module.setdefault("references", []).append(
-                        generated_reference(node, roles_by_module[node_id])
+                        generated_reference(node, roles_by_module[node_key])
                     )
 
-            prompts = (
-                run_snapshot.get("prompt_bundle")
-                if isinstance(run_snapshot.get("prompt_bundle"), dict)
+            prompt_bundles = (
+                run_snapshot.get("prompt_bundles")
+                if isinstance(run_snapshot.get("prompt_bundles"), dict)
                 else {}
+            )
+            prompts = copy.deepcopy(
+                prompt_bundles.get("detailed")
+                or prompt_bundles.get("compact")
+                or run_snapshot.get("prompt_bundle")
+                or {}
             )
             detail_profile = normalize_detail_profile(
                 run_snapshot.get("detail_profile") or DETAIL_PROFILE_DEFAULT
@@ -562,7 +741,9 @@ class StyleGuideService:
                 else {}
             )
             node_labels = {
-                str(node.get("id") or ""): str(node.get("label") or "")
+                str(node.get("node_key") or node.get("id") or "").split(":")[-1]: str(
+                    node.get("label") or ""
+                )
                 for node in run_snapshot.get("nodes") or []
             }
             for module_type in run_snapshot.get("module_types") or []:
@@ -590,7 +771,13 @@ class StyleGuideService:
                 module["completeness_status"] = "generated"
 
             template = next(
-                (node for node in run_snapshot.get("nodes") or [] if node.get("id") == "template"),
+                (
+                    node
+                    for node in run_snapshot.get("nodes") or []
+                    if str(node.get("node_key") or node.get("id") or "").split(":")[-1]
+                    == "template"
+                    and str(node.get("variant") or "detailed") == "detailed"
+                ),
                 {},
             )
             if not core.get("palette"):
@@ -607,7 +794,104 @@ class StyleGuideService:
                 "detail_negative_fragment": detail_negative_fragment,
                 "completed_at": str(run_snapshot.get("updated_at") or utc_now()),
                 "updated_at": utc_now(),
+                "requested_variants": normalize_template_variants(
+                    run_snapshot.get("requested_variants")
+                    if isinstance(run_snapshot.get("requested_variants"), list)
+                    else ["detailed"]
+                ),
+                "source_version_id": str(
+                    run_snapshot.get("source_version_id") or ""
+                ),
             }
+            variants = {}
+            requested_variants = draft["visual_guide"]["requested_variants"]
+            variant_states = (
+                run_snapshot.get("variant_states")
+                if isinstance(run_snapshot.get("variant_states"), dict)
+                else {}
+            )
+            for variant in requested_variants:
+                variant_nodes = [
+                    copy.deepcopy(node)
+                    for node in nodes
+                    if str(node.get("variant") or "detailed") == variant
+                ]
+                anchor_node = next(
+                    (
+                        node
+                        for node in variant_nodes
+                        if str(node.get("node_key") or node.get("id") or "").split(":")[-1]
+                        in {"anchor", "overall"}
+                    ),
+                    None,
+                )
+                module_references = {}
+                for node in variant_nodes:
+                    module_type = str(node.get("module_type") or "")
+                    if module_type in roles_by_module:
+                        module_references[module_type] = generated_reference(
+                            node, roles_by_module[module_type]
+                        )
+                local_node = next(
+                    (
+                        node
+                        for node in run_snapshot.get("nodes") or []
+                        if str(node.get("variant") or "detailed") == variant
+                        and str(node.get("node_key") or node.get("id") or "").split(":")[-1]
+                        == "template"
+                    ),
+                    None,
+                )
+                variants[variant] = {
+                    "variant": variant,
+                    "status": str(
+                        (variant_states.get(variant) or {}).get("status")
+                        or "failed"
+                    ),
+                    "model": str(run_snapshot.get("model") or ""),
+                    "params": copy.deepcopy(run_snapshot.get("params") or {}),
+                    "detail_profile": detail_profile,
+                    "reference_sources": copy.deepcopy(
+                        run_snapshot.get("reference_sources") or []
+                    ),
+                    "prompt_bundle": copy.deepcopy(
+                        prompt_bundles.get(variant) or prompts
+                    ),
+                    "anchor": generated_reference(
+                        anchor_node,
+                        ["overview"]
+                        if anchor_node
+                        and str(
+                            anchor_node.get("node_key")
+                            or anchor_node.get("id")
+                            or ""
+                        ).split(":")[-1]
+                        == "overall"
+                        else ["style-anchor"],
+                    )
+                    if anchor_node
+                    else None,
+                    "modules": module_references,
+                    "local_template": {
+                        "relative_path": str(
+                            (local_node or {}).get("result_relative_path") or ""
+                        ),
+                        "status": str((local_node or {}).get("status") or ""),
+                        "error": str((local_node or {}).get("error") or ""),
+                        "palette": list((local_node or {}).get("palette") or []),
+                    }
+                    if local_node
+                    else {},
+                    "nodes": copy.deepcopy(
+                        [
+                            node
+                            for node in run_snapshot.get("nodes") or []
+                            if str(node.get("variant") or "detailed") == variant
+                        ]
+                    ),
+                    "visual_run_id": run_id,
+                }
+            draft["variants"] = variants
             return self.save_draft(project_id, package_id, draft)
 
     def save_draft(self, project_id: str, package_id: str, draft: dict) -> dict:
@@ -740,6 +1024,18 @@ class StyleGuideService:
             module["references"] = self._published_references(
                 project_id, module.get("references") or []
             )
+        for variant in version.get("variants", {}).values():
+            anchor = variant.get("anchor")
+            if isinstance(anchor, dict):
+                published = self._published_references(project_id, [anchor])
+                variant["anchor"] = published[0] if published else None
+            variant["modules"] = {
+                module_type: published[0]
+                for module_type, reference in (variant.get("modules") or {}).items()
+                if isinstance(reference, dict)
+                for published in [self._published_references(project_id, [reference])]
+                if published
+            }
         direction = next(
             (
                 item
@@ -751,6 +1047,9 @@ class StyleGuideService:
         version["source_snapshot"] = {
             "draft_revision": draft.get("revision"),
             "style_direction": copy.deepcopy(direction),
+            "backfill_source_version_id": str(
+                (draft.get("visual_guide") or {}).get("source_version_id") or ""
+            ),
         }
         version["validation"] = self.validate_draft(project_id, package["id"])
         return version
@@ -832,7 +1131,7 @@ class StyleGuideService:
             return copy.deepcopy(version)
 
     def _version_resource_state(self, project_id: str, version: dict) -> dict:
-        hydrated = copy.deepcopy(version)
+        hydrated = self._with_normalized_variants(version)
         resources = []
         visual = hydrated.get("visual_guide") if isinstance(hydrated.get("visual_guide"), dict) else {}
         visual_run_id = str(visual.get("run_id") or "").strip()
@@ -846,24 +1145,69 @@ class StyleGuideService:
                     if not str(reference.get("visual_run_id") or "").strip()
                     or str(reference.get("visual_run_id") or "").strip() == visual_run_id
                 ]
-        primary_path = str(
-            visual.get("template_relative_path")
-            or hydrated.get("style_board_relative_path")
-            or ""
-        )
-        if primary_path:
+        seen_resources = set()
+
+        def append_reference(reference: dict, *, variant: str, module_type: str):
+            remote_asset_id = str(reference.get("remote_asset_id") or "").strip()
+            relative_path = str(reference.get("relative_path") or "").strip()
+            identity = (
+                variant,
+                str(reference.get("id") or ""),
+                relative_path,
+                remote_asset_id,
+            )
+            if identity in seen_resources:
+                return
+            seen_resources.add(identity)
+            available = bool(remote_asset_id)
+            if relative_path:
+                try:
+                    available = self.projects.resolve_project_file(
+                        project_id, relative_path
+                    ).is_file() or available
+                except ProjectError:
+                    available = False
+            reference["availability"] = "available" if available else "missing"
             resources.append(
                 {
-                    "kind": "template",
-                    "module_type": "overview",
-                    "relative_path": primary_path,
-                    "remote_asset_id": "",
+                    "kind": "reference",
+                    "variant": variant,
+                    "module_type": module_type,
+                    "reference_id": str(reference.get("id") or ""),
+                    "relative_path": relative_path,
+                    "remote_asset_id": remote_asset_id,
+                    "available": available,
                 }
             )
+
+        for variant, snapshot in hydrated.get("variants", {}).items():
+            local_template = snapshot.get("local_template") or {}
+            template_path = str(local_template.get("relative_path") or "")
+            if template_path:
+                resources.append(
+                    {
+                        "kind": "template",
+                        "variant": variant,
+                        "module_type": "overview",
+                        "relative_path": template_path,
+                        "remote_asset_id": "",
+                    }
+                )
+            anchor = snapshot.get("anchor")
+            if isinstance(anchor, dict):
+                append_reference(anchor, variant=variant, module_type="core")
+            for module_type, reference in (snapshot.get("modules") or {}).items():
+                if isinstance(reference, dict):
+                    append_reference(
+                        reference, variant=variant, module_type=module_type
+                    )
+
         sections = [("core", hydrated.get("core") or {})]
         sections.extend((key, value) for key, value in (hydrated.get("modules") or {}).items())
         for module_type, section in sections:
             for reference in section.get("references") or []:
+                if str(reference.get("visual_run_id") or "").strip():
+                    continue
                 remote_asset_id = str(reference.get("remote_asset_id") or "").strip()
                 relative_path = str(reference.get("relative_path") or "").strip()
                 available = bool(remote_asset_id)
@@ -878,6 +1222,7 @@ class StyleGuideService:
                 resources.append(
                     {
                         "kind": "reference",
+                        "variant": "",
                         "module_type": module_type,
                         "reference_id": str(reference.get("id") or ""),
                         "relative_path": relative_path,
@@ -898,6 +1243,15 @@ class StyleGuideService:
                 )
             except ProjectError:
                 resource["available"] = False
+        resources.sort(
+            key=lambda item: (
+                0 if not str(item.get("variant") or "") else 1,
+                {"compact": 0, "detailed": 1}.get(
+                    str(item.get("variant") or ""), 2
+                ),
+                str(item.get("module_type") or ""),
+            )
+        )
         missing = [item for item in resources if not item.get("available")]
         hydrated["resources"] = resources
         hydrated["resource_count"] = len(resources)
@@ -1095,18 +1449,26 @@ class StyleGuideService:
             for reference in compiled.get("references") or []:
                 relative_path = str(reference.get("relative_path") or "").strip()
                 remote_asset_id = str(reference.get("remote_asset_id") or "").strip()
-                if remote_asset_id:
+                if relative_path:
+                    self.projects.resolve_project_file(project_id, relative_path)
+                if relative_path or remote_asset_id:
                     reference_inputs.append(
                         {
                             "relative_path": relative_path,
                             "remote_asset_id": remote_asset_id,
                             "content_sha256": str(reference.get("content_sha256") or ""),
                             "source_record_id": str(reference.get("source_record_id") or ""),
+                            "reference_role": str(
+                                reference.get("reference_role") or "style"
+                            ),
+                            "template_variant": str(
+                                reference.get("template_variant") or ""
+                            ),
+                            "template_module_type": str(
+                                reference.get("template_module_type") or ""
+                            ),
                         }
                     )
-                elif relative_path:
-                    self.projects.resolve_project_file(project_id, relative_path)
-                    reference_inputs.append(relative_path)
             snapshot = {
                 "style_guide_package_id": package_id,
                 "style_guide_version_id": version_id,
@@ -1120,10 +1482,26 @@ class StyleGuideService:
                 "style_guide_prompt_snapshot": final_prompt,
                 "style_guide_negative_prompt_snapshot": final_negative_prompt,
                 "style_guide_overrides": copy.deepcopy(overrides),
+                "style_guide_template_variant": str(
+                    compiled.get("template_variant") or ""
+                ),
+                "style_guide_template_module_type": str(
+                    compiled.get("template_module_type") or ""
+                ),
+                "style_guide_reference_roles": [
+                    {
+                        "reference_id": item.get("id"),
+                        "role": item.get("reference_role"),
+                        "variant": item.get("template_variant"),
+                        "module_type": item.get("template_module_type"),
+                    }
+                    for item in compiled.get("references") or []
+                ],
             }
             return {
                 "final_prompt": final_prompt,
                 "final_negative_prompt": final_negative_prompt,
+                "reference_inputs": reference_inputs,
                 "reference_paths": reference_inputs,
                 "warnings": copy.deepcopy(compiled.get("warnings") or []),
                 "blocking_warnings": copy.deepcopy(

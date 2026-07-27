@@ -68,6 +68,25 @@
 
 工作流状态为 `planned`、`running`、`succeeded`、`failed`、`canceled`。创建请求可带 `request`、`actor`、`steps` 和 `idempotency_key`；更新可带 `status`、`steps`、`outputs`、`error`、`retry_count`。
 
+## Agent 编排
+
+`GET /api/v1/agent/manifest` 返回机器可读协议。Agent 运行与可复用配方使用以下接口：
+
+| 方法 | 路径 |
+|---|---|
+| GET/POST | `/api/v1/projects/{projectId}/workflow-recipes` |
+| GET/PATCH | `/api/v1/projects/{projectId}/workflow-recipes/{recipeId}` |
+| GET/POST | `/api/v1/projects/{projectId}/agent-runs` |
+| GET | `/api/v1/projects/{projectId}/agent-runs/{runId}` |
+| POST | `/api/v1/projects/{projectId}/agent-runs/{runId}/actions/{actionId}/result` |
+| POST | `/api/v1/projects/{projectId}/agent-runs/{runId}/actions/{actionId}/artifacts` |
+| POST | `/api/v1/projects/{projectId}/agent-runs/{runId}/actions/{actionId}/retry` |
+| POST | `/api/v1/projects/{projectId}/agent-runs/{runId}/approve` |
+| POST | `/api/v1/projects/{projectId}/agent-runs/{runId}/cancel` |
+| POST | `/api/v1/projects/{projectId}/agent-runs/{runId}/resume` |
+
+Agent 必须显式声明是否具备原生生图能力。原生图片通过受控 data URL 回传；没有原生能力时，服务端使用已配置 MCP，并受报价和预算策略约束。完整动作、能力、引用、恢复和 CLI 契约见 `docs/AGENT_API.zh-CN.md`。
+
 ## 本地资料与生成服务
 
 `GET/POST /api/local-profile` 管理游客名称和头像。`POST/DELETE /api/v1/generation/provider-token` 设置或清除 Token，`POST /api/v1/generation/provider-test` 测试连接。任何读取接口都不会返回完整 Token。

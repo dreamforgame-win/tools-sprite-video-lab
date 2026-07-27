@@ -76,3 +76,10 @@ test("gallery and prompt panel have desktop and mobile layouts", () => {
   assert.match(mobile, /image-lightbox-prompt-panel/);
   assert.match(mobile, /bottom:/);
 });
+
+test("single-image lightbox keeps the frame in the center grid column", () => {
+  assert.match(
+    css,
+    /\.image-lightbox-stage\s*>\s*\.image-lightbox-frame\s*\{[^}]*grid-column:\s*2;/s,
+  );
+});

@@ -99,6 +99,154 @@ test("generation reference paths ignore malformed structured entries", () => {
   assert.deepEqual(references, ["production/images/valid.png"]);
 });
 
+test("reference optimization predicts one input for two or more images", () => {
+  assert.equal(generationUtils.effectiveReferenceCount?.(0, true), 0);
+  assert.equal(generationUtils.effectiveReferenceCount?.(1, true), 1);
+  assert.equal(generationUtils.effectiveReferenceCount?.(8, true), 1);
+  assert.equal(generationUtils.effectiveReferenceCount?.(8, false), 8);
+});
+
+test("effective count combines only references with the same responsibility", () => {
+  assert.equal(generationUtils.effectiveReferenceCountByRole?.({ content: 2, style: 1 }, true), 2);
+  assert.equal(generationUtils.effectiveReferenceCountByRole?.({ content: 3, style: 1, identity: 1 }, true), 3);
+  assert.equal(generationUtils.effectiveReferenceCountByRole?.({ content: 2, style: 1 }, false), 3);
+});
+
+test("reference optimization explains idle combined and disabled states", () => {
+  assert.equal(
+    generationUtils.generationOptimizationText?.(1, 1, true),
+    "当前无需合并",
+  );
+  assert.equal(
+    generationUtils.generationOptimizationText?.(8, 1, true),
+    "将 8 张参考图合并为 1 张实际输入",
+  );
+  assert.equal(
+    generationUtils.generationOptimizationText?.(8, 8, false),
+    "将按 8 张参考图分别提交",
+  );
+});
+
+test("batch CNY quote uses the shared requested formula", () => {
+  const view = generationUtils.formatGenerationCostEstimate?.({
+    currency: "CNY",
+    exact: true,
+    reference: {
+      unit_price: 0.1,
+      free_quantity: 0,
+      billable_count: 1,
+      subtotal: 0.1,
+    },
+    generation: { unit_price: 0.395, subtotal: 0.395 },
+    per_task_total: 0.495,
+    task_count: 4,
+    total: 1.98,
+    savings: 2.8,
+  });
+
+  assert.equal(
+    view.formula,
+    "（参考图 ¥0.10 × 1 + 生成 ¥0.395）× 4 张 = 预计 ¥1.98",
+  );
+  assert.equal(view.detail, "预计节省 ¥2.80");
+  assert.equal(view.tone, "exact");
+});
+
+test("role-aware quote can distinguish content references and style templates", () => {
+  const view = generationUtils.formatGenerationCostEstimate?.({
+    currency: "CNY",
+    exact: true,
+    reference: {
+      unit_price: 0.1,
+      free_quantity: 0,
+      billable_count: 2,
+      subtotal: 0.2,
+    },
+    generation: { unit_price: 0.045, subtotal: 0.045 },
+    task_count: 1,
+    total: 0.245,
+  }, { referenceLabel: "内容参考 + 风格模板" });
+
+  assert.equal(
+    view.formula,
+    "内容参考 + 风格模板 ¥0.10 × 2 + 生成 ¥0.045 = 预计 ¥0.245",
+  );
+});
+
+test("free reference pricing and fixed output pricing remain readable", () => {
+  const free = generationUtils.formatGenerationCostEstimate?.({
+    currency: "CNY",
+    exact: true,
+    reference: {
+      unit_price: 0.02,
+      free_quantity: 1,
+      billable_count: 0,
+      subtotal: 0,
+    },
+    generation: { unit_price: 0.3, subtotal: 0.3 },
+    per_task_total: 0.3,
+    task_count: 1,
+    total: 0.3,
+    savings: 0.06,
+  });
+  assert.equal(
+    free.formula,
+    "参考图首张免费，后续 ¥0.02 × 0 + 生成 ¥0.30 = 预计 ¥0.30",
+  );
+
+  const fixed = generationUtils.formatGenerationCostEstimate?.({
+    currency: "CNY",
+    exact: true,
+    reference: {
+      unit_price: null,
+      free_quantity: 0,
+      billable_count: 0,
+      subtotal: 0,
+    },
+    generation: { unit_price: 0.25, subtotal: 0.25 },
+    per_task_total: 0.25,
+    task_count: 1,
+    total: 0.25,
+    savings: 0,
+  });
+  assert.equal(
+    fixed.formula,
+    "参考图不单独计费 + 生成 ¥0.25 = 预计 ¥0.25",
+  );
+});
+
+test("token fallback and unavailable quote never pretend to be exact zero", () => {
+  const fallback = generationUtils.formatGenerationCostEstimate?.({
+    currency: "USD",
+    exact: false,
+    used_fallback: true,
+    reference: {
+      unit_price: null,
+      billable_count: 0,
+      subtotal: null,
+    },
+    generation: { unit_price: 0.0672, subtotal: 0.0672 },
+    per_task_total: 0.0672,
+    task_count: 1,
+    total: 0.0672,
+    savings: null,
+  });
+  assert.equal(fallback.formula, "供应商回退估价：约 $0.0672");
+  assert.match(fallback.detail, /实际 Token 用量/);
+
+  const unavailable = generationUtils.formatGenerationCostEstimate?.({
+    currency: "USD",
+    exact: false,
+    total: null,
+    unavailable_reason: "缺少可用回退价",
+  });
+  assert.equal(
+    unavailable.formula,
+    "暂无法精确预估：缺少可用回退价",
+  );
+  assert.notEqual(unavailable.formula, "$0.00");
+});
+
 test("dragging a selected image moves the selected image set", () => {
   assert.deepEqual(
     generationUtils.styleDragContentKeys?.(
