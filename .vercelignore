@@ -1,0 +1,6 @@
+# Upload only the static frontend and its deployment configuration.
+*
+!app/
+!app/**
+!vercel.json
+!.vercelignore
