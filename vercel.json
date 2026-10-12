@@ -2,9 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": null,
   "installCommand": "",
-  "buildCommand": "",
-  "outputDirectory": "app",
-  "rewrites": [
-    { "source": "/app/:path*", "destination": "/:path*" }
-  ]
+  "buildCommand": "node scripts/build-static.cjs",
+  "outputDirectory": "dist"
 }

@@ -2,5 +2,7 @@
 *
 !app/
 !app/**
+!scripts/
+!scripts/build-static.cjs
 !vercel.json
 !.vercelignore

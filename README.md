@@ -19,9 +19,9 @@
 仓库提供 `vercel.json` 和 `.vercelignore`，用于仅展示前端界面。Vercel 不运行 Python 后端，也不安装模型或处理工具；项目列表、创建/打开项目、上传、生成、处理和导出等依赖 API 的功能不可用，界面可能显示后端请求失败。这不是完整在线版，也不包含演示项目数据。
 
 - Vercel 项目的 Root Directory 使用仓库根目录，不要设为 `app`。
-- Framework Preset 使用 `Other`；仓库配置禁用安装和构建，Output Directory 为 `app`。
-- `.vercelignore` 仅允许上传 `app/` 和部署配置，避免将 `server.py` 识别为 Python 服务入口。
-- 域名首页打开 `app/index.html`；`/app/…` 请求通过重写访问静态资源，兼容本地版原有路径。`/api/…` 不转发到页面，也没有后端服务。
+- Framework Preset 使用 `Other`；仓库配置禁用安装，执行 `node scripts/build-static.cjs`，Output Directory 为 `dist`。
+- `.vercelignore` 仅允许上传 `app/`、静态构建脚本和部署配置，避免将 `server.py` 识别为 Python 服务入口。
+- 构建脚本将前端复制到 `dist/app/`，并将首页复制到 `dist/index.html`；域名首页和 `/app/index.html` 均可访问，资源保留 `/app/…` 原有路径。`/api/…` 不转发到页面，也没有后端服务。
 - 将配置提交并推送到 Vercel 关联的 Git 分支后触发新部署；也可从仓库根目录执行 `vercel` 创建预览部署。
 
 本地完整版本仍按下文通过 `Start.exe` 或启动脚本运行。
