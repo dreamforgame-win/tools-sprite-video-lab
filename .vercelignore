@@ -4,5 +4,6 @@
 !app/**
 !scripts/
 !scripts/build-static.cjs
+!scripts/demo-art.cjs
 !vercel.json
 !.vercelignore

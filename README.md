@@ -16,7 +16,11 @@
 
 ## Vercel 静态界面展示
 
-仓库提供 `vercel.json` 和 `.vercelignore`，用于仅展示前端界面。Vercel 不运行 Python 后端，也不安装模型或处理工具；项目列表、创建/打开项目、上传、生成、处理和导出等依赖 API 的功能不可用，界面可能显示后端请求失败。这不是完整在线版，也不包含演示项目数据。
+仓库提供 `vercel.json` 和 `.vercelignore`，用于展示前端界面。构建时注入「森屿探险」展示项目，包含 8 项示例素材、2 个风格方向、风格模板、12 帧待机动画、双背景抠图结果和示例视频。可通过页面底部的「预览界面」访问项目总览、风格探索、图片生成、生成历史、图片处理、双背景抠图、视频处理、序列帧提取、资产管理、项目对接、回收站、项目设置和模型管理。
+
+展示版复用真实界面，可切换列表/画布、查看大图、筛选资源和预览处理参数；生成、上传、模型下载及文件写入不执行。尚未实现的视频/音频生成仍显示「待接入」。示例数据与画布改动仅在内存中保留，刷新或「重置展示」恢复初始状态，不写入真实项目。示例视频由浏览器在内存中构建；不支持 MediaRecorder 的浏览器仍可查看序列帧。
+
+`app/index.html` 不引用展示脚本，因此本地 Python 完整版仍使用真实后端。只有 `node scripts/build-static.cjs` 生成的 `dist/` 启用演示；可用任意静态服务器预览该目录。相关检查：`node --test tests/demo-showcase.test.cjs`。
 
 - Vercel 项目的 Root Directory 使用仓库根目录，不要设为 `app`。
 - Framework Preset 使用 `Other`；仓库配置禁用安装，执行 `node scripts/build-static.cjs`，Output Directory 为 `dist`。

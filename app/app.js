@@ -525,7 +525,7 @@ document.addEventListener("DOMContentLoaded", () => {
   initWorkflowNavigation();
   enforceAutomaticAiSettings(false);
   startHotReloadPolling();
-  void initializeProjectWorkspace();
+  void initializeProjectWorkspace().then(() => window.SpriteDemo?.mount());
   window.addEventListener("beforeunload", persistSession);
 });
 
@@ -1545,7 +1545,7 @@ function renderProjectLauncher() {
           <button class="project-launcher-card ${project.is_default ? "default" : ""} ${available ? "" : "unavailable"}" type="button" data-project-enter="${escapeHtml(project.id)}" ${available ? "" : "disabled"}>
             <span class="project-launcher-card-head">
               <span class="project-launcher-card-icon" aria-hidden="true">${project.cover_relative_path ? `<img src="/api/v1/projects/${encodeURIComponent(project.id)}/files/${escapeHtml(project.cover_relative_path)}" alt="">` : project.is_default ? "DF" : "PR"}</span>
-              <span class="project-launcher-card-status ${available ? "ready" : ""}">${available ? "本地可用" : "目录不可用"}</span>
+              <span class="project-launcher-card-status ${available ? "ready" : ""}">${window.SpriteDemo ? "展示项目" : available ? "本地可用" : "目录不可用"}</span>
             </span>
             <span class="project-launcher-card-copy">
               <strong title="${escapeHtml(project.display_name || project.slug)}">${escapeHtml(project.display_name || project.slug)}</strong>
@@ -1608,6 +1608,7 @@ function showProjectLauncher({ clearServerSelection = true } = {}) {
   els.appTitle.textContent = "项目总览";
   document.title = `项目总览 - ${PRODUCT_TITLE}`;
   renderProjectLauncher();
+  window.SpriteDemo?.syncPage('launcher');
   if (clearServerSelection) {
     void apiJson("/api/v1/projects/leave", { method: "POST", body: {} }).catch((error) => {
       setStatus(`返回项目总览失败：${error.message}`, "error");
@@ -1665,7 +1666,7 @@ function syncProjectContext(project) {
     els.projectDashboardPath.title = project.root_path || "";
   }
   if (els.projectDashboardStatus) {
-    els.projectDashboardStatus.textContent = project.is_default ? "Default 项目" : "本地项目";
+    els.projectDashboardStatus.textContent = window.SpriteDemo ? "展示项目" : project.is_default ? "Default 项目" : "本地项目";
   }
   if (els.aiBackgroundSelect) els.aiBackgroundSelect.value = project.default_background || "transparent";
   if (els.aiCountSelect) els.aiCountSelect.value = String(project.default_image_count || 1);
@@ -5697,7 +5698,7 @@ function paintProjectCanvas(host, items) {
         <button class="asset-canvas-icon-button" type="button" data-canvas-action="fit" title="适应全部内容" aria-label="适应全部内容">${workbenchIcon("fit")}</button>
       </div>
     </div>
-    <div class="asset-canvas-status"><span>${(canvas.nodes || []).length} 个节点</span><span>已选 ${state.projectAssets.canvasSelection.size}</span><span>位置与视口已保存到项目文件</span></div>
+    <div class="asset-canvas-status"><span>${(canvas.nodes || []).length} 个节点</span><span>已选 ${state.projectAssets.canvasSelection.size}</span><span>${window.SpriteDemo ? "展示布局仅在当前页面保留，刷新复位" : "位置与视口已保存到项目文件"}</span></div>
   </div>`;
   bindCanvasInteractions(host, items);
 }
@@ -7033,6 +7034,7 @@ function setProcessPreview(preview, scope = activeMatteScope()) {
 function setActiveModule(moduleName, { announce = true } = {}) {
   const nextModule = ["project", "style", "video", "videoProcess", "aiCreation", "image", "library", "integration", "trash", "settings", "resource", "model"].includes(moduleName) ? moduleName : "project";
   state.activeModule = nextModule;
+  window.SpriteDemo?.syncPage(nextModule);
   const isProject = nextModule === "project";
   const isImage = nextModule === "image";
   const isVideoProcess = nextModule === "videoProcess";
@@ -11809,6 +11811,7 @@ function applyFormState(snapshot) {
 }
 
 function persistSession() {
+  if (window.SpriteDemo) return;
   try {
     const snapshot = {
       activeImagePage: state.activeImagePage,
@@ -11827,6 +11830,7 @@ function persistSession() {
 }
 
 function restoreSessionFromStorage() {
+  if (window.SpriteDemo) return;
   let snapshot = null;
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -11862,6 +11866,7 @@ function restoreSessionFromStorage() {
 }
 
 function startHotReloadPolling() {
+  if (window.SpriteDemo) return;
   if (hotReloadTimerId !== null) {
     window.clearTimeout(hotReloadTimerId);
     hotReloadTimerId = null;
@@ -23426,6 +23431,7 @@ function summarizeRuntimeReadiness(runtime) {
 }
 
 async function checkRuntimeReadiness({ promptDownload = true } = {}) {
+  if (window.SpriteDemo) return null;
   try {
     const data = await apiJson(`/api/runtime-info?ts=${Date.now()}`);
     const runtime = data.runtime || {};
@@ -23493,6 +23499,7 @@ async function openPath(path) {
 }
 
 async function apiJson(url, options = {}) {
+  if (window.SpriteDemo) return window.SpriteDemo.request(url, options);
   const fetchOptions = { ...options };
   if (fetchOptions.body && !(fetchOptions.body instanceof FormData)) {
     fetchOptions.headers = {

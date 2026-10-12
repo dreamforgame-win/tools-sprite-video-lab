@@ -1,0 +1,30 @@
+/* Only loaded in static showcase output. Reserve space instead of covering controls. */
+body.demo-mode { --statusbar: 94px; }
+.demo-toolbar { position: fixed; z-index: 80; bottom: 42px; left: 0; right: 0; min-height: 48px; padding: 8px 20px; display: flex; align-items: center; gap: 12px; background: var(--surface); color: var(--ink); border-top: 1px solid var(--line); font-size: 12px; }
+.demo-label { font-weight: 750; white-space: nowrap; }
+#demoNotice { flex: 1; color: var(--muted); }
+.demo-toolbar select, .demo-toolbar button { width: auto; flex: 0 0 auto; min-height: 32px; border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); border-radius: 8px; padding: 4px 10px; font: inherit; }
+.demo-toolbar select { width: 150px; }
+.demo-toolbar button { min-width: 80px; white-space: nowrap; }
+#demoNotice { min-width: 0; }
+body.demo-mode .statusbar { height: 42px; min-height: 42px; }
+body.demo-mode .dual-matte-layout { grid-template-columns: minmax(0, 1fr); }
+body.demo-mode .dual-source-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+body.demo-mode .dual-source-head { flex-wrap: wrap; }
+body.demo-mode .dual-source-preview { min-height: 180px; }
+body.demo-mode .dual-source-head > * { white-space: normal; }
+.demo-toolbar :focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+.demo-toolbar label { white-space: nowrap; }
+@media(max-width: 700px) {
+  body.demo-mode { --statusbar: 140px; --project-sidebar: 0px; --topbar: 88px; }
+  body.demo-mode #projectSidebar, body.demo-mode .project-sidebar-edge-control { display: none !important; }
+  body.demo-mode .topbar { margin: 0; width: 100%; min-height: 88px; height: 88px; grid-template-columns: minmax(0, 1fr) 88px; }
+  body.demo-mode .topbar-access-actions { display: none; }
+  body.demo-mode .brand-block { min-width: 0; }
+  body.demo-mode .brand-block h1 { font-size: 20px; }
+  body.demo-mode .module-view:not([hidden]) { left: 8px; right: 8px; top: 96px; bottom: 140px; width: auto; max-width: none; margin-left: 0; height: auto; min-height: 0; overflow: auto; }
+  body.demo-mode .dual-source-grid { grid-template-columns: minmax(0, 1fr); }
+  .demo-toolbar { flex-wrap: wrap; padding: 8px 12px; gap: 6px 10px; }
+  #demoNotice { flex-basis: calc(100% - 80px); font-size: 11px; }
+  .demo-toolbar select { flex: 1; min-width: 0; }
+}
