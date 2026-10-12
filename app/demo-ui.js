@@ -75,8 +75,33 @@
     const panel = document.createElement('aside');
     panel.className = 'demo-toolbar';
     panel.setAttribute('aria-label', '展示模式导航');
-    panel.innerHTML = `<span class="demo-label">功能展示</span><span id="demoNotice" role="status">示例数据 · 不执行真实处理 · 刷新复位</span><label for="demoPage">预览界面</label><select id="demoPage"><option value="launcher">项目列表</option>${pages.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select><button type="button" id="demoReset">重置展示</button>`;
+    panel.innerHTML = `<strong class="demo-label">仅展示 · 需本地部署</strong><span id="demoNotice" role="status">示例数据 · 不执行真实处理 · 刷新复位</span><label for="demoPage">预览界面</label><select id="demoPage"><option value="launcher">项目列表</option>${pages.map(([key,label])=>`<option value="${key}">${label}</option>`).join('')}</select><button type="button" id="demoAnnouncementButton">公告</button><button type="button" id="demoReset">重置展示</button>`;
     document.body.append(panel);
+    const announcement = document.createElement('dialog');
+    announcement.id = 'demoAnnouncement';
+    announcement.className = 'demo-announcement';
+    announcement.setAttribute('aria-labelledby', 'demoAnnouncementTitle');
+    announcement.setAttribute('aria-describedby', 'demoAnnouncementWarning');
+    announcement.innerHTML = `<header class="demo-announcement-head"><div><p>灵帧工坊 · 功能展示站</p><h2 id="demoAnnouncementTitle">欢迎预览灵帧工坊</h2></div><button type="button" data-close-announcement aria-label="关闭公告">×</button></header>
+      <div class="demo-announcement-body">
+        <p id="demoAnnouncementWarning" class="demo-announcement-warning"><strong>本页面仅用于展示</strong><span>实际功能需要本地部署使用</span></p>
+        <p>这里使用「森屿探险」示例项目展示界面与工作流程。你可以切换页面、浏览素材、查看大图和预览参数；本站不会执行真实生成、上传、处理或文件写入。</p>
+        <h3>本地完整版已有功能</h3>
+        <ul class="demo-feature-list">
+          <li><strong>风格探索与图片生成</strong><span>参考图、风格模板、资产结构树、图片生成及历史管理。</span></li>
+          <li><strong>图片处理</strong><span>主体抠图、双背景抠图、拆图、命名、压缩与导出。</span></li>
+          <li><strong>视频与序列帧</strong><span>视频抽帧、透明帧预览、剪辑、字幕、拼接与压缩。</span></li>
+          <li><strong>资产管理与项目对接</strong><span>素材筛选、确认入库、项目目录映射与交付预检。</span></li>
+          <li><strong>模型与增强处理</strong><span>模型依赖管理、AI 抠图、MAGIC 线稿清理与超分处理。</span></li>
+          <li><strong>项目与自动化</strong><span>文件化项目、回收站、项目设置及 Agent / CLI 工作流。</span></li>
+        </ul>
+        <p class="demo-announcement-note">AI 能力需在本地准备模型或配置生成服务；视频生成、音频生成仍待接入。示例改动刷新后复位。</p>
+      </div>
+      <footer class="demo-announcement-footer"><a href="https://github.com/dreamforgame-win/tools-sprite-video-lab#readme" target="_blank" rel="noopener noreferrer">查看本地部署说明 ↗</a><button class="primary-button" type="button" data-close-announcement autofocus>我知道了，开始预览</button></footer>`;
+    document.body.append(announcement);
+    announcement.querySelectorAll('[data-close-announcement]').forEach(button => button.addEventListener('click', () => announcement.close()));
+    announcement.addEventListener('close', () => document.getElementById('demoAnnouncementButton').focus());
+    document.getElementById('demoAnnouncementButton').addEventListener('click', () => announcement.showModal());
     document.getElementById('demoReset').addEventListener('click', () => location.reload());
     document.getElementById('demoPage').addEventListener('change', async event => {
       const key = event.target.value;
@@ -104,6 +129,7 @@
     seedProcessing();
     showProjectLauncher({ clearServerSelection: false });
     setStatus('展示已就绪：进入森屿探险，或使用「预览界面」切换。', 'success');
+    announcement.showModal();
     void prepareVideo().catch(() => { document.getElementById('demoNotice').textContent = '当前浏览器不支持示例视频；可查看序列帧动画。'; });
   };
 })();
